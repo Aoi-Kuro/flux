@@ -9,11 +9,10 @@
 
 // WARNING! The version has to be bumped in three places: here, in version.json and in quiz-engine.js
 const CHANGELOG = [
-  { version: "8.9.1", note: "Testing." },
-  { version: "8.9.0", note: "Added push notifications for forum @mentions, working even with the site closed." },
+  { version: "8.9.0", note: "Added push notifications." },
   { version: "8.8.3", note: "Added live Custom theme window to manual theme gallery." },
-  { version: "8.8.2", note: "Theme gallery windows in manual are now clickable and highlight the active theme." },
-  { version: "8.8.1", note: "Disabled MathJax accessibility popups (Explorer speech/braille overlay) that were appearing over equations." },
+  { version: "8.8.2", note: "Theme gallery windows in manual are now clickable." },
+  { version: "8.8.1", note: "Disabled MathJax accessibility popups." },
   { version: "8.8.0", note: "Added Appearance section to manual." },
   { version: "8.7.1", note: "Fixed local attempts and Solve-All progress not clearing on device exit." },
   { version: "8.7.0", note: "Added Getting Started screen before nickname setup." },
