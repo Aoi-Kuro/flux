@@ -10,7 +10,7 @@
 //
 // Bump this on any change to the precached list below, or browsers may keep
 // serving a stale cached copy of offline.html/its assets.
-const CACHE_NAME = 'phys162-offline-v4';
+const CACHE_NAME = 'phys162-offline-v5';
 const OFFLINE_URL = 'offline.html';
 const PRECACHE_URLS = [
   OFFLINE_URL,
