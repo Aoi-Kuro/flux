@@ -88,7 +88,7 @@
     width: 100%;
     margin-top: 2.5rem;
   }
-  .offline-art { flex: 1 1 0; min-width: 0; display: flex; justify-content: center; }
+  .offline-art { flex: 1 1 0; min-width: 0; display: flex; align-items: center; justify-content: center; }
   .offline-art img { width: 100%; max-width: 420px; height: auto; display: block; }
 
   .offline-copy { flex: 1 1 0; min-width: 0; }
@@ -147,6 +147,7 @@
 
   @media (max-width: 720px) {
     .offline-wrap { flex-direction: column; gap: 1.5rem; text-align: center; margin-top: 3.5rem; }
+    .offline-art { flex: 0 0 auto; }
     .offline-art img { max-width: 280px; }
     .offline-copy p { max-width: none; }
   }
