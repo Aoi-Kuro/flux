@@ -2282,6 +2282,22 @@
   }
   .field-lines-toggle.off:hover { opacity: 0.85; color: var(--muted); }
 
+  .changelog-github-link {
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: calc(4px * var(--radius-mult));
+    color: var(--accent);
+    cursor: pointer;
+    font-family: var(--mono);
+    font-size: 0.6rem;
+    letter-spacing: 0.06em;
+    line-height: 1;
+    padding: 0.2rem 0.45rem;
+    text-decoration: none;
+    transition: color 0.15s, border-color 0.15s;
+  }
+  .changelog-github-link:hover { border-color: var(--accent); color: var(--text); }
+
   .changelog-close {
     background: none;
     border: none;

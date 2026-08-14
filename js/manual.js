@@ -301,6 +301,121 @@ function renderManualContent() {
   manualLatexDemoInitAll(content);
   manualSplashDemoInitAll(content);
   manualThemeGalleryInitAll(content);
+  manualGithubDemoInitAll(content);
+}
+
+// ── Live GitHub repo card (About the project / Feedback & Contact pages) ──
+// Pulls basic stats for the flux repo straight from the public GitHub REST
+// API. Both manual pages that embed this widget share one fetch through
+// _manualGithubDataPromise, so opening the manual only ever costs a single
+// pair of requests against GitHub's unauthenticated (60/hr) rate limit no
+// matter how many .manual-github-demo elements are on screen.
+const MANUAL_GITHUB_REPO = 'Aoi-Kuro/flux';
+let _manualGithubDataPromise = null;
+
+// Small generic octicon-style glyphs (repo book, star, fork, issue-circle,
+// commit) — plain geometric shapes, not GitHub's copyrighted mark, just
+// enough to read as "GitHub UI" alongside the fixed GitHub color palette.
+const MANUAL_GITHUB_ICONS = {
+  repo:   '<svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M2 2.5A2.5 2.5 0 0 1 4.5 0h8.75a.75.75 0 0 1 .75.75v12.5a.75.75 0 0 1-.75.75h-2.5a.75.75 0 1 1 0-1.5h1.75v-2H4.5a1 1 0 0 0-.1 1.995c.03-.001.062-.001.093 0H12a.75.75 0 0 1 0 1.5H4.5A2.5 2.5 0 0 1 2 11.5v-9Zm10.5-1V9h-8c-.356 0-.694.074-1 .208V2.5a1 1 0 0 1 1-1h8Z"></path></svg>',
+  star:   '<svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.72 4.192a.75.75 0 0 1-1.088.79L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.193L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Z"></path></svg>',
+  fork:   '<svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M5 3.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Zm0 2.122a2.25 2.25 0 1 0-1.5 0v.878A2.25 2.25 0 0 0 5.75 8.5h1.5v2.128a2.251 2.251 0 1 0 1.5 0V8.5h1.5a2.25 2.25 0 0 0 2.25-2.25v-.878a2.25 2.25 0 1 0-1.5 0v.878a.75.75 0 0 1-.75.75h-4.5a.75.75 0 0 1-.75-.75v-.878Zm3.75 7.378a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM12 3.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Z"></path></svg>',
+  issue:  '<svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor"><path d="M8 9.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Z"></path><path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0ZM1.5 8a6.5 6.5 0 1 0 13 0 6.5 6.5 0 0 0-13 0Z"></path></svg>',
+  commit: '<svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor"><path d="M11.93 8.5a4.002 4.002 0 0 1-7.86 0H.75a.75.75 0 0 1 0-1.5h3.32a4.002 4.002 0 0 1 7.86 0h3.32a.75.75 0 0 1 0 1.5Zm-1.43-.75a2.5 2.5 0 1 0-5 0 2.5 2.5 0 0 0 5 0Z"></path></svg>',
+};
+
+function manualGithubFetchRepoData() {
+  if (!_manualGithubDataPromise) {
+    _manualGithubDataPromise = (async () => {
+      const [repoRes, commitRes] = await Promise.all([
+        fetch(`https://api.github.com/repos/${MANUAL_GITHUB_REPO}`),
+        fetch(`https://api.github.com/repos/${MANUAL_GITHUB_REPO}/commits?per_page=1`)
+      ]);
+      if (!repoRes.ok) throw new Error('GitHub repo fetch failed');
+      const repo = await repoRes.json();
+      let commit = null;
+      if (commitRes.ok) {
+        const commits = await commitRes.json();
+        if (Array.isArray(commits) && commits[0]) commit = commits[0];
+      }
+      return { repo, commit };
+    })().catch(err => {
+      _manualGithubDataPromise = null; // let a later demo instance retry
+      throw err;
+    });
+  }
+  return _manualGithubDataPromise;
+}
+
+function manualGithubDemoInitAll(container) {
+  if (!container) return;
+  container.querySelectorAll('.manual-github-demo[data-live]').forEach(demo => {
+    manualGithubDemoRender(demo);
+  });
+}
+
+async function manualGithubDemoRender(demo) {
+  const statsEl  = demo.querySelector('.manual-github-demo-stats');
+  const commitEl = demo.querySelector('.manual-github-demo-commit');
+  if (!statsEl) return;
+
+  try {
+    const { repo, commit } = await manualGithubFetchRepoData();
+
+    statsEl.innerHTML = '';
+    const stats = [
+      ['star',  repo.stargazers_count, repo.stargazers_count === 1 ? 'star' : 'stars', false],
+      ['fork',  repo.forks_count, repo.forks_count === 1 ? 'fork' : 'forks', false],
+      ['issue', repo.open_issues_count, 'open issues', true],
+    ];
+    stats.forEach(([iconKey, val, label, isIssues]) => {
+      const stat = document.createElement('span');
+      stat.className = 'manual-github-demo-stat' + (isIssues ? ' manual-github-demo-stat-issues' : '');
+      const iconSpan = document.createElement('span');
+      iconSpan.className = 'manual-github-demo-stat-icon';
+      iconSpan.innerHTML = MANUAL_GITHUB_ICONS[iconKey];
+      stat.appendChild(iconSpan);
+      stat.append(`${val} ${label}`);
+      statsEl.appendChild(stat);
+    });
+
+    if (commitEl) {
+      commitEl.innerHTML = '';
+      if (commit && commit.commit) {
+        const fullMsg = commit.commit.message || '';
+        const firstLine = fullMsg.split('\n')[0];
+        const msg = firstLine.length > 90 ? firstLine.slice(0, 87) + '…' : firstLine;
+        const rawDate = commit.commit.author && commit.commit.author.date;
+        const dateStr = rawDate
+          ? new Date(rawDate).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+          : '';
+
+        const iconSpan = document.createElement('span');
+        iconSpan.className = 'manual-github-demo-commit-icon';
+        iconSpan.innerHTML = MANUAL_GITHUB_ICONS.commit;
+        commitEl.appendChild(iconSpan);
+
+        const msgSpan = document.createElement('span');
+        msgSpan.className = 'manual-github-demo-commit-msg';
+        msgSpan.textContent = `“${msg}”`;
+        commitEl.appendChild(msgSpan);
+
+        if (dateStr) {
+          const dateSpan = document.createElement('span');
+          dateSpan.className = 'manual-github-demo-commit-date';
+          dateSpan.textContent = `· ${dateStr}`;
+          commitEl.appendChild(dateSpan);
+        }
+      }
+    }
+  } catch (e) {
+    statsEl.innerHTML = '';
+    const err = document.createElement('span');
+    err.className = 'manual-github-demo-error';
+    err.textContent = 'Couldn’t reach GitHub right now — try the link above.';
+    statsEl.appendChild(err);
+    if (commitEl) commitEl.innerHTML = '';
+  }
 }
 
 // ── Splash badge demo (used inline on the "About the project" manual page) ──
