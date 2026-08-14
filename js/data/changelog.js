@@ -9,6 +9,7 @@
 
 // WARNING! The version has to be bumped in three places: here, in version.json and in quiz-engine.js
 const CHANGELOG = [
+  { version: "8.9.1", note: "Added Github repo links in manual and changelog." },
   { version: "8.9.0", note: "Added push notifications." },
   { version: "8.8.3", note: "Added live Custom theme window to manual theme gallery." },
   { version: "8.8.2", note: "Theme gallery windows in manual are now clickable." },

@@ -1788,7 +1788,7 @@ window.addEventListener("DOMContentLoaded", () => {
 
 // ─── Version checker ──────────────────────────────────────────────────────────
 // This page's current version. Bump this string whenever you publish an update.
-const CURRENT_VERSION = '8.9.0';
+const CURRENT_VERSION = '8.9.1';
 
 // How often to poll the manifest (milliseconds). Default: every 5 minutes.
 const VERSION_CHECK_INTERVAL = 5 * 60 * 1000;
