@@ -10,6 +10,11 @@
 //
 // Bump this on any change to the precached list below, or browsers may keep
 // serving a stale cached copy of offline.html/its assets.
+//
+// NOT wired to js/course-config.js's STORAGE_PREFIX: a service worker has
+// no `document`, so it can't read the data-course attribute the way every
+// other file here does. This is a manual swap item at release time —
+// change the 'phys162' prefix by hand alongside the data-course attribute.
 const CACHE_NAME = 'phys162-offline-v5';
 const OFFLINE_URL = 'offline.html';
 const PRECACHE_URLS = [
@@ -17,11 +22,12 @@ const PRECACHE_URLS = [
   'images/offline/light.png',
   'images/offline/dark.png',
   'favicon/favicon.svg',
-  'js/data/offline-laws.json',
+  'course/offline-laws.json',
   // Theme colors/logic are referenced by offline.html, not duplicated —
   // see its own comments. These three need to be cached for that to still
   // work with zero connection.
   'css/style.css',
+  'js/course-config.js',
   'js/banner-manager.js',
   'js/themes.js',
   'vendor/mathjax/mathjax-stix2.js',

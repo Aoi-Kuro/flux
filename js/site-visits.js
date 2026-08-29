@@ -8,12 +8,12 @@
 // opens the forum.
 //
 // SITE_DEVICE_ID_KEY is deliberately the exact same localStorage key forum.js
-// uses for FORUM_DEVICE_ID_KEY ('phys162_forum_device_id') — not a second,
+// uses for FORUM_DEVICE_ID_KEY (STORAGE_PREFIX + '_forum_device_id') — not a second,
 // unrelated id. Reusing it is what lets get_stats_panel.sql's identity-link
 // join actually match a visitor's device to a forum registration made from
 // that same browser. Whichever of this file or forum.js runs first creates
 // it; the other just reads the same value back.
-const SITE_DEVICE_ID_KEY = 'phys162_forum_device_id';
+const SITE_DEVICE_ID_KEY = STORAGE_PREFIX + '_forum_device_id';
 
 function getSiteDeviceId() {
   let id = localStorage.getItem(SITE_DEVICE_ID_KEY);

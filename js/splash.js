@@ -1,7 +1,7 @@
 /* ═══════════════════════════════════════════════════════════════════
    splash.js · Minecraft-style main-menu splash text
    ───────────────────────────────────────────────────────────────────
-   Data lives in js/data/splashes.json as [text, condition, mandatory]
+   Data lives in course/splashes.json as [text, condition, mandatory]
    tuples (mandatory is optional, defaults to 0/false).
 
    condition is "" (always eligible) or a short code checked against
@@ -113,7 +113,7 @@
      any repeat", so with a big pool you'll never notice a repeat, and
      with a small (e.g. filtered/time-of-day) pool it still gracefully
      falls back once the window is bigger than the pool itself. */
-  const SEEN_KEY  = 'phys162_splash_seen';
+  const SEEN_KEY  = STORAGE_PREFIX + '_splash_seen';
   const SEEN_MAX  = 15;
 
   function loadSeen () {
@@ -135,7 +135,7 @@
      Tracked in localStorage (so it survives across sessions, not just
      the tab) keyed to today's date. Once a mandatory splash has fired
      today it's crossed off and normal random picking takes over. */
-  const MANDATORY_KEY = 'phys162_splash_mandatory_shown';
+  const MANDATORY_KEY = STORAGE_PREFIX + '_splash_mandatory_shown';
 
   function todayStr () {
     const d = new Date();
@@ -324,7 +324,7 @@
 
   async function init () {
     try {
-      const res = await fetch('js/data/splashes.json', { cache: 'force-cache' });
+      const res = await fetch('course/splashes.json', { cache: 'force-cache' });
       if (!res.ok) throw new Error('bad response');
       const data = await res.json();
       splashes = (Array.isArray(data) && data.length) ? data : FALLBACK_SPLASHES;

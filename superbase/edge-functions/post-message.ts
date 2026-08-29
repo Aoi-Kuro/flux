@@ -161,12 +161,19 @@ const GEMINI_BOT_DEVICE_ID = "00000000-0000-4000-8000-000000000001";
 // verbatim and skips moderation/insert entirely, the same way a null reply
 // from a failed API call is skipped today.
 const GEMINI_NO_REPLY_SENTINEL = "[[NO_REPLY]]";
+// ⚠ COURSE-SPECIFIC — MANUAL EDIT AT RELEASE. Edge functions deploy
+// straight into a Supabase project's own Deno runtime, so they can't read
+// js/course-config.js or the data-course attribute the way client-side
+// files do — this project's copy of post-message.ts (and its copy alone)
+// is what needs editing when standing up a new course.
+//
 // The live site — used only to fetch a tagged problem's own statement text
-// for context (that text lives in js/data/quizN.js, not in Supabase).
+// for context (that text lives in course/quizzes/quizN.js, not in Supabase).
 const SITE_ORIGIN = "https://phys162.netlify.app";
 
 // Edit this any time to change how Gemini behaves/answers in the forum —
-// nothing else about the pipeline needs to change alongside it.
+// nothing else about the pipeline needs to change alongside it. Also
+// course-specific, same manual-edit note as SITE_ORIGIN above.
 const GEMINI_SYSTEM_INSTRUCTIONS = `
 You are "Gemini", a helpful participant in a student forum for PHYS162
 (electromagnetism & optics physics) at Nazarbayev University.
@@ -363,7 +370,7 @@ async function fetchProblemText(problemKey: string | null): Promise<string | nul
   if (!parsed) return null;
 
   try {
-    const res = await fetch(`${SITE_ORIGIN}/js/data/quiz${parsed.quizNum}.js`);
+    const res = await fetch(`${SITE_ORIGIN}/course/quizzes/quiz${parsed.quizNum}.js`);
     if (!res.ok) return null;
     const src = await res.text();
 

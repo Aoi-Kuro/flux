@@ -279,7 +279,7 @@ document.addEventListener('visibilitychange', () => {
 // of the cloud sync above, never a replacement for it: a different device
 // still needs the cloud round trip, and this channel only ever talks to
 // other contexts of this same browser.
-const _saChannel = (typeof BroadcastChannel !== 'undefined') ? new BroadcastChannel('phys162-solve-all-sync') : null;
+const _saChannel = (typeof BroadcastChannel !== 'undefined') ? new BroadcastChannel(STORAGE_PREFIX + '-solve-all-sync') : null;
 
 // Fire-and-forget: a message for a session this tab doesn't currently have
 // open is simply ignored by the handler below (nothing to show yet — it'll

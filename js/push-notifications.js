@@ -8,11 +8,8 @@
    permission/subscribe UI and reacting to a notification once tapped.
    ─────────────────────────────────────────────────────────────────── */
 
-// Public half of the VAPID keypair post-message.ts signs pushes with (see
-// that file's own comment). Public by design — safe to ship client-side,
-// it's what identifies "a push claiming to be from this app" the same way
-// a public key identifies a signature, not what lets anyone send one.
-const PUSH_VAPID_PUBLIC_KEY = 'BHEaaW9g9lqgGVa8cpwWaXq8Sy6vSdxYSJbhRpshv1G5WRExKk0NHqpU3oRPF8vetfrGzjmlV9T1u_xl18LszGY';
+// PUSH_VAPID_PUBLIC_KEY now comes from js/course-config.js (course-specific —
+// each Supabase project has its own VAPID keypair, see that file's comment).
 
 function pushUrlBase64ToUint8Array(base64String) {
   const padding = '='.repeat((4 - (base64String.length % 4)) % 4);

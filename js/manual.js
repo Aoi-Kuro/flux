@@ -10,8 +10,8 @@
 // LaTeX, typeset with the same renderMathIn() helper (js/math-render.js)
 // the forum and quiz screens already use — nothing manual-specific there.
 //
-// Section/subsection data itself lives in js/data/manual.json (same
-// fetch-based pattern splash.js uses for js/data/splashes.json) rather than
+// Section/subsection data itself lives in course/manual.json (same
+// fetch-based pattern splash.js uses for course/splashes.json) rather than
 // inline here, so the actual copy can be edited without touching any code.
 // It's currently filled with lorem ipsum as placeholders; swap the `html`
 // fields in that file for real copy whenever it's ready — this module
@@ -25,7 +25,7 @@ let MANUAL_SECTIONS = null;
 // genuinely first-ever-fast click.
 const manualDataReady = loadManualData();
 
-// Shown if js/data/manual.json can't be fetched — most commonly because the
+// Shown if course/manual.json can't be fetched — most commonly because the
 // page is opened as a local file:// path rather than served over http(s),
 // which blocks fetch(), same caveat as splash.js's FALLBACK_SPLASHES.
 const MANUAL_FALLBACK_SECTIONS = [{
@@ -48,7 +48,7 @@ async function loadManualData() {
     // to notice the file changed. 'no-cache' still lets the browser reuse
     // the cached body on a fast 304 Not Modified when nothing changed, but
     // it always asks the server first instead of trusting a stale cache.
-    const res = await fetch('js/data/manual.json', { cache: 'no-cache' });
+    const res = await fetch('course/manual.json', { cache: 'no-cache' });
     if (!res.ok) throw new Error('bad response');
     const data = await res.json();
     MANUAL_SECTIONS = (Array.isArray(data) && data.length) ? data : MANUAL_FALLBACK_SECTIONS;

@@ -32,7 +32,7 @@
      correct theme's CSS variables when we read colors below.          */
   function isLight () {
     let light = false;
-    try { light = localStorage.getItem('phys162-theme') === 'light'; }
+    try { light = localStorage.getItem(STORAGE_PREFIX + '-theme') === 'light'; }
     catch (e) { light = false; }
     if (light) document.body.classList.add('light');
     return light;

@@ -221,7 +221,7 @@ function problemPassesFilter(p, quizIdx) {
 function resetFilterPreferences() {
   if (!confirm('Reset all filter preferences? This will restore every quiz\'s topic and number filters to default and cannot be undone.')) return;
   Object.keys(localStorage).forEach(k => {
-    if (k.startsWith('phys162_topics_q') || k.startsWith('phys162_filtermode_q') || k.startsWith('phys162_numfilter_q')) {
+    if (k.startsWith(STORAGE_PREFIX + '_topics_q') || k.startsWith(STORAGE_PREFIX + '_filtermode_q') || k.startsWith(STORAGE_PREFIX + '_numfilter_q')) {
       localStorage.removeItem(k);
     }
   });
@@ -231,7 +231,7 @@ function resetFilterPreferences() {
 function loadTopicsForQuiz(quizIdx) {
   const problems = QUIZZES[quizIdx].problems;
   const allTopics = [...new Set(problems.map(p => p.topic))].sort();
-  const key = 'phys162_topics_q' + (quizIdx + 1);
+  const key = STORAGE_PREFIX + '_topics_q' + (quizIdx + 1);
   let saved;
   try { saved = JSON.parse(localStorage.getItem(key)); } catch(e) {}
   let sel = Array.isArray(saved) ? saved.filter(t => allTopics.includes(t)) : [];
@@ -243,9 +243,9 @@ function buildQuizTopicBlock(container, quizIdx, label) {
   const { allTopics, sel } = loadTopicsForQuiz(quizIdx);
   cumulativeTopics[quizIdx] = new Set(sel);
 
-  const topicKey = 'phys162_topics_q'     + (quizIdx + 1);
-  const modeKey  = 'phys162_filtermode_q' + (quizIdx + 1);
-  const numKey   = 'phys162_numfilter_q'  + (quizIdx + 1);
+  const topicKey = STORAGE_PREFIX + '_topics_q'     + (quizIdx + 1);
+  const modeKey  = STORAGE_PREFIX + '_filtermode_q' + (quizIdx + 1);
+  const numKey   = STORAGE_PREFIX + '_numfilter_q'  + (quizIdx + 1);
 
   const mode = localStorage.getItem(modeKey) === 'number' ? 'number' : 'topic';
   let numMeta;
@@ -570,7 +570,7 @@ function mathCacheKeyFor(p) {
 function saStorageKey() {
   // Unique key per quiz + cumulative setting
   const cum = selectedCumulativeMode === 'cumulative' ? 'c' : 's';
-  return `phys162_sa_q${selectedQuizNum}_${cum}`;
+  return `${STORAGE_PREFIX}_sa_q${selectedQuizNum}_${cum}`;
 }
 
 function saveSolveAllProgress() {
@@ -586,7 +586,7 @@ function saveSolveAllProgress() {
 // device next.
 function clearLocalSolveAllProgress() {
   Object.keys(localStorage).forEach(k => {
-    if (k.startsWith('phys162_sa_q')) localStorage.removeItem(k);
+    if (k.startsWith(STORAGE_PREFIX + '_sa_q')) localStorage.removeItem(k);
   });
 }
 
@@ -1526,14 +1526,14 @@ function toggleTheme() {
   if (window.themeFadeTick) themeFadeTick();
   const isLight = document.body.classList.toggle('light');
   document.getElementById('themeTrack').classList.toggle('on', isLight);
-  localStorage.setItem('phys162-theme', isLight ? 'light' : 'dark');
+  localStorage.setItem(STORAGE_PREFIX + '-theme', isLight ? 'light' : 'dark');
   if (window.__applyCustomOnModeChange) window.__applyCustomOnModeChange();
   if (window.__onModeChanged) window.__onModeChanged();
 }
 
 // Restore saved preference
 (function () {
-  if (localStorage.getItem('phys162-theme') === 'light') {
+  if (localStorage.getItem(STORAGE_PREFIX + '-theme') === 'light') {
     document.body.classList.add('light');
     document.getElementById('themeTrack').classList.add('on');
   }
@@ -1829,7 +1829,7 @@ function dismissUpdate() {
 
 // ─── Bug report nudge banner ("Report on Telegram") ───────────────────────────
 // Shows once a day, after ~10 minutes of active use — not on a repeating timer.
-const BUG_NUDGE_KEY = 'phys162-bug-nudge-shown';
+const BUG_NUDGE_KEY = STORAGE_PREFIX + '-bug-nudge-shown';
 const BUG_NUDGE_INTERVAL = 24 * 60 * 60 * 1000; // at most once a day
 const BUG_NUDGE_DELAY = 10 * 60 * 1000;         // after 10 min of usage
 

@@ -6,9 +6,9 @@
    and the one-time "try another theme" nudge banner.
    ─────────────────────────────────────────────────────────────────── */
 
-const THEME_KEY  = 'phys162-color-theme';
-const CUSTOM_KEY = 'phys162-custom-theme';
-const NUDGE_KEY  = 'phys162-theme-nudge-shown';
+const THEME_KEY  = STORAGE_PREFIX + '-color-theme';
+const CUSTOM_KEY = STORAGE_PREFIX + '-custom-theme';
+const NUDGE_KEY  = STORAGE_PREFIX + '-theme-nudge-shown';
 const CUSTOM_VARS = ['--bg','--surface','--border','--text','--muted','--accent','--accent-dim','--accent2','--accent2-rgb','--accent-rgb','--svg-blue','--svg-red','--radius-mult','--sans','--mono'];
 
 // Curated font pairings offered in the custom-theme builder. Each pairs a

@@ -1,6 +1,14 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
+<head data-course="phys162">
+<!-- ── COURSE HEADER BLOCK — everything down to the closing marker below is
+     the "copy-paste when releasing a different course" block. Values for
+     every course (incl. this one) are duplicated in course/course.json —
+     when releasing PHYS161, take that file's "phys161" block and paste its
+     values in here, AND change the data-course attribute on <head> above
+     (that attribute is what js/course-config.js reads to pick Supabase
+     keys + the localStorage prefix — course.json itself is never loaded
+     by the site, it's reference only). ───────────────────────────────── -->
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>PHYS162 Practice Quiz</title>
@@ -9,13 +17,16 @@
 <meta property="og:type"        content="website" />
 <meta property="og:title"       content="PHYS162 Practice Quiz" />
 <meta property="og:description" content="Interactive physics practice quiz — electric fields, Gauss's law, circuits & more. Instant feedback with scoring." />
-<meta property="og:image"       content="preview.png" />
+<meta property="og:image"       content="course/preview.png" />
 <meta property="og:url"         content="https://your-domain.com/PHYS162_Practice_Quiz.html" />
 <meta name="twitter:card"       content="summary_large_image" />
 <meta name="twitter:title"      content="PHYS162 Practice Quiz" />
 <meta name="twitter:description" content="Interactive physics practice quiz for PHYS 162 course at Nazarbayev University." />
-<meta name="twitter:image"      content="preview.png" />
+<meta name="twitter:image"      content="course/preview.png" />
 <!-- ── Replace the two URLs above with your actual hosting URL ──────────── -->
+<!-- ── END COURSE HEADER BLOCK (title/OG/Twitter part — the 4 landing-eyebrow
+     / eyebrow divs further down in <body> are the same course.json block,
+     just further down the file) ───────────────────────────────────────── -->
 
 <link rel="icon" type="image/png" href="/favicon/favicon-96x96.png?v=1.0.3" sizes="96x96" />
 <link rel="icon" type="image/svg+xml" href="/favicon/favicon.svg?v=1.0.3" />
@@ -91,6 +102,12 @@
 <script defer id="MathJax-script" src="vendor/mathjax/mathjax-stix2.js"></script>
 </head>
 <body>
+
+<!-- ── Course identity — must load before ANY script that reads
+     STORAGE_PREFIX/SUPABASE_URL/SUPABASE_PUBLISHABLE_KEY, which in
+     practice means before banner-manager.js below. See its own header
+     comment for what it does. ── -->
+<script src="js/course-config.js"></script>
 
 <!-- ── Version update notification banner ── -->
 <div id="update-banner" role="status" aria-live="polite">
@@ -1008,16 +1025,16 @@
 
 <!-- ── Problem data: one file per quiz set ── -->
 <!-- Load data files first so QUIZZES registry can reference them -->
-<script src="js/data/quiz1.js"></script>
-<script src="js/data/quiz2.js"></script>
-<script src="js/data/quiz3.js"></script>
-<script src="js/data/quiz4.js"></script>
+<script src="course/quizzes/quiz1.js"></script>
+<script src="course/quizzes/quiz2.js"></script>
+<script src="course/quizzes/quiz3.js"></script>
+<script src="course/quizzes/quiz4.js"></script>
 
 <!-- ── Changelog data ── -->
 <script src="js/data/changelog.js"></script>
 
 <!-- ── Quiz registry: maps quiz slots to problem arrays ── -->
-<script src="js/quizzes.js"></script>
+<script src="course/quizzes/quizzes.js"></script>
 
 <!-- ── Stats module (must load before quiz-engine) ── -->
 <script src="js/stats.js"></script>
@@ -1038,7 +1055,6 @@
 
 <!-- ── Forum (Step 1: read-only feed) ── -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="js/supabase-config.js"></script>
 <script src="js/site-visits.js"></script>
 <script src="js/forum.js"></script>
 

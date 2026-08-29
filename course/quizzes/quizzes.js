@@ -1,6 +1,6 @@
 // ─── Quiz set registry ────────────────────────────────────────────────────────
 // To add a new quiz:
-//   1. Add its problem bank to js/data/quizN.js
+//   1. Add its problem bank to course/quizzes/quizN.js
 //   2. Load that file in index.html (before quizzes.js)
 //   3. Set enabled: true and point problems: to the array
 const QUIZZES = [

@@ -10,7 +10,7 @@
 // localStorage-only attempts from before this existed have no hash, no
 // mode, no answers, and nothing to sync them to; they're left behind as-is
 // rather than ported into the new shape.
-const STATS_KEY = 'phys162_stats_v2';
+const STATS_KEY = STORAGE_PREFIX + '_stats_v2';
 // Quiz series colors are read live from --q1..--q4 (css/stats.css) via
 // quizSeriesColor(n) (see js/theme-colors.js) — called fresh each time
 // rather than cached, so charts follow the active color theme even if

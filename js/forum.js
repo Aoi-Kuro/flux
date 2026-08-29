@@ -12,7 +12,7 @@ const FORUM_PAGE_SIZE       = 25;
 // during solve-all/Random 6, so they need to visibly tick over together
 // rather than one looking stuck.
 const FORUM_POLL_INTERVAL_MS = 5000;
-const FORUM_LAST_SEEN_KEY   = 'phys162_forum_last_seen_id';
+const FORUM_LAST_SEEN_KEY   = STORAGE_PREFIX + '_forum_last_seen_id';
 
 // How often to check for brand-new messages while the forum screen itself is
 // open and being read. Separate from FORUM_POLL_INTERVAL_MS above, which is
@@ -169,10 +169,10 @@ function forumCacheKey() {
 // The scope selector always resets to "Global" every time the forum screen is
 // opened (per design decision — a previously-picked quiz/problem scope should
 // never silently carry over to the next visit).
-const FORUM_DEVICE_ID_KEY = 'phys162_forum_device_id';
-const FORUM_NAME_KEY      = 'phys162_forum_display_name';
-const FORUM_NICKNAME_KEY  = 'phys162_forum_nickname'; // set only once a nickname is claimed
-const FORUM_PIN_KEY       = 'phys162_forum_pin';       // the 5-digit PIN for that nickname
+const FORUM_DEVICE_ID_KEY = STORAGE_PREFIX + '_forum_device_id';
+const FORUM_NAME_KEY      = STORAGE_PREFIX + '_forum_display_name';
+const FORUM_NICKNAME_KEY  = STORAGE_PREFIX + '_forum_nickname'; // set only once a nickname is claimed
+const FORUM_PIN_KEY       = STORAGE_PREFIX + '_forum_pin';       // the 5-digit PIN for that nickname
 const FORUM_MAX_NAME_LEN  = 40;
 const FORUM_MAX_BODY_LEN  = 1000;
 
@@ -453,7 +453,7 @@ function renderLandingIdentity(nickname) {
 }
 
 // ── Composer: scope selectors ────────────────────────────────────────────────
-// Quiz options are built from QUIZZES (js/quizzes.js) so a new quiz added
+// Quiz options are built from QUIZZES (course/quizzes/quizzes.js) so a new quiz added
 // there shows up here automatically without touching this file. selectId
 // defaults to the composer's own select but the edit-message modal below
 // reuses this same function for its own (separate) quiz select.
@@ -2045,7 +2045,7 @@ async function loadForumMentionProfile(name, bodyEl, avatarEl) {
 // avatar_svg" (unclaimed, or claimed before avatars existed) — that's a
 // real "no avatar" state, not a connectivity problem, and showing a stale
 // cached image there would be actively misleading rather than helpful.
-const FORUM_AVATAR_CACHE_KEY = 'phys162_forum_avatar_cache';
+const FORUM_AVATAR_CACHE_KEY = STORAGE_PREFIX + '_forum_avatar_cache';
 const FORUM_AVATAR_CACHE_MAX_ENTRIES = 50; // small cap so a long session browsing many profiles can't grow this unbounded
 
 function _loadAvatarCache() {
@@ -2923,8 +2923,8 @@ function exitForumSearch(opts = {}) {
 // nothing server-side marks it as special, so if this ever needs to point at
 // a different message instead, updating this one id is the whole change.
 const FORUM_PINNED_MESSAGE_ID  = 336;
-const FORUM_PIN_DISMISSED_KEY  = 'phys162_forum_pin_dismissed';
-const FORUM_PIN_FIRST_SEEN_KEY = 'phys162_forum_pin_first_seen';
+const FORUM_PIN_DISMISSED_KEY  = STORAGE_PREFIX + '_forum_pin_dismissed';
+const FORUM_PIN_FIRST_SEEN_KEY = STORAGE_PREFIX + '_forum_pin_first_seen';
 const FORUM_PIN_HOURS_MS       = 24 * 60 * 60 * 1000;
 
 // Fetched once per page load and cached here — the banner gets re-rendered

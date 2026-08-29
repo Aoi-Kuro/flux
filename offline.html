@@ -1,6 +1,8 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
+<head data-course="phys162">
+<!-- data-course must match the one on index.html's <head> — see
+     course/course.json + js/course-config.js for what this drives. -->
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>You're offline — PHYS162 Practice Quiz</title>
@@ -155,14 +157,18 @@
 </head>
 <body>
 
+<!-- Must load before the inline script right below, which needs
+     STORAGE_PREFIX immediately (before paint). -->
+<script src="js/course-config.js"></script>
+
 <script>
   // Applied immediately (before paint) to avoid a flash of the wrong
   // mode — same key/values the main site itself reads/writes (see
-  // js/quiz-engine.js / js/easter.js): 'phys162-theme' = 'light'/'dark'.
+  // js/quiz-engine.js / js/easter.js): '<prefix>-theme' = 'light'/'dark'.
   // Which PRESET (data-theme attribute) is active is handled a few lines
   // down by the real js/themes.js once it loads, same as index.html.
   try {
-    if (localStorage.getItem('phys162-theme') === 'light') document.body.classList.add('light');
+    if (localStorage.getItem(STORAGE_PREFIX + '-theme') === 'light') document.body.classList.add('light');
   } catch (e) { /* localStorage can throw in some locked-down contexts — falls back to dark */ }
 </script>
 
@@ -250,7 +256,7 @@
 
   function offlineToggleDayNight() {
     var isLight = document.body.classList.toggle('light');
-    localStorage.setItem('phys162-theme', isLight ? 'light' : 'dark');
+    localStorage.setItem(STORAGE_PREFIX + '-theme', isLight ? 'light' : 'dark');
     if (typeof window.__applyCustomOnModeChange === 'function') window.__applyCustomOnModeChange();
     document.getElementById('offlineArt').src = isLight ? 'images/offline/light.png' : 'images/offline/dark.png';
     offlineUpdateDayNightBtn();
@@ -263,7 +269,7 @@
   offlineRenderSwatches();
 
   // ── Law of the moment ──
-  // js/data/offline-laws.json is precached by sw.js alongside this page,
+  // course/offline-laws.json is precached by sw.js alongside this page,
   // so this fetch resolves from Cache Storage with no network at all —
   // one random law shown per page load.
   function renderOfflineMath() {
@@ -276,7 +282,7 @@
       });
     }
   }
-  fetch('js/data/offline-laws.json')
+  fetch('course/offline-laws.json')
     .then(function (r) { return r.json(); })
     .then(function (laws) {
       var law = laws[Math.floor(Math.random() * laws.length)];

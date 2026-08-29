@@ -30,6 +30,7 @@ CREATE TABLE public.identities (
   created_at timestamp with time zone NOT NULL DEFAULT now(),
   updated_at timestamp with time zone NOT NULL DEFAULT now(),
   avatar_svg text,
+  total_quiz_attempts_ever bigint NOT NULL DEFAULT 0,
   CONSTRAINT identities_pkey PRIMARY KEY (id)
 );
 CREATE TABLE public.identity_devices (
@@ -76,4 +77,45 @@ CREATE TABLE public.identity_bans (
   updated_at timestamp with time zone NOT NULL DEFAULT now(),
   CONSTRAINT identity_bans_pkey PRIMARY KEY (identity_id),
   CONSTRAINT identity_bans_identity_id_fkey FOREIGN KEY (identity_id) REFERENCES public.identities(id)
+);
+CREATE TABLE public.quiz_attempts (
+  id bigint GENERATED ALWAYS AS IDENTITY NOT NULL,
+  attempt_hash text NOT NULL UNIQUE,
+  identity_id uuid NOT NULL,
+  device_id uuid NOT NULL,
+  quiz_num smallint NOT NULL CHECK (quiz_num >= 1 AND quiz_num <= 4),
+  mode text NOT NULL CHECK (mode = ANY (ARRAY['single'::text, 'cumulative'::text])),
+  duration_seconds integer NOT NULL DEFAULT 0,
+  score numeric NOT NULL,
+  max_score numeric NOT NULL,
+  answers jsonb NOT NULL DEFAULT '[]'::jsonb,
+  attempted_at timestamp with time zone NOT NULL,
+  synced_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT quiz_attempts_pkey PRIMARY KEY (id),
+  CONSTRAINT quiz_attempts_identity_id_fkey FOREIGN KEY (identity_id) REFERENCES public.identities(id)
+);
+CREATE TABLE public.quiz_attempts_counter (
+  id smallint NOT NULL DEFAULT 1 CHECK (id = 1),
+  total_ever bigint NOT NULL DEFAULT 0,
+  CONSTRAINT quiz_attempts_counter_pkey PRIMARY KEY (id)
+);
+CREATE TABLE public.solve_all_progress (
+  identity_id uuid NOT NULL,
+  quiz_num smallint NOT NULL CHECK (quiz_num >= 1 AND quiz_num <= 4),
+  cumulative boolean NOT NULL DEFAULT false,
+  data jsonb,
+  updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT solve_all_progress_pkey PRIMARY KEY (identity_id, quiz_num, cumulative),
+  CONSTRAINT solve_all_progress_identity_id_fkey FOREIGN KEY (identity_id) REFERENCES public.identities(id)
+);
+CREATE TABLE public.push_subscriptions (
+  id bigint GENERATED ALWAYS AS IDENTITY NOT NULL,
+  device_id uuid NOT NULL,
+  identity_id uuid,
+  endpoint text NOT NULL UNIQUE,
+  p256dh text NOT NULL,
+  auth text NOT NULL,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT push_subscriptions_pkey PRIMARY KEY (id),
+  CONSTRAINT push_subscriptions_identity_id_fkey FOREIGN KEY (identity_id) REFERENCES public.identities(id)
 );
