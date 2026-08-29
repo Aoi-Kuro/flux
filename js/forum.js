@@ -2922,7 +2922,11 @@ function exitForumSearch(opts = {}) {
 // It's a perfectly ordinary 'global'-scope row in forum_messages otherwise;
 // nothing server-side marks it as special, so if this ever needs to point at
 // a different message instead, updating this one id is the whole change.
-const FORUM_PINNED_MESSAGE_ID  = 336;
+//
+// FORUM_PINNED_MESSAGE_ID itself now comes from js/course-config.js
+// (COURSES.<course>.pinnedMessageId) — each course's Supabase project has
+// its own forum with its own welcome post at a different row id, so this
+// can no longer be a single constant shared across courses.
 const FORUM_PIN_DISMISSED_KEY  = STORAGE_PREFIX + '_forum_pin_dismissed';
 const FORUM_PIN_FIRST_SEEN_KEY = STORAGE_PREFIX + '_forum_pin_first_seen';
 const FORUM_PIN_HOURS_MS       = 24 * 60 * 60 * 1000;

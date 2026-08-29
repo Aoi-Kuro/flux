@@ -576,9 +576,9 @@ function drawChart() {
     ctx.font = `13px 'IBM Plex Mono', monospace`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText('No attempts yet — complete a Random 6 quiz to track progress', W/2, H/2 - 10);
+    ctx.fillText(`No attempts yet — complete a Random ${QUIZ_SIZE} quiz to track progress`, W/2, H/2 - 10);
     ctx.font = `11px 'IBM Plex Mono', monospace`;
-    ctx.fillText('(only Random 6 mode is recorded)', W/2, H/2 + 12);
+    ctx.fillText(`(only Random ${QUIZ_SIZE} mode is recorded)`, W/2, H/2 + 12);
   }
 }
 

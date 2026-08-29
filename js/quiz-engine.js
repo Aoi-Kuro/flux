@@ -380,13 +380,13 @@ function newQuiz() {
     currPool = currPool.map(p => ({ ...p, _quizNum: selectedQuizNum }));
 
     if (prevPool.length === 0) prevPool = [];
-    const prevPick = pickRandom(prevPool, 3);
-    const currPick = pickRandom(currPool, 3);
-    quiz = pickRandom([...prevPick, ...currPick], 6);
+    const prevPick = pickRandom(prevPool, QUIZ_CUMULATIVE_PREV_COUNT);
+    const currPick = pickRandom(currPool, QUIZ_SIZE - QUIZ_CUMULATIVE_PREV_COUNT);
+    quiz = pickRandom([...prevPick, ...currPick], QUIZ_SIZE);
   } else {
     let pool = ACTIVE_PROBLEMS.filter(p => problemPassesFilter(p, selectedQuizNum - 1));
     if (pool.length === 0) pool = ACTIVE_PROBLEMS;
-    quiz = pickRandom(pool, Math.min(6, pool.length));
+    quiz = pickRandom(pool, Math.min(QUIZ_SIZE, pool.length));
   }
 
   checked = false;
@@ -1783,6 +1783,11 @@ function exitAppOrChoiceToLanding() {
 window.addEventListener("DOMContentLoaded", () => {
   // Render quiz selection buttons from the QUIZZES registry
   renderQuizButtons();
+  // "Random 6" label reflects this course's actual quiz size
+  // (QUIZ_SIZE from course-config.js) instead of a hardcoded "6" —
+  // courses with a different exam size get the label right for free.
+  const modeLabelQuiz = document.getElementById('modeLabelQuiz');
+  if (modeLabelQuiz) modeLabelQuiz.textContent = `🎯 Random ${QUIZ_SIZE}`;
   // Landing screen is shown by default; quiz is initialized when user hits Start
 });
 

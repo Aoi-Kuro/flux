@@ -204,18 +204,22 @@ const COURSES = {
     storagePrefix: 'phys162',
     supabase: { url: '...', publishableKey: '...' },
     pushVapidPublicKey: '...',
+    quizSettings: { size: 6, cumulativePrevCount: 3 },
+    pinnedMessageId: 336,
   },
   phys161: {
     storagePrefix: 'phys161',
-    supabase: { url: '', publishableKey: '' },   // filled in at release
-    pushVapidPublicKey: '',
+    supabase: { url: '...', publishableKey: '...' },
+    pushVapidPublicKey: '...',
+    quizSettings: { size: 6, cumulativePrevCount: 3 },
+    pinnedMessageId: 2,
   },
 };
 ```
 
 It reads `document.head.dataset.course` — set via `<head data-course="phys162">`
 at the very top of both `index.html` and `offline.html`, right inside the
-COURSE HEADER BLOCK — and exposes three globals every other framework file
+COURSE HEADER BLOCK — and exposes six globals every other framework file
 reads instead of hardcoding:
 
 | Global | Used for |
@@ -223,14 +227,23 @@ reads instead of hardcoding:
 | `STORAGE_PREFIX` | Every localStorage key and BroadcastChannel name across the app (`themes.js`, `splash.js`, `stats.js`, `forum.js`, `quiz-engine.js`, etc.) — was hardcoded `'phys162_...'` everywhere before this existed |
 | `SUPABASE_URL` / `SUPABASE_PUBLISHABLE_KEY` | Every Supabase call (forum, stats sync, push) |
 | `PUSH_VAPID_PUBLIC_KEY` | Web Push subscription (`push-notifications.js`) — each Supabase project has its own VAPID keypair |
+| `QUIZ_SIZE` | How many problems a "Random N" draw pulls (`quiz-engine.js`'s `newQuiz()`) — was hardcoded `6` everywhere before this existed. Also drives the "🎯 Random N" landing-page label and the two stats-panel empty-state strings, so those stay correct without separate edits. |
+| `QUIZ_CUMULATIVE_PREV_COUNT` | Of `QUIZ_SIZE`, how many come from the *previous* quiz when cumulative mode is on — was hardcoded `3` (i.e. half of 6). The remainder (`QUIZ_SIZE - QUIZ_CUMULATIVE_PREV_COUNT`) comes from the current quiz. Must be `<= QUIZ_SIZE`; course-config.js logs a console error if a course's entry violates that. |
+| `FORUM_PINNED_MESSAGE_ID` | The `forum_messages` row id shown pinned at the top of the forum (`forum.js`'s `renderForumPinnedBanner`) — was hardcoded `336` everywhere before this existed. Each course's Supabase project has its own forum with its own welcome post at a different row id, so there's no sane cross-course default; course-config.js logs a console error if a course's entry omits it, since the pinned banner just silently stays hidden otherwise. |
+
+A course whose `quizSettings` is missing falls back to phys162's values (6, 3)
+rather than producing NaN-length quizzes — but every course should set its
+own explicitly rather than relying on that fallback. `pinnedMessageId` has no
+such fallback (there's no meaningful "default" pinned message across
+courses) — omitting it just means the banner won't show until it's set.
 
 It's loaded as the very first external `<script>` — before `banner-manager.js`
 — because `themes.js`/`splash.js`/`easter.js` read `STORAGE_PREFIX` immediately
 at load time, not lazily.
 
 **To release a new course:** fill in that course's block in `COURSES`
-(Supabase URL/key, VAPID public key), then flip the `data-course` attribute
-on both HTML files' `<head>`.
+(Supabase URL/key, VAPID public key, quiz size/cumulative-prev-count), then
+flip the `data-course` attribute on both HTML files' `<head>`.
 
 ### What's still framework (shared)
 
@@ -402,7 +415,11 @@ you need to test offline behavior.
    `⚠ COURSE-SPECIFIC — MANUAL EDIT AT RELEASE` in that file.
 5. **Fill in `js/course-config.js`**: add (or fill in) that course's entry in
    `COURSES` — `storagePrefix`, `supabase.url`, `supabase.publishableKey`,
-   `pushVapidPublicKey` (the public half from step 3).
+   `pushVapidPublicKey` (the public half from step 3), `quizSettings`
+   (`size`, `cumulativePrevCount`) if this course's exam structure differs
+   from the default (6 problems per quiz, 3 from the previous quiz in
+   cumulative mode), and `pinnedMessageId` (the row id of this course's own
+   welcome post in its own `forum_messages` table, once you've posted one).
 6. **Replace the contents of `course/`** with the new course's quizzes,
    splashes, manual, offline-laws, preview image, and images.
 7. **Edit the COURSE HEADER BLOCK** in both `index.html` and `offline.html`:

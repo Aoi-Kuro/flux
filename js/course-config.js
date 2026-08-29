@@ -34,6 +34,20 @@ const COURSES = {
     // what lets anyone send one. Each Supabase project gets its own
     // keypair, so this is course-specific too.
     pushVapidPublicKey: 'BHEaaW9g9lqgGVa8cpwWaXq8Sy6vSdxYSJbhRpshv1G5WRExKk0NHqpU3oRPF8vetfrGzjmlV9T1u_xl18LszGY',
+    // How big a "Random N" draw is, and — in cumulative mode — how many
+    // of those N come from the previous quiz vs. the current one. Courses
+    // can differ here (more/fewer problems per exam), so this isn't a
+    // shared constant. cumulativePrevCount must be <= size; the remainder
+    // (size - cumulativePrevCount) is drawn from the current quiz.
+    quizSettings: {
+      size: 6,
+      cumulativePrevCount: 3,
+    },
+    // Row id in forum_messages shown pinned at the top of the forum
+    // screen (see forum.js's renderForumPinnedBanner) — an ordinary
+    // message, nothing server-side marks it special, this id is the only
+    // thing that says "this one is the pinned one".
+    pinnedMessageId: 336,
   },
   phys161: {
     storagePrefix: 'phys161',
@@ -41,15 +55,24 @@ const COURSES = {
       // TODO(phys161 release): stand up the phys161 Supabase project
       // (schema + edge functions from superbase/), then fill these in.
       // Left blank on purpose — see below for what happens otherwise.
-      url: '',
-      publishableKey: '',
+      url: 'https://ntlonovwrpspqncmejdm.supabase.co',
+      publishableKey: 'sb_publishable_cj-dJARetQ3jv_1r3vqtKQ_kndImovt',
     },
     // TODO(phys161 release): generate a fresh VAPID keypair for the
     // phys161 project (web-push generate-vapid-keys or equivalent), put
     // the public half here and the private half in that project's own
     // post-message.ts secrets. Push subscriptions will just fail to
     // register with this blank until then — not fatal.
-    pushVapidPublicKey: '',
+    pushVapidPublicKey: 'BLvjq8A2HzqQC58nNwFGINf7_iw1_K634_lYwJTqEJ5yW3XKcOjMNwbFTNat_KSEE_2S2VpU655evW1oGpXxGKM',
+    // TODO(phys161 release): confirm these match phys161's actual exam
+    // structure — defaulted to phys162's numbers (6 per quiz, 3 of those
+    // from the previous quiz in cumulative mode) since nothing else was
+    // specified yet.
+    quizSettings: {
+      size: 6,
+      cumulativePrevCount: 3,
+    },
+    pinnedMessageId: 2,
   },
 };
 
@@ -72,6 +95,36 @@ const STORAGE_PREFIX = _active.storagePrefix;
 const SUPABASE_URL = _active.supabase.url;
 const SUPABASE_PUBLISHABLE_KEY = _active.supabase.publishableKey;
 const PUSH_VAPID_PUBLIC_KEY = _active.pushVapidPublicKey;
+
+// Read by quiz-engine.js's newQuiz() instead of hardcoding 6/3, so each
+// course can have its own exam size without touching engine code.
+// Falls back to the phys162 defaults (6, 3) if a course's entry omits
+// quizSettings entirely, rather than silently producing NaN-length quizzes.
+const _quizSettings = _active.quizSettings || COURSES.phys162.quizSettings;
+const QUIZ_SIZE = _quizSettings.size;
+const QUIZ_CUMULATIVE_PREV_COUNT = _quizSettings.cumulativePrevCount;
+
+if (QUIZ_CUMULATIVE_PREV_COUNT > QUIZ_SIZE) {
+  console.error(
+    `course-config.js: quizSettings.cumulativePrevCount (${QUIZ_CUMULATIVE_PREV_COUNT}) ` +
+    `exceeds quizSettings.size (${QUIZ_SIZE}) for "${ACTIVE_COURSE}" — ` +
+    `cumulative mode will draw 0 problems from the current quiz. Fix the values in COURSES.${ACTIVE_COURSE}.quizSettings.`
+  );
+}
+
+// Read by forum.js instead of hardcoding one row id, since each course's
+// Supabase project has its own forum_messages table with its own welcome
+// post at a different id. No sane fallback exists here (unlike
+// quizSettings, there's no "default" pinned message across courses), so a
+// course entry that omits this ends up with the banner just not showing —
+// flagged loudly so that's never silent.
+const FORUM_PINNED_MESSAGE_ID = _active.pinnedMessageId;
+if (FORUM_PINNED_MESSAGE_ID == null) {
+  console.error(
+    `course-config.js: no pinnedMessageId set for "${ACTIVE_COURSE}" — ` +
+    `the pinned forum banner will stay hidden until COURSES.${ACTIVE_COURSE}.pinnedMessageId is set.`
+  );
+}
 
 if (!SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY) {
   // Not fatal — forum.js/attempts-sync.js/push-notifications.js all already

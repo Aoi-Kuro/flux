@@ -7,7 +7,7 @@
     "index_html": {
       "title": "PHYS162 Practice Quiz",
       "og:title": "PHYS162 Practice Quiz",
-      "og:description": "Interactive physics practice quiz — electric fields, Gauss's law, circuits & more. Instant feedback with scoring.",
+      "og:description": "Interactive physics practice quiz: electric fields, Gauss's law, circuits & more. Instant feedback with scoring.",
       "og:url": "https://your-domain.com/PHYS162_Practice_Quiz.html",
       "og:image": "course/preview.png",
       "twitter:title": "PHYS162 Practice Quiz",
@@ -29,7 +29,7 @@
     "index_html": {
       "title": "PHYS161 Practice Quiz",
       "og:title": "PHYS161 Practice Quiz",
-      "og:description": "TODO: write a PHYS161-specific description before release.",
+      "og:description": "Interactive physics practice quiz: kinematics, dynamics, thermodynamics & more. Instant feedback with scoring.",
       "og:url": "https://your-domain.com/PHYS161_Practice_Quiz.html",
       "og:image": "course/preview.png",
       "twitter:title": "PHYS161 Practice Quiz",

@@ -697,7 +697,8 @@
       <button class="sf-chip" data-filter="q4" style="--chip-color:var(--q4)" onclick="setForumFilter('q4')">Quiz 4</button>
       <select id="forumFilterProblemSelect" class="forum-filter-subselect" style="display:none;" onchange="onForumFilterProblemChange()"></select>
     </div>
-    <!-- Pinned welcome message (id in FORUM_PINNED_MESSAGE_ID, forum.js) —
+    <!-- Pinned welcome message (id in COURSES.<course>.pinnedMessageId,
+         js/course-config.js) —
          painted here by renderForumPinnedBanner() every time the forum
          opens, from any entry point and any filter, until dismissed (own ✕)
          or 24h after first shown, at which point it's just an ordinary
