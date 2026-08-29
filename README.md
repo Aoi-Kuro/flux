@@ -69,9 +69,11 @@ flux/
 │
 ├── course/                  ★ Everything specific to the currently-deployed
 │   │                          course. See "The multi-course architecture".
-│   ├── course.json          Reference-only doc: HTML header text (titles,
-│   │                        OG/Twitter meta, eyebrow labels) for every
-│   │                        course, for manual copy-paste at release time
+│   ├── course.json          Historical/stale — used to be a manual
+│   │                        copy-paste reference for title/OG/Twitter/
+│   │                        eyebrow text. That's now automated (see
+│   │                        js/course-config.js's `display` field);
+│   │                        editing this file does nothing.
 │   ├── quizzes/
 │   │   ├── quiz1.js .. quiz4.js   Problem banks (one file per quiz set)
 │   │   └── quizzes.js       Registry wiring each quiz's name + enabled
@@ -185,13 +187,19 @@ preview image, and course-specific images. To release a different course,
 this entire folder's *contents* (quizzes, splashes, manual, offline-laws,
 preview image, course images) get replaced with that course's versions.
 
-`course/course.json` is the one file in there that's **not loaded by the
-site at all** — nothing `fetch()`s or `<script>`s it. It exists purely as a
-human-readable reference: it duplicates the exact title/meta/eyebrow text for
-every course, so when you're releasing PHYS161 you can copy its block
-straight into `index.html`/`offline.html` instead of re-deriving the strings
-by hand. `index.html` marks the exact block this maps to with `COURSE HEADER
-BLOCK` / `END COURSE HEADER BLOCK` comments.
+`course/course.json` is **stale/historical** for the eyebrow labels — those
+are pure in-page text with no crawler involved, so `js/course-config.js`'s
+`display.courseCode` now drives them completely automatically; don't bother
+keeping course.json's eyebrow fields in sync.
+
+Title/OG/Twitter text is a different story: `course-config.js` also updates
+those live in-browser, but that update is invisible to link-preview
+crawlers (Telegram, Discord, WhatsApp, Slack, X, Facebook), which fetch raw
+HTML and never run JavaScript. So the static `<title>`/`<meta>` block in
+`index.html`'s `<head>` still needs its 9 lines hand-edited at release time
+to match that course's `display` values — see the `⚠ EDIT THESE 9 LINES BY
+HAND` comment right above that block, and the [Manual-swap
+items](#manual-swap-items-cant-be-centralized) table.
 
 ### `js/course-config.js` — the live switch
 
@@ -206,6 +214,12 @@ const COURSES = {
     pushVapidPublicKey: '...',
     quizSettings: { size: 6, cumulativePrevCount: 3 },
     pinnedMessageId: 336,
+    display: {
+      courseCode: 'PHYS162',
+      ogDescription: '...',
+      twitterDescription: '...',
+      siteUrl: 'https://your-domain.com/PHYS162_Practice_Quiz.html',
+    },
   },
   phys161: {
     storagePrefix: 'phys161',
@@ -213,14 +227,19 @@ const COURSES = {
     pushVapidPublicKey: '...',
     quizSettings: { size: 6, cumulativePrevCount: 3 },
     pinnedMessageId: 2,
+    display: {
+      courseCode: 'PHYS161',
+      ogDescription: '...',
+      twitterDescription: '...',
+      siteUrl: 'https://your-domain.com/PHYS161_Practice_Quiz.html',
+    },
   },
 };
 ```
 
 It reads `document.head.dataset.course` — set via `<head data-course="phys162">`
-at the very top of both `index.html` and `offline.html`, right inside the
-COURSE HEADER BLOCK — and exposes six globals every other framework file
-reads instead of hardcoding:
+at the very top of both `index.html` and `offline.html` — and exposes seven
+globals every other framework file reads instead of hardcoding:
 
 | Global | Used for |
 |---|---|
@@ -230,6 +249,8 @@ reads instead of hardcoding:
 | `QUIZ_SIZE` | How many problems a "Random N" draw pulls (`quiz-engine.js`'s `newQuiz()`) — was hardcoded `6` everywhere before this existed. Also drives the "🎯 Random N" landing-page label and the two stats-panel empty-state strings, so those stay correct without separate edits. |
 | `QUIZ_CUMULATIVE_PREV_COUNT` | Of `QUIZ_SIZE`, how many come from the *previous* quiz when cumulative mode is on — was hardcoded `3` (i.e. half of 6). The remainder (`QUIZ_SIZE - QUIZ_CUMULATIVE_PREV_COUNT`) comes from the current quiz. Must be `<= QUIZ_SIZE`; course-config.js logs a console error if a course's entry violates that. |
 | `FORUM_PINNED_MESSAGE_ID` | The `forum_messages` row id shown pinned at the top of the forum (`forum.js`'s `renderForumPinnedBanner`) — was hardcoded `336` everywhere before this existed. Each course's Supabase project has its own forum with its own welcome post at a different row id, so there's no sane cross-course default; course-config.js logs a console error if a course's entry omits it, since the pinned banner just silently stays hidden otherwise. |
+| `COURSE_CHANGELOG_SCOPE` | Filters `js/data/changelog.js`'s `CHANGELOG` entries in `js/changelog.js`'s `renderChangelog()` — see "Per-course changelog filtering" below. Fails open (shows every entry, unfiltered) if a course's entry omits it, rather than silently hiding everything. |
+| `COURSE_CODE` / `COURSE_TITLE` | Sets `document.title` and the 4 "eyebrow" labels (`PHYS162 · Practice Mode`, etc.) at load — fully automatic, no crawler involved. Also live-updates the `og:title`/`twitter:title`/`og:description`/`twitter:description`/`og:url` meta tags for anyone who loads the page with JS, but that does NOT reach link-preview crawlers (they fetch raw HTML, no JS) — the static block in `index.html`'s `<head>` still needs hand-editing at release, see [Manual-swap items](#manual-swap-items-cant-be-centralized). `og:image`/`twitter:image` are left as plain static tags since the relative path (`course/preview.png`) is the same for every course. |
 
 A course whose `quizSettings` is missing falls back to phys162's values (6, 3)
 rather than producing NaN-length quizzes — but every course should set its
@@ -244,6 +265,42 @@ at load time, not lazily.
 **To release a new course:** fill in that course's block in `COURSES`
 (Supabase URL/key, VAPID public key, quiz size/cumulative-prev-count), then
 flip the `data-course` attribute on both HTML files' `<head>`.
+
+### `js/data/changelog.js` — per-course changelog filtering
+
+Every entry has a `scope`: `0` means "show for every course". Any other
+value must match a course's own `changelogScope` id
+(`js/course-config.js` — currently `phys162: 2`, `phys161: 1`) to be shown
+at all for that course. `js/changelog.js`'s `renderChangelog()` does the
+filtering at render time — the underlying array is never modified, so
+switching `data-course` is enough to see a different course's history with
+no rebuild step.
+
+When one or more consecutive entries get filtered out between two entries
+that ARE visible, a centered "⋯ updates for another course ⋯" row
+(`.changelog-gap` in `css/style.css`) is shown in their place, so the gap
+reads as "something was skipped here" rather than looking like nothing
+happened between two version numbers. It's never shown at the very top or
+bottom of the list — only strictly between two visible entries.
+
+Version-number indentation (`computeLevels()`) is still computed from the
+FULL unfiltered array, not the per-course visible subset — so a course
+that's missing a given major/minor version (because those entries were
+scoped to the other course) doesn't get its indentation levels
+recalculated as if that gap didn't exist. The version badge on the
+changelog button also reads the latest *visible* entry's version, not
+always `CHANGELOG[0]` — otherwise a course could show a version number in
+that badge that never actually appears anywhere in its own filtered list.
+
+All 145 pre-existing entries (from before per-course scoping existed) were
+retroactively tagged: `2` (PHYS162-only) for anything about actual quiz
+content — specific problems, figures/illustrations, per-quiz corrections —
+since PHYS162 was the only course this repo ever held content for until
+now; `0` (both) for everything about the framework/app itself (forum,
+stats, themes, UI, cross-device syncing, etc.), since none of that depends
+on which course's problems happen to be loaded. No entry currently uses
+`scope: 1` (phys161-only) — that history starts empty and grows from
+whatever changes are made after phys161 actually exists.
 
 ### What's still framework (shared)
 
@@ -418,13 +475,23 @@ you need to test offline behavior.
    `pushVapidPublicKey` (the public half from step 3), `quizSettings`
    (`size`, `cumulativePrevCount`) if this course's exam structure differs
    from the default (6 problems per quiz, 3 from the previous quiz in
-   cumulative mode), and `pinnedMessageId` (the row id of this course's own
-   welcome post in its own `forum_messages` table, once you've posted one).
+   cumulative mode), `pinnedMessageId` (the row id of this course's own
+   welcome post in its own `forum_messages` table, once you've posted one),
+   `changelogScope` (a unique numeric id — currently `2` is taken by
+   phys162 — for filtering `js/data/changelog.js`'s history to this
+   course, see "Per-course changelog filtering"), and `display`
+   (`courseCode`, `ogDescription`, `twitterDescription`, `siteUrl`) — the
+   source of truth for step 7 below.
 6. **Replace the contents of `course/`** with the new course's quizzes,
    splashes, manual, offline-laws, preview image, and images.
-7. **Edit the COURSE HEADER BLOCK** in both `index.html` and `offline.html`:
-   change `data-course` on `<head>`, and paste in that course's values from
-   `course/course.json` (title, OG/Twitter meta, the four eyebrow labels).
+7. **Set `data-course` on `<head>`** in both `index.html` and `offline.html`
+   to the new course's key. This alone now fixes the page `<title>` and the
+   four eyebrow labels. It does NOT fix the static OG/Twitter `<meta>`
+   block in `index.html`'s `<head>` — hand-edit those 9 lines to match
+   step 5's `display` values too (see the `⚠ EDIT THESE 9 LINES BY HAND`
+   comment right there, and [Manual-swap
+   items](#manual-swap-items-cant-be-centralized) for why JS can't cover
+   it: link-preview crawlers never execute JavaScript).
 8. **Bump `sw.js`'s `CACHE_NAME`** to the new course's prefix by hand (see
    [Manual-swap items](#manual-swap-items-cant-be-centralized) — this is the
    one thing a service worker can't read from `data-course` itself).
@@ -445,6 +512,7 @@ called out with comments at each location so they're never a silent gap:
 |---|---|---|
 | `CACHE_NAME` | `sw.js` | Service workers have no `document` — can't read the `data-course` attribute |
 | `SITE_ORIGIN`, `GEMINI_SYSTEM_INSTRUCTIONS` | `superbase/edge-functions/post-message.ts` | Edge Functions deploy into their own Supabase-project Deno runtime, not the browser — can't import `course-config.js` |
+| The 9 `<meta property="og:...">` / `<meta name="twitter:...">` tags (+ `<title>`) | `index.html`'s `<head>` | `course-config.js` DOES update these live in-browser (see `_setMetaContent`) — but link-preview crawlers (Telegram, Discord, WhatsApp, Slack, X, Facebook) fetch raw HTML and never execute JavaScript, so that update never reaches them. The static text has to already be correct, or shared links show the wrong course. |
 
 ---
 

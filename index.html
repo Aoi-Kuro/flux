@@ -1,14 +1,13 @@
 <!DOCTYPE html>
 <html lang="en">
 <head data-course="phys162">
-<!-- ── COURSE HEADER BLOCK — everything down to the closing marker below is
-     the "copy-paste when releasing a different course" block. Values for
-     every course (incl. this one) are duplicated in course/course.json —
-     when releasing PHYS161, take that file's "phys161" block and paste its
-     values in here, AND change the data-course attribute on <head> above
-     (that attribute is what js/course-config.js reads to pick Supabase
-     keys + the localStorage prefix — course.json itself is never loaded
-     by the site, it's reference only). ───────────────────────────────── -->
+<!-- ⚠ EDIT THESE 9 LINES BY HAND AT RELEASE — see "Manual-swap items" in
+     README.md for why. Short version: link-preview crawlers (Telegram,
+     Discord, WhatsApp, Slack, X, Facebook) fetch this raw HTML and never
+     run JavaScript, so course-config.js's auto-apply (which DOES update
+     <title> and these same tags, for anyone who loads the page in an
+     actual browser) never reaches them. This block has to be correct as
+     static text or shared links show the wrong course/description. -->
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>PHYS162 Practice Quiz</title>
@@ -23,10 +22,10 @@
 <meta name="twitter:title"      content="PHYS162 Practice Quiz" />
 <meta name="twitter:description" content="Interactive physics practice quiz for PHYS 162 course at Nazarbayev University." />
 <meta name="twitter:image"      content="course/preview.png" />
-<!-- ── Replace the two URLs above with your actual hosting URL ──────────── -->
-<!-- ── END COURSE HEADER BLOCK (title/OG/Twitter part — the 4 landing-eyebrow
-     / eyebrow divs further down in <body> are the same course.json block,
-     just further down the file) ───────────────────────────────────────── -->
+<!-- ── Keep these two lines' course-config.js values (display.ogDescription
+     etc.) in sync with whatever you paste here — they're intentionally
+     duplicated, not read from each other. ─────────────────────────────── -->
+
 
 <link rel="icon" type="image/png" href="/favicon/favicon-96x96.png?v=1.0.3" sizes="96x96" />
 <link rel="icon" type="image/svg+xml" href="/favicon/favicon.svg?v=1.0.3" />
@@ -201,7 +200,7 @@
 <!-- ── Landing screen ── -->
 <div id="landingScreen">
   <div class="landing-box">
-    <div class="landing-eyebrow">PHYS162 · Practice Mode</div>
+    <div class="landing-eyebrow" id="eyebrowLandingPractice">PHYS162 · Practice Mode</div>
     <h1 class="landing-title" id="landingTitle">Electricity &amp; Fields <span>Quiz</span></h1>
     <div class="mc-splash-wrap"><span class="mc-splash" id="splashText" role="button" tabindex="0" title="Tap for another" onclick="showNewSplash()" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();showNewSplash();}"></span></div>
 
@@ -280,7 +279,7 @@
 <!-- ── Solve-all choice page ── -->
 <div id="choicePage" class="hidden">
   <div class="landing-box">
-    <div class="landing-eyebrow">PHYS162 · Solve them all</div>
+    <div class="landing-eyebrow" id="eyebrowLandingSolveAll">PHYS162 · Solve them all</div>
     <h2 class="landing-title" style="margin-bottom:0.5rem;">Choose order</h2>
     <p class="landing-sub" id="solveAllModalDesc" style="margin-bottom:1.2rem;"></p>
     <div id="solveAllResumeRow" style="display:none;margin-bottom:0.9rem;">
@@ -365,7 +364,7 @@
 </div>
 
 <header>
-  <div class="eyebrow">PHYS162 · Practice Mode</div>
+  <div class="eyebrow" id="eyebrowQuizHeader">PHYS162 · Practice Mode</div>
   <h1>Electricity &amp; Fields <span>Quiz</span></h1>
   <div class="filter-active-note" id="filterActiveNote" style="display:none;">Filter is active: this draw is pulling from a narrowed problem pool</div>
 </header>
@@ -460,7 +459,7 @@
   </div>
 
   <header class="solve-all-quiz-header">
-    <div class="eyebrow">PHYS162 · Solve Mode</div>
+    <div class="eyebrow" id="eyebrowSolveHeader">PHYS162 · Solve Mode</div>
     <h1>Electricity &amp; Fields <span>Quiz</span></h1>
     <div class="solve-all-tag">All Problems</div>
   </header>

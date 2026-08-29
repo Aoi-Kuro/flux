@@ -1783,6 +1783,12 @@ function exitAppOrChoiceToLanding() {
 window.addEventListener("DOMContentLoaded", () => {
   // Render quiz selection buttons from the QUIZZES registry
   renderQuizButtons();
+  // Sync the landing title / header <h1> to the actually-selected quiz's
+  // real name (selectQuiz's side effects are otherwise only ever run on
+  // click) — without this, the page loads showing whatever name was
+  // hardcoded into index.html's static markup regardless of which
+  // course/quiz that actually is, until the user clicks a quiz button.
+  selectQuiz(selectedQuizNum);
   // "Random 6" label reflects this course's actual quiz size
   // (QUIZ_SIZE from course-config.js) instead of a hardcoded "6" —
   // courses with a different exam size get the label right for free.
@@ -1793,7 +1799,7 @@ window.addEventListener("DOMContentLoaded", () => {
 
 // ─── Version checker ──────────────────────────────────────────────────────────
 // This page's current version. Bump this string whenever you publish an update.
-const CURRENT_VERSION = '8.9.1';
+const CURRENT_VERSION = '9.0.0';
 
 // How often to poll the manifest (milliseconds). Default: every 5 minutes.
 const VERSION_CHECK_INTERVAL = 5 * 60 * 1000;

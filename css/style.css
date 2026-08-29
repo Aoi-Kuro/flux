@@ -2333,6 +2333,16 @@
     opacity: 0.5;
   }
 
+  /* ── Gap where the other course's entries were filtered out ── */
+  .changelog-gap {
+    text-align: center;
+    font-size: 0.68rem;
+    font-style: italic;
+    color: var(--muted);
+    opacity: 0.6;
+    margin: 0.45rem 0;
+  }
+
   /* ── Individual changelog rows ── */
   .changelog-row {
     display: flex;

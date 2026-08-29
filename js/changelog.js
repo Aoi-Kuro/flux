@@ -43,16 +43,44 @@ function computeLevels(changelog) {
 }
 
 // ── Render the changelog list ────────────────────────────────────────────────
+// Each CHANGELOG entry has a `scope`: 0 = shown for every course, or a
+// course's own COURSE_CHANGELOG_SCOPE id (js/course-config.js) = shown only
+// for that course. When one or more consecutive entries are hidden this
+// way between two visible ones, a "…updates for another course…" gap row
+// is shown in their place instead of just silently closing the space —
+// never at the very start or end of the list, only strictly between two
+// visible entries the reader would otherwise wonder about.
 function renderChangelog() {
   const list = document.getElementById('changelogList');
   if (!list || typeof CHANGELOG === 'undefined') return;
+
+  const scope = (typeof COURSE_CHANGELOG_SCOPE !== 'undefined') ? COURSE_CHANGELOG_SCOPE : null;
+  // scope === null (see course-config.js's own check) means "fail open" —
+  // no filtering, every entry is treated as visible.
+  const isVisible = (entry) => scope == null || entry.scope === 0 || entry.scope === scope;
 
   const levels   = computeLevels(CHANGELOG);
   const indentPx = [0, 22, 44];
   const frag     = document.createDocumentFragment();
   let prevMajor  = -1;
+  let hiddenSinceLastVisible = false;
+  let renderedAny = false;
+  let latestVisibleVersion = null;
 
   CHANGELOG.forEach((entry, i) => {
+    if (!isVisible(entry)) {
+      hiddenSinceLastVisible = true;
+      return;
+    }
+
+    if (hiddenSinceLastVisible && renderedAny) {
+      const gap = document.createElement('div');
+      gap.className = 'changelog-gap';
+      gap.textContent = '⋯ updates for another course ⋯';
+      frag.appendChild(gap);
+    }
+    hiddenSinceLastVisible = false;
+
     const [maj] = entry.version.split('.').map(Number);
     const level = levels[i];
 
@@ -82,13 +110,19 @@ function renderChangelog() {
     row.appendChild(note);
 
     frag.appendChild(row);
+    renderedAny = true;
+    if (latestVisibleVersion === null) latestVisibleVersion = entry.version;
   });
 
   list.appendChild(frag);
 
-  if (CHANGELOG.length > 0) {
+  // The latest VISIBLE version, not just CHANGELOG[0] — if the true latest
+  // entry happens to be scope-filtered out for this course, the button
+  // badge would otherwise show a version number that never actually
+  // appears in this course's own list.
+  if (latestVisibleVersion) {
     const el = document.getElementById('changelogBtnVersion');
-    if (el) el.textContent = CHANGELOG[0].version;
+    if (el) el.textContent = latestVisibleVersion;
   }
 }
 
