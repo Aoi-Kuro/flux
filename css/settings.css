@@ -1,0 +1,792 @@
+/* ─── Settings screen ────────────────────────────────────────────────────────
+   Phase 0: infra + shell only. Structurally mirrors #manualScreen/#statsScreen
+   (same open/close fade animation, same header layout) — see
+   openSettingsScreen/closeSettingsScreen in js/settings.js. Single-column
+   layout (unlike the manual's two-pane docs view) since this is a flat list
+   of controls per tab, not browsable content. */
+
+#settingsScreen {
+  display: none;
+  min-height: 100vh;
+  background: var(--bg);
+  font-family: var(--sans);
+  z-index: 200;
+}
+#settingsScreen.visible {
+  display: block;
+  animation: fadeInPage 0.38s ease forwards;
+}
+#settingsScreen.fading-out {
+  animation: fadeOutPage 0.28s ease forwards;
+  pointer-events: none;
+}
+
+.settings-wrap {
+  width: 100%;
+  max-width: clamp(480px, 60vw, 720px);
+  margin: 0 auto;
+  padding: 2rem 1.4rem calc(3rem + env(safe-area-inset-bottom, 0px));
+}
+
+/* ── Header (matches .stats-header/.manual-header) ── */
+.settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1.6rem;
+}
+.settings-header-left { display: flex; align-items: center; gap: 0.9rem; }
+.settings-header-right { display: flex; align-items: center; gap: 0.5rem; }
+/* 🔍 beside ✕ (opens the Search tab): the same outlined button, sized to
+   match it whether it holds the emoji (Modern) or the drawn icon (Classic). */
+.settings-header-right .stats-close-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2.1rem;
+  height: 2rem;
+  line-height: 1;
+}
+.settings-header-icon-btn { transition: color 0.15s, border-color 0.15s, transform 0.15s; }
+.settings-header-icon-btn:hover { color: var(--accent); border-color: var(--accent); transform: scale(1.06); }
+.settings-title {
+  font-family: var(--mono);
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: 0.02em;
+}
+
+/* ── Tabs (same segmented-control language as .filter-type-tabs) ── */
+.settings-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 1.4rem;
+}
+.settings-tab-btn {
+  flex: 1 1 auto;
+  min-width: 6.5rem;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 0.5rem 0.6rem;
+  border-radius: calc(4px * var(--radius-mult));
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--muted);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.settings-tab-btn:hover { border-color: var(--muted); }
+.settings-tab-btn.active {
+  background: rgba(var(--accent-rgb), 0.1);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+@media (max-width: 480px) {
+  .settings-tab-btn { font-size: 0.66rem; padding: 0.45rem 0.3rem; min-width: 5rem; }
+}
+
+/* ── Body ── */
+.settings-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+.settings-empty-note {
+  font-family: var(--sans);
+  font-size: 0.85rem;
+  color: var(--muted);
+  padding: 0.6rem 0.1rem 1.1rem;
+  line-height: 1.5;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.9rem 0.1rem;
+  border-bottom: 1px solid var(--border);
+}
+.settings-row:last-child { border-bottom: none; }
+
+/* ── Grouped rows (a toggle + the sub-toggle nested under it, e.g. "Show
+   daylight switch button" + "Follow device theme") — rendered as one
+   visual unit by renderSettingsDisplayTab, so they read as parent/child
+   instead of two unrelated rows. ── */
+.settings-group { border-radius: calc(6px * var(--radius-mult)); overflow: hidden; }
+.settings-group .settings-row { border-bottom: none; }
+.settings-group .settings-row:first-child { border-bottom: 1px dashed var(--border); }
+.settings-group .settings-row:last-child  { border-bottom: 1px solid var(--border); }
+.settings-body > .settings-row:last-child,
+.settings-body > .settings-group:last-child .settings-row:last-child {
+  border-bottom: none;
+}
+
+/* Sub-row: indented further right than a plain row, with a "·" connector
+   mark standing in for "this belongs to the row above" — no vertical bar,
+   just the dot, per how this was asked to look. The dashed border between
+   this and its parent (below, on .settings-group .settings-row:first-child)
+   is the actual "belongs together" line; this dot is just a visual nudge
+   in the same direction. */
+.settings-row-sub {
+  padding: 0.75rem 0.1rem 0.85rem 2.75rem;
+  background: color-mix(in srgb, var(--text) 4%, transparent);
+  position: relative;
+}
+.settings-row-sub::before {
+  content: '\00B7';
+  position: absolute;
+  left: 1.5rem;
+  top: 50%;
+  transform: translateY(-65%);
+  font-size: 1.6rem;
+  line-height: 1;
+  color: var(--muted);
+}
+.settings-row-sub .settings-row-title { font-size: 0.85rem; }
+.settings-row-sub .settings-row-desc  { font-size: 0.76rem; }
+
+/* Settings sync's live status line under its description (js/settings-sync.js). */
+.settings-sync-status { margin-top: 0.3rem; font-style: italic; }
+
+/* Blocked: a parent row whose sub-toggle currently overrides it (see
+   `blocked` in renderSettingsDisplayTab) — dimmed and inert rather than
+   removed, so it's clear it's temporarily moot, not gone. */
+.settings-row-blocked { opacity: 0.45; }
+.settings-row-blocked .settings-switch { pointer-events: none; cursor: not-allowed; }
+
+/* Slider row (Display > Figure size): range input plus its live % value,
+   sitting where a toggle row has its switch. */
+.settings-slider {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-shrink: 0;
+}
+.settings-slider input[type="range"] {
+  width: 140px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.settings-slider-value {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  color: var(--muted);
+  min-width: 3.2em;
+  text-align: right;
+}
+@media (max-width: 480px) {
+  .settings-slider input[type="range"] { width: 100px; }
+}
+.settings-row-label { min-width: 0; }
+.settings-row-title {
+  font-family: var(--sans);
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--text);
+}
+.settings-row-desc {
+  font-family: var(--sans);
+  font-size: 0.78rem;
+  color: var(--muted);
+  margin-top: 0.15rem;
+  line-height: 1.4;
+}
+
+/* ── Switch control — same track/knob visual language as .toggle-track/
+   .toggle-knob (theme toggle), rebuilt on a real checkbox so every future
+   setting can wire up with a single onchange handler. ── */
+.settings-switch {
+  position: relative;
+  display: inline-block;
+  width: 36px;
+  height: 20px;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+.settings-switch input {
+  position: absolute;
+  opacity: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  cursor: pointer;
+}
+.settings-switch-track {
+  position: absolute;
+  inset: 0;
+  background: var(--border);
+  border-radius: calc(10px * var(--radius-mult));
+  transition: background 0.25s;
+}
+.settings-switch-track::before {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  background: var(--chrome-light);
+  border-radius: 50%;
+  transition: transform 0.22s cubic-bezier(.4,0,.2,1);
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--shadow) 30%, transparent);
+}
+.settings-switch input:checked + .settings-switch-track { background: var(--accent); }
+.settings-switch input:checked + .settings-switch-track::before { transform: translateX(16px); }
+
+/* ── Display toggle effects ──
+   Applied via a class on <html> — not <body> — because the anti-flicker
+   script in index.html's <head> (see the comment there) has to set these
+   before <body> even exists, to avoid a flash of the element before JS
+   gets a chance to hide it. js/settings.js's applyDisplaySettings() targets
+   the same element (document.documentElement) so there's one source of
+   truth for where the class actually lives, whether it's set by the early
+   inline script or by a live toggle flip. No !important needed for these
+   first five: none of these targets carry a conflicting inline style, so
+   plain class-selector specificity is enough. */
+html.settings-hide-avatar .landing-identity-wrap { display: none; }
+html.settings-hide-splashes .mc-splash-wrap { display: none; }
+html.settings-hide-manual-btn #manualBtn { display: none; }
+html.settings-hide-theme-btn #paletteBtn { display: none; }
+html.settings-hide-daylight-btn .theme-toggle-wrap .theme-icon,
+html.settings-hide-daylight-btn #themeTrack { display: none; }
+/* The 👤 personal cabinet button beside the logo (js/cabinet-link.js). */
+html.settings-hide-cabinet-btn #cabinetLink { display: none; }
+
+/* The floating Forum FAB (css/forum.css) is always `display: flex` at rest
+   and toggles visibility via opacity/transform/pointer-events on its own
+   `.forum-fab-visible` class (added/removed by forum.js's
+   syncForumFabVisibility(), which fires on nearly every screen switch) —
+   never display:none. `.forum-fab-wrap.forum-fab-visible` in forum.css
+   matches this rule's specificity exactly (two classes each), so without
+   !important, whichever rule's stylesheet happens to load second would
+   silently win regardless of this setting. !important sidesteps that
+   entirely rather than depending on <link> order between forum.css and
+   settings.css staying what it is today. */
+html.settings-hide-forum-fab .forum-fab-wrap { display: none !important; }
+html.settings-hide-top-bar-tip .top-bar-tip { display: none !important; }
+html.settings-hide-fig-anim-controls .fig-anim-ctl { display: none !important; }
+
+/* ── Notifications tab effects ──
+   Same <html>-class mechanism as the Display toggles above, applied by
+   applyNotificationSettings() (js/settings.js) instead of
+   applyDisplaySettings() — kept as a separate function since Go silent
+   also has to touch IndexedDB (for sw.js's push handler) and run a 24h
+   auto-off check, neither of which any Display toggle needs. */
+html.settings-hide-update-banner #update-banner { display: none; }
+html.settings-hide-theme-banner #theme-nudge-banner { display: none; }
+html.settings-hide-bug-banner #bug-report-banner { display: none; }
+html.settings-hide-fullscreen-hint #fullscreen-hint-banner { display: none; }
+
+/* Go silent's badge targets all set their display via inline style
+   (badge.style.display = 'flex'/'none' in forum.js) rather than a class —
+   inline styles always beat a plain class-selector rule regardless of
+   specificity, so this needs !important the same way .forum-fab-wrap
+   above does, just for a different underlying reason. */
+html.settings-silent-badges .forum-problem-btn-badge,
+html.settings-silent-badges .forum-problem-btn-at,
+html.settings-silent-badges #forumUnreadBadge,
+html.settings-silent-badges #forumUnreadAtBadge,
+html.settings-silent-badges #forumFabUnreadBadge,
+html.settings-silent-badges #forumFabUnreadAtBadge {
+  display: none !important;
+}
+
+/* ── Visible section headers (Display: Main screen / Animations and
+   figures / Extra; Study: Random Quiz / Entire Set) ──
+   Plain labels, not another .settings-group — these aren't a parent+sub
+   pair, just a heading over a run of otherwise-independent rows. No
+   border-top here: the row immediately above already ends in its own
+   border-bottom (.settings-row), so adding a second line here would just
+   draw two adjacent separators. That row's border-bottom is the only line
+   between it and this header. */
+.settings-section-header {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 1.3rem 0 0.3rem;
+  padding-top: 0.9rem;
+}
+.settings-body > .settings-section-header:first-child { margin-top: 0; padding-top: 0; }
+
+/* ── Choice control (Study's Entire Set "Order" sub, Display's battery
+   Off / XX% sub) ──
+   Same segmented-button visual language as .filter-type-tab (css/style.css)
+   rather than a checkbox switch — this is a pick, not an on/off. */
+.settings-choice-group { display: flex; gap: 0.4rem; flex-shrink: 0; }
+.settings-choice-btn {
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  font-weight: 600;
+  padding: 0.4rem 0.7rem;
+  border-radius: calc(4px * var(--radius-mult));
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--muted);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.settings-choice-btn:hover:not(:disabled) { border-color: var(--muted); }
+.settings-choice-btn.active {
+  background: rgba(var(--accent-rgb), 0.1);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.settings-choice-btn:disabled { cursor: not-allowed; }
+/* Display's Font dropdown: same outline and colours as the choice buttons. */
+.settings-select {
+  flex-shrink: 0;
+  max-width: 11rem;
+  font-family: var(--sans);
+  font-size: 0.8rem;
+  padding: 0.4rem 0.5rem;
+  border-radius: calc(4px * var(--radius-mult));
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+}
+.settings-select:hover { border-color: var(--muted); }
+.settings-select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* The Font dropdown: a button and a list, each name in its own font. */
+.settings-font-picker { position: relative; flex-shrink: 0; }
+.settings-font-btn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  min-width: 11rem;
+  max-width: none;
+  font-size: 0.9rem;
+  text-align: left;
+}
+.settings-font-btn::after {
+  content: '';
+  width: 0.4rem;
+  height: 0.4rem;
+  border-right: 1.5px solid var(--muted);
+  border-bottom: 1.5px solid var(--muted);
+  transform: translateY(-25%) rotate(45deg);
+  flex-shrink: 0;
+}
+.settings-font-btn[aria-expanded="true"]::after { transform: translateY(25%) rotate(-135deg); }
+.settings-font-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 20;
+  min-width: 100%;
+  margin: 0;
+  padding: 0.25rem;
+  list-style: none;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: calc(6px * var(--radius-mult));
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--shadow) 30%, transparent);
+}
+.settings-font-option {
+  padding: 0.45rem 0.6rem;
+  font-size: 0.95rem;
+  color: var(--text);
+  white-space: nowrap;
+  border-radius: calc(4px * var(--radius-mult));
+  cursor: pointer;
+}
+.settings-font-option:hover,
+.settings-font-option:focus { background: rgba(var(--accent-rgb), 0.1); outline: none; }
+.settings-font-option[aria-selected="true"] { color: var(--accent); font-weight: 600; }
+/* Display's Icon style: the label over a two-icon sample of that style. */
+.settings-icon-style-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.3rem;
+  min-width: 5.5rem;
+}
+.settings-icon-style-sample { font-size: 1rem; font-weight: 400; line-height: 1; }
+/* A choice that carries its own value with small up/down arrows beside it
+   (Display's battery percent). The outer element looks like the other
+   choice buttons; the value and the arrows are plain buttons inside it. */
+.settings-choice-stepper {
+  display: inline-flex;
+  align-items: stretch;
+  gap: 0.35rem;
+  padding-right: 0.3rem;
+  cursor: default;
+}
+.settings-choice-stepper button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+.settings-choice-stepper button:disabled { cursor: not-allowed; opacity: 0.4; }
+.settings-stepper-value { min-width: 2.4em; text-align: right; }
+.settings-stepper-arrows {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 1px;
+  margin: -0.25rem 0;
+}
+.settings-stepper-arrows button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 0.95rem;
+  height: 0.7rem;
+  border-radius: 2px;
+}
+.settings-stepper-arrows button:hover:not(:disabled) { background: color-mix(in srgb, currentColor 15%, transparent); }
+
+/* ── Study tab effects (applyStudySettings() in js/settings.js) ── */
+
+/* Reduce motion (Display tab, applyReduceMotion()): a blanket kill-switch for CSS animations/transitions
+   site-wide. Deliberately scoped to CSS only — canvas-driven effects (the
+   ⚡ field-lines overlay, the Random N loading screen) aren't touched by
+   this and have their own separate settings/toggles instead. */
+html.settings-reduce-motion *,
+html.settings-reduce-motion *::before,
+html.settings-reduce-motion *::after {
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.001ms !important;
+  scroll-behavior: auto !important;
+}
+
+/* Hide topic while active: scoped to #quizContainer specifically (Random N
+   cards only) rather than the bare .problem-topic class, which Solve-All
+   cards also use — those don't have a "scores revealed" moment the way
+   Random N does (checkAll()), so this setting
+   only ever applies there. render()/newQuiz() remove '.results-shown' at
+   the start of every fresh attempt; checkAll() adds it back the moment
+   scores are shown — see their own comments in js/quiz-engine.js. */
+html.settings-hide-topic-while-active #quizContainer:not(.results-shown) .problem-topic {
+  display: none;
+}
+
+/* Line progress rail (css/solve-all-nav.css owns its layout; this just
+   toggles it, same as every other Study-tab effect here). !important since
+   #saNavRail already carries its own `display: block` inside a media query
+   — see that file's header comment for why the id-plus-class selector here
+   would win anyway, but !important removes any doubt. */
+html.settings-hide-sa-nav-rail #saNavRail { display: none !important; }
+
+/* Floating progress window (#stickyScore, css/style.css) during Solve Them
+   All — was always shown whenever Solve-All was open; now optional. Targets
+   .visible specifically since that's the class that actually flips display
+   on (see css/style.css), so this has to win over that rule regardless of
+   which stylesheet loads second. */
+html.settings-hide-sticky-score #stickyScore.visible { display: none !important; }
+
+/* Both #saNavRail and #stickyScore are position:fixed and independent of
+   whichever screen is currently showing, so they kept rendering on top of
+   #settingsScreen — that screen has no `position` of its own, so its
+   z-index never actually takes effect against fixed-position siblings.
+   Simplest fix: hide both outright for as long as Settings is open, rather
+   than trying to out-z-index elements that don't participate in stacking.
+   `settings-screen-open` is toggled on <html> by openSettingsScreen/
+   closeSettingsScreen (js/settings.js), not tied to any user setting. Needs
+   !important over #stickyScore.visible's own `display: block`. */
+html.settings-screen-open #saNavRail,
+html.settings-screen-open #stickyScore.visible {
+  display: none !important;
+}
+
+/* ── Offline & Sync tab (js/offline-mode.js renders the content, this just
+   styles it) ── */
+.settings-offline-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  padding: 0.4rem 0.1rem 1.1rem;
+}
+.settings-offline-heading {
+  font-family: var(--sans);
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--text);
+}
+.settings-offline-desc {
+  font-family: var(--sans);
+  font-size: 0.78rem;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+/* Primary action button — same structural language as .filter-reset-btn
+   (css/style.css: relative positioning + an absolutely-positioned ring
+   child) but accent-colored rather than red, since "Go offline" isn't a
+   destructive reset. Sized for a standalone panel button rather than a
+   small header icon-button. */
+.settings-offline-btn {
+  position: relative;
+  align-self: flex-start;
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  background: var(--bg);
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: calc(6px * var(--radius-mult));
+  padding: 0.6rem 1.1rem;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.settings-offline-btn:hover { background: rgba(var(--accent-rgb), 0.1); }
+.settings-offline-btn.confirming {
+  color: var(--accent);
+  border-color: transparent;
+}
+.settings-offline-btn-secondary {
+  color: var(--muted);
+  border-color: var(--border);
+}
+.settings-offline-btn-secondary:hover {
+  color: var(--text);
+  border-color: var(--text);
+  background: transparent;
+}
+
+/* ── Cache & storage rows (js/offline-mode.js's renderCacheStorageSection)
+   — same .settings-row/.settings-group shell as the Display tab's toggle
+   rows, with a small circular danger button standing in for the usual
+   switch. Red (--wrong) rather than accent-colored, same color
+   .filter-reset-btn already uses for its own destructive state. */
+.settings-cache-section { border-top: 1px solid var(--border); padding-top: 1rem; }
+.settings-danger-btn {
+  flex-shrink: 0;
+  width: 38px;
+  height: 38px;
+  min-width: 38px;
+  border-radius: 50%;
+  border: 1.5px solid var(--wrong);
+  background: var(--bg);
+  color: var(--wrong);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+  overflow: hidden;
+  white-space: nowrap;
+  transition: all 0.18s ease, width 0.18s ease, border-radius 0.18s ease;
+}
+.settings-danger-btn:hover { background: var(--wrong); color: var(--chrome-light); }
+.settings-danger-icon { display: inline-flex; }
+
+/* Armed state (_armDangerConfirm, js/offline-mode.js): rather than a
+   countdown ring on an icon-only button — easy to miss what a second tap
+   actually confirms — the button grows into a small solid pill and swaps
+   its icon for the literal word "Confirm", unambiguous at a glance. Reverts
+   on its own after DANGER_CONFIRM_MS if not tapped again. */
+.settings-danger-confirm-label {
+  display: none;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.settings-danger-btn.confirming {
+  width: auto;
+  border-radius: calc(19px * var(--radius-mult));
+  padding: 0 0.9rem;
+  background: var(--wrong);
+  color: var(--chrome-light);
+  border-color: transparent;
+}
+.settings-danger-btn.confirming .settings-danger-icon { display: none; }
+.settings-danger-btn.confirming .settings-danger-confirm-label { display: inline; }
+
+/* Same tap-to-confirm ring idiom as .reset-confirm-ring (css/style.css) —
+   armed by _armGoOfflineConfirm() (js/offline-mode.js): a single dash the
+   length of the button's own perimeter, drawn fully visible, then its
+   offset animates over GO_OFFLINE_CONFIRM_MS so the outline recedes back
+   to nothing — a countdown traced right on the button's own border. */
+.settings-offline-confirm-ring {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  overflow: visible;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.settings-offline-btn.confirming .settings-offline-confirm-ring { opacity: 1; }
+.settings-offline-confirm-ring rect {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+
+/* Download progress — a plain instant-set width rather than a CSS
+   transition: this redraws via a full renderSettingsOfflineTab() call on
+   every file (see startGoOffline()'s comment on why that's fine here,
+   unlike a toggle switch), so there's no persisting bar node for a
+   transition to animate from anyway; it just steps forward file by file. */
+.settings-offline-progress-track {
+  width: 100%;
+  height: 10px;
+  border-radius: 5px;
+  background: var(--border);
+  overflow: hidden;
+}
+.settings-offline-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 5px;
+}
+.settings-offline-progress-label {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+/* ── Backup section (js/settings.js's renderSettingsBackupSection, appended
+   after Cache & storage in js/offline-mode.js) — same bordered-block
+   convention as .settings-cache-section above, and the same
+   .settings-offline-* heading/desc/button classes as the rest of this tab,
+   with the two buttons sitting side by side rather than stacked. */
+.settings-backup-section {
+  padding-top: 0rem;
+  margin-top: 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.settings-backup-btn-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+.settings-backup-btn-row .settings-offline-btn {
+  align-self: auto;
+}
+
+/* ── Search tab (js/settings-search.js) ── The box, then each match as its
+   real row (or row + sub-row group, or Go offline / Backup block) with a
+   small "Tab · Section ›" link above it that opens it on its own tab. */
+.settings-search-bar {
+  position: relative;
+  margin-bottom: 0.9rem;
+}
+.settings-search-icon {
+  position: absolute;
+  left: 0.75rem;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--muted);
+  pointer-events: none;
+}
+.settings-search-input {
+  width: 100%;
+  box-sizing: border-box;
+  -webkit-appearance: none;
+  appearance: none;
+  font-family: var(--sans);
+  font-size: 16px; /* 16px+ keeps iOS from zooming the page on focus */
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: calc(8px * var(--radius-mult));
+  padding: 0.6rem 2.6rem 0.6rem 2.2rem;
+  transition: border-color 0.15s;
+}
+.settings-search-input::placeholder { color: var(--muted); }
+/* The browser's own clear button is replaced by .settings-search-clear. */
+.settings-search-input::-webkit-search-cancel-button { -webkit-appearance: none; display: none; }
+.settings-search-clear {
+  position: absolute;
+  right: 0.45rem;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.9rem;
+  height: 1.9rem;
+  padding: 0;
+  font-size: 0.72rem;
+  line-height: 1;
+  color: var(--muted);
+  background: none;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  transition: color 0.15s, background-color 0.15s, transform 0.15s;
+}
+.settings-search-clear[hidden] { display: none; }
+.settings-search-clear:hover,
+.settings-search-clear:focus-visible {
+  color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.12);
+  transform: translateY(-50%) scale(1.12);
+  outline: none;
+}
+html.icons-classic .settings-search-clear .ic { width: 1.25rem; height: 1.25rem; vertical-align: 0; }
+.settings-search-input:focus { outline: none; border-color: var(--accent); }
+.settings-search-results {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.settings-search-note {
+  font-family: var(--sans);
+  font-size: 0.85rem;
+  color: var(--muted);
+  padding: 0.3rem 0.1rem 0.6rem;
+  line-height: 1.5;
+}
+.settings-search-result {
+  border-bottom: 1px solid var(--border);
+  padding-top: 0.55rem;
+}
+.settings-search-result:last-child { border-bottom: none; }
+.settings-search-result > .settings-row,
+.settings-search-result > .settings-group .settings-row:last-child { border-bottom: none; }
+.settings-search-result > .settings-offline-panel,
+.settings-search-result > .settings-backup-section { margin: 0.3rem 0 0.9rem; }
+.settings-search-path {
+  background: none;
+  border: none;
+  padding: 0;
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  cursor: pointer;
+}
+.settings-search-path:hover,
+.settings-search-path:focus-visible { color: var(--accent); }
+
+/* A setting opened from a search result, on its own tab: a short glow. */
+.settings-row-flash { animation: settingsRowFlash 1.6s ease; }
+@keyframes settingsRowFlash {
+  0%, 35% { background: rgba(var(--accent-rgb), 0.16); }
+  100%    { background: transparent; }
+}
+
+/* ── Settings > Display > Colour correction ──
+   Filters defined in the hidden <svg> at the top of index.html's <body>.
+   On <html> because a filter anywhere else makes it the containing block
+   for every position:fixed element inside (top bar, modals, FAB, score
+   badge); the root element is the one exception. It is also the element
+   Random N's full screen is requested on, so that stays corrected too. */
+.color-correction-filters { position: absolute; width: 0; height: 0; overflow: hidden; }
+html[data-color-correction="protan"] { filter: url(#cc-protan); }
+html[data-color-correction="deutan"] { filter: url(#cc-deutan); }
+html[data-color-correction="tritan"] { filter: url(#cc-tritan); }

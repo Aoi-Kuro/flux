@@ -6,6 +6,9 @@ import webpush from "npm:web-push@3.6.7";
 interface PostMessagePayload {
   author_name: string;
   device_id: string;
+  device_secret?: string;
+  device_token?: string;
+  identity_token?: string;
   body: string;
   scope: "global" | "problem";
   problem_key?: string | null;
@@ -18,6 +21,151 @@ interface PostMessagePayload {
 
 const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY")!;
 const GEMINI_API_KEY = Deno.env.get("GEMINI_API_KEY")!;
+
+// ── Device-secret verification (see migration 001_device_secrets.sql) ──────
+// device_id alone is public (forum_messages_public exposes it on every
+// message), so it can't prove device ownership on its own — without this,
+// anyone could post new messages under someone else's claimed identity by
+// copying their device_id off an existing message.
+const DEVICE_SECRET_PEPPER = Deno.env.get("DEVICE_SECRET_PEPPER");
+
+async function sha256Hex(input: string): Promise<string> {
+  const bytes = new TextEncoder().encode(input);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function randomHex(byteLen: number): string {
+  const arr = new Uint8Array(byteLen);
+  crypto.getRandomValues(arr);
+  return Array.from(arr).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// -- Device-verification token (skips the device_secrets DB round-trip) ----
+// verifyOrRegisterDevice() below used to hit `device_secrets` on every call,
+// even seconds after the same device had already proven ownership -- the
+// #1 source of Log Ingestion/Query volume (device_secrets + identity_devices
+// made up 55% of all request logs in a 26-min sample, 2026-09-25). After a
+// successful DB-backed verification we now also issue a short-lived signed
+// token; a client holding a still-valid token skips the DB check next time.
+// identity_devices is deliberately NOT covered by this -- that lookup stays
+// live everywhere, since claim/drop-nickname can reassign device_id to a
+// different identity at any moment and a cached identity would go stale.
+// Security note: this token is not a weaker credential than device_secret
+// itself -- both live in the same client-side (localStorage) trust
+// boundary. It only bounds *how long* a proof of ownership is honored for,
+// the same way a session cookie bounds a login.
+const DEVICE_TOKEN_SECRET = Deno.env.get("DEVICE_TOKEN_SECRET");
+const DEVICE_TOKEN_TTL_SECONDS = 12 * 60 * 60;
+
+async function hmacHex(payload: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(DEVICE_TOKEN_SECRET!),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(payload));
+  return Array.from(new Uint8Array(sig)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function issueDeviceToken(deviceId: string): Promise<{ token: string; expiresAt: number } | null> {
+  if (!DEVICE_TOKEN_SECRET) return null; // secret not set yet -- fails open to DB-only mode
+  const expiresAt = Math.floor(Date.now() / 1000) + DEVICE_TOKEN_TTL_SECONDS;
+  const payload = `${deviceId}:${expiresAt}`;
+  const token = btoa(payload) + "." + await hmacHex(payload);
+  return { token, expiresAt };
+}
+
+async function verifyDeviceToken(deviceId: string, token: unknown): Promise<boolean> {
+  if (!DEVICE_TOKEN_SECRET || typeof token !== "string" || !token.includes(".")) return false;
+  const [encoded, sig] = token.split(".");
+  let payload: string;
+  try { payload = atob(encoded); } catch { return false; }
+  const [tokenDeviceId, expiresAtStr] = payload.split(":");
+  if (tokenDeviceId !== deviceId) return false;
+  const expiresAt = Number(expiresAtStr);
+  if (!Number.isFinite(expiresAt) || Date.now() / 1000 > expiresAt) return false;
+  const expected = await hmacHex(payload);
+  if (expected.length !== sig.length) return false;
+  let diff = 0;
+  for (let i = 0; i < expected.length; i++) diff |= expected.charCodeAt(i) ^ sig.charCodeAt(i);
+  return diff === 0;
+}
+
+// -- Identity-resolution token (skips the identity_devices DB round-trip) --
+// identity_devices resolves device_id -> identity_id (which claimed
+// nickname, if any, currently owns this device). It's deliberately NOT
+// covered by the long-lived device token above -- device_id can be
+// reassigned to a different identity mid-session (exit, then claim a new
+// nickname on the same device), and a stale cache here would misattribute
+// posts/edits/syncs to the identity that just left. Instead it gets its own
+// much shorter-lived token (see IDENTITY_TOKEN_TTL_SECONDS below): short
+// enough that a stolen/leaked token's usefulness expires in under five
+// minutes, and drop-nickname (the one action that actually invalidates this)
+// tells the client to delete its copy immediately rather than wait it out --
+// see js/forum.js's storage-event listener for the other open-tabs half of
+// that.
+const IDENTITY_TOKEN_TTL_SECONDS = 300;
+
+async function issueIdentityToken(deviceId: string, identityId: string | null): Promise<{ token: string; expiresAt: number } | null> {
+  if (!DEVICE_TOKEN_SECRET) return null;
+  const expiresAt = Math.floor(Date.now() / 1000) + IDENTITY_TOKEN_TTL_SECONDS;
+  const payload = `${deviceId}:${identityId ?? ""}:${expiresAt}`;
+  const token = btoa(payload) + "." + await hmacHex(payload);
+  return { token, expiresAt };
+}
+
+// Returns { ok: false } on any invalid/expired/mismatched token -- caller
+// falls back to the normal identity_devices DB lookup exactly as before.
+// Returns { ok: true, identityId: null } for a device confirmed NOT linked
+// to any identity (a lurker), so that case is cached too, not just the
+// linked case.
+async function verifyIdentityToken(deviceId: string, token: unknown): Promise<{ ok: true; identityId: string | null } | { ok: false }> {
+  if (!DEVICE_TOKEN_SECRET || typeof token !== "string" || !token.includes(".")) return { ok: false };
+  const [encoded, sig] = token.split(".");
+  let payload: string;
+  try { payload = atob(encoded); } catch { return { ok: false }; }
+  const parts = payload.split(":");
+  if (parts.length !== 3) return { ok: false };
+  const [tokenDeviceId, identityIdPart, expiresAtStr] = parts;
+  if (tokenDeviceId !== deviceId) return { ok: false };
+  const expiresAt = Number(expiresAtStr);
+  if (!Number.isFinite(expiresAt) || Date.now() / 1000 > expiresAt) return { ok: false };
+  const expected = await hmacHex(payload);
+  if (expected.length !== sig.length) return { ok: false };
+  let diff = 0;
+  for (let i = 0; i < expected.length; i++) diff |= expected.charCodeAt(i) ^ sig.charCodeAt(i);
+  if (diff !== 0) return { ok: false };
+  return { ok: true, identityId: identityIdPart === "" ? null : identityIdPart };
+}
+
+async function verifyOrRegisterDevice(db: any, deviceId: string, secret: unknown, token?: unknown): Promise<boolean> {
+  if (await verifyDeviceToken(deviceId, token)) return true;
+  if (!DEVICE_SECRET_PEPPER || typeof secret !== "string" || secret.length < 16 || secret.length > 200) {
+    return false;
+  }
+  const { data: row, error } = await db
+    .from("device_secrets").select("secret_hash, secret_salt").eq("device_id", deviceId).maybeSingle();
+  if (error) { console.error("post-message: device-auth lookup error", error); return false; }
+
+  if (!row) {
+    const salt = randomHex(16);
+    const hash = await sha256Hex(`${DEVICE_SECRET_PEPPER}:${salt}:${secret}`);
+    const { error: insErr } = await db
+      .from("device_secrets").insert({ device_id: deviceId, secret_hash: hash, secret_salt: salt });
+    if (!insErr) return true;
+    const { data: retryRow, error: retryErr } = await db
+      .from("device_secrets").select("secret_hash, secret_salt").eq("device_id", deviceId).maybeSingle();
+    if (retryErr || !retryRow) { console.error("post-message: device-auth race-retry error", retryErr); return false; }
+    const retryHash = await sha256Hex(`${DEVICE_SECRET_PEPPER}:${retryRow.secret_salt}:${secret}`);
+    return retryHash === retryRow.secret_hash;
+  }
+
+  const candidateHash = await sha256Hex(`${DEVICE_SECRET_PEPPER}:${row.secret_salt}:${secret}`);
+  return candidateHash === row.secret_hash;
+}
 
 // ── Push notifications (@mention alerts) ────────────────────────────────────
 // Web Push requires a VAPID keypair identifying who's sending the push —
@@ -140,7 +288,15 @@ const MAX_BODY_LEN = 1000;
 const MIN_SECONDS_BETWEEN_POSTS = 8;
 
 // ── @gemini reply feature ───────────────────────────────────────────────────
-const GEMINI_MODEL = "gemini-3.5-flash-lite"; // swap to "gemini-3.5-flash-lite" for a cheaper/faster option
+// Default model for @gemini replies. gemini-3.6-flash has a much lower
+// daily quota than gemini-3.5-flash-lite, so this is paired with an
+// automatic 24h fallback below — see resolveGeminiModel()/
+// recordDailyQuotaExhaustion(). Only this feature uses this pair; every
+// other Gemini call in this codebase (LATEX_ASSIST_MODEL below, and the
+// moderation/flagging model in flag-message.ts) is pinned to
+// gemini-3.5-flash-lite always, on purpose — not part of this fallback.
+const GEMINI_MODEL_PRIMARY = "gemini-3.6-flash";
+const GEMINI_MODEL_FALLBACK = "gemini-3.5-flash-lite";
 const GEMINI_MENTION_RE = /(?:^|\s)@gemini\b/i;
 const GEMINI_BOT_NAME = "Gemini";
 // Fixed sentinel device_id for the bot's own inserts — any valid-looking UUID
@@ -175,8 +331,7 @@ const SITE_ORIGIN = "https://phys162.netlify.app";
 // nothing else about the pipeline needs to change alongside it. Also
 // course-specific, same manual-edit note as SITE_ORIGIN above.
 const GEMINI_SYSTEM_INSTRUCTIONS = `
-You are "Gemini", a helpful participant in a student forum for PHYS162
-(electromagnetism & optics physics) at Nazarbayev University.
+You are "Gemini", a helpful participant in a student forum for PHYS 162 at Nazarbayev University.
 Someone just tagged you with @gemini. You'll be given the tagged message,
 recent messages from the same thread for context, and — if the thread is
 about a specific problem — that problem's exact text.
@@ -203,6 +358,21 @@ Rules:
   other markup.
 - If a specific problem's text is provided, treat it as ground truth for
   what's being asked — don't invent numbers or setup that aren't there.
+- If the problem has a figure, its actual image is attached alongside this
+  prompt (not just the text) — look at it directly rather than guessing what
+  it shows from the surrounding text.
+- If a published worked solution is provided, it was written and checked by
+  course staff: use it as your reference for the method, notation and final
+  answer, and don't contradict it. It is supporting information, not a
+  script — always answer the actual question yourself, in your own words,
+  and don't paste the solution wholesale (especially when the student only
+  wants a nudge). Students can open that solution on the site, so you may
+  add one short, low-key line saying a detailed published solution is
+  available for this problem if they want the full walkthrough — mention it
+  at most once in a thread, never as a replacement for your answer and never
+  as "just go read the solution". If you're told the problem was edited
+  after the solution was written, trust the problem text wherever the two
+  differ.
 - If the student seems to be asking for a nudge or a check on their
   reasoning rather than the final answer, don't just hand them the number —
   walk through the reasoning and let them take the last step. Use judgment.
@@ -361,59 +531,407 @@ function unescapeJsString(raw: string) {
   return raw.replace(/\\(.)/g, (_, ch) => (ch === "n" ? "\n" : ch === "t" ? "\t" : ch));
 }
 
-// Best-effort fetch of a tagged problem's own statement text from the live
-// site's quiz data file. Returns null (never throws) on any failure — a
+// Hash of a problem as the solutions editor stores it in
+// problem_solutions.problem_hash. Must match problemHashOf() in
+// editor/editor.js (and solutionProblemHash() in js/solutions.js) exactly,
+// or every published solution would look out of date.
+async function problemHashOf(text: string, answer: unknown, units: unknown): Promise<string> {
+  const src = `${text}\u0000${JSON.stringify(answer)}\u0000${JSON.stringify(units ?? [])}`;
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(src));
+  return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 32);
+}
+
+// Best-effort fetch of a tagged problem's own statement text (and, if the
+// statement embeds a figure, that figure's image URL) from the live site's
+// quiz data file. Returns null (never throws) on any failure — a
 // missing/unparseable problem just means the reply goes out without that
-// extra context, not that the whole request fails.
-async function fetchProblemText(problemKey: string | null): Promise<string | null> {
+// extra context, not that the whole request fails. `hash` is null when the
+// answer/units fields couldn't be read, which just means a published
+// solution can't be checked for staleness (see fetchPublishedSolution).
+async function fetchProblemContext(
+  problemKey: string | null
+): Promise<{ text: string; imageUrl: string | null; hash: string | null } | null> {
   const parsed = parseProblemKey(problemKey);
   if (!parsed) return null;
 
   try {
-    const res = await fetch(`${SITE_ORIGIN}/course/quizzes/quiz${parsed.quizNum}.js`);
-    if (!res.ok) return null;
+    const quizUrl = `${SITE_ORIGIN}/course/quizzes/quiz${parsed.quizNum}.js`;
+    const res = await fetch(quizUrl);
+    if (!res.ok) {
+      console.error(`Quiz file fetch non-OK: ${res.status} ${res.statusText} (${quizUrl})`);
+      return null;
+    }
     const src = await res.text();
 
-    // Matches the `{ id:"P18", ... }` object literal for this problem. No
-    // nested `{}` occur inside these objects, so a non-greedy match up to
-    // the next `},` is safe.
-    const blockRe = new RegExp(`\\{\\s*id:\\s*"${parsed.problemId}"[\\s\\S]*?\\}\\s*,`, "m");
+    // Matches the `{ id:"P18", ... }` object literal for this problem. It
+    // ends where the next problem (or the end of the array) begins, not at
+    // the first `},` — problem text is LaTeX and can contain `},` itself
+    // (e.g. quiz 3 P62i's `\right)\times 10^{-6},`).
+    const blockRe = new RegExp(`\\{\\s*id:\\s*"${parsed.problemId}"[\\s\\S]*?\\}\\s*,?\\s*(?=\\{\\s*id:|\\];)`, "m");
     const block = blockRe.exec(src)?.[0];
     if (!block) return null;
 
     // Standard "quoted string with escapes" pattern: any escaped char, or
     // any non-quote/non-backslash char, repeated.
     const textMatch = /text:\s*"((?:\\.|[^"\\])*)"/.exec(block);
-    return textMatch ? unescapeJsString(textMatch[1]) : null;
+    if (!textMatch) return null;
+    const text = unescapeJsString(textMatch[1]);
+
+    // Some problem statements embed a figure as a plain
+    // <img src="course/images/..."> tag (see course/quizzes/quizN.js) —
+    // pull its src out so it can be fetched and handed to Gemini as an
+    // actual image, not just markup it can't see anything from.
+    const imgSrc = /<img[^>]+src="([^"]+)"/.exec(text)?.[1];
+    const imageUrl = imgSrc ? `${SITE_ORIGIN}/${imgSrc}` : null;
+
+    // answer is always a plain number literal and units a JSON-compatible
+    // string array in the quiz files; Number() + JSON.parse turn them into
+    // the same values the browser hashes (e.g. 1.84199e+06 -> 1841990).
+    let hash: string | null = null;
+    const answerMatch = /answer:\s*([-+0-9.eE]+)\s*,/.exec(block);
+    const unitsMatch = /units:\s*(\[[^\]]*\])/.exec(block);
+    if (answerMatch && unitsMatch) {
+      try {
+        hash = await problemHashOf(text, Number(answerMatch[1]), JSON.parse(unitsMatch[1]));
+      } catch { /* unparseable units — leave hash null */ }
+    }
+
+    return { text, imageUrl, hash };
   } catch (err) {
     console.error("Problem text fetch/parse error:", err);
     return null;
   }
 }
 
-async function callGemini(
-  taggerName: string,
-  taggedMessage: string,
-  contextMessages: { author_name: string; body: string }[],
-  problemText: string | null,
-  repliedTo: { author_name: string; body: string } | null
-): Promise<string | null> {
-  const contextBlock = contextMessages.length
-    ? contextMessages.map(m => `${m.author_name}: ${m.body}`).join("\n")
-    : "(no earlier messages in this thread)";
-  const problemBlock = problemText ? `\n\nThe problem this thread is about:\n${problemText}` : "";
-  const repliedToBlock = repliedTo
-    ? `\n\nThis message was sent as a direct reply to this earlier message:\n${repliedTo.author_name}: ${repliedTo.body}`
-    : "";
+// A worked solution can run to tens of kB in the worst case; a normal one is
+// ~1-5k. Past this it's cut, so one outlier can't blow up every prompt.
+const MAX_SOLUTION_CONTEXT_CHARS = 12_000;
 
-  const userContent =
-    `Recent thread messages (oldest first):\n${contextBlock}${problemBlock}${repliedToBlock}\n\n` +
-    `Nickname of the user tagging you: ${taggerName}\n` +
-    `The message tagging you:\n${taggedMessage}`;
+// Best-effort fetch of the problem's published worked solution (written in
+// the solutions editor, see migration 008_problem_solutions.sql) — its text
+// plus the figure's step captions. The compiled figure SVGs aren't sent:
+// Gemini's inlineData doesn't take SVG, and the captions already say what
+// each step shows. `admin` is the service-role client, which bypasses RLS,
+// so the status = 'published' filter here is what keeps drafts out. Same
+// "never throws, null on failure" contract as fetchProblemContext.
+async function fetchPublishedSolution(
+  admin: any,
+  problemKey: string | null
+): Promise<{ text: string; captions: string[]; problemHash: string | null } | null> {
+  if (!parseProblemKey(problemKey)) return null;
+  try {
+    const { data, error } = await admin
+      .from("problem_solutions")
+      .select("solution, figure, problem_hash")
+      .eq("problem_key", problemKey)
+      .eq("status", "published")
+      .maybeSingle();
+    if (error) {
+      console.error("Published solution fetch error:", error);
+      return null;
+    }
+    if (!data || !data.solution?.trim()) return null;
+
+    let text: string = data.solution.trim();
+    if (text.length > MAX_SOLUTION_CONTEXT_CHARS) text = text.slice(0, MAX_SOLUTION_CONTEXT_CHARS) + "\n[...truncated]";
+    const captions: string[] = (data.figure?.steps ?? [])
+      .map((s: any) => (typeof s?.caption === "string" ? s.caption.trim() : ""))
+      .filter((c: string) => c);
+    return { text, captions, problemHash: data.problem_hash ?? null };
+  } catch (err) {
+    console.error("Published solution fetch error:", err);
+    return null;
+  }
+}
+
+// Extension → MIME type for problem figures. SVG is deliberately excluded:
+// Gemini's inlineData image input doesn't accept it, and every quiz figure
+// in course/images is a raster export anyway, so this just future-proofs
+// against a stray .svg src without silently sending garbage to the API.
+const PROBLEM_IMAGE_MIME_BY_EXT: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  webp: "image/webp",
+  gif: "image/gif",
+};
+
+// Stay well under Gemini's inline-data request size limit (20MB total
+// request) — quiz figures are small diagrams, so anything past this is
+// almost certainly not worth the bandwidth/latency anyway.
+const MAX_PROBLEM_IMAGE_BYTES = 4 * 1024 * 1024;
+
+// Best-effort fetch of a problem figure as base64, ready to hand to Gemini
+// as inlineData. Same "never throws, null on failure" contract as
+// fetchProblemContext — a missing/oversized/unsupported image just means
+// the reply goes out without it.
+async function fetchProblemImage(imageUrl: string): Promise<{ mimeType: string; data: string } | null> {
+  const ext = imageUrl.split(".").pop()?.toLowerCase().split(/[?#]/)[0] ?? "";
+  const mimeType = PROBLEM_IMAGE_MIME_BY_EXT[ext];
+  if (!mimeType) return null;
 
   try {
+    const res = await fetch(imageUrl);
+    if (!res.ok) {
+      console.error(`Problem image fetch non-OK: ${res.status} ${res.statusText} (${imageUrl})`);
+      return null;
+    }
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    if (bytes.byteLength === 0 || bytes.byteLength > MAX_PROBLEM_IMAGE_BYTES) {
+      console.error(`Problem image skipped: ${bytes.byteLength} bytes (${imageUrl})`);
+      return null;
+    }
+
+    // btoa() only takes a binary string, and spreading a large Uint8Array
+    // straight into String.fromCharCode blows the call stack — build the
+    // binary string in chunks instead.
+    let binary = "";
+    const CHUNK = 0x8000;
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+    }
+    return { mimeType, data: btoa(binary) };
+  } catch (err) {
+    console.error("Problem image fetch error:", err);
+    return null;
+  }
+}
+
+// Key in the general-purpose app_variables table (see migration
+// 002_app_variables.sql) that holds the "gemini-3.6-flash is in its
+// post-daily-quota timeout until <timestamp>" state. value is a jsonb
+// string — an ISO timestamp — not a nested object, since that's all this
+// needs; other variables added to app_variables later can shape their own
+// value however suits them.
+const GEMINI_MODEL_COOLDOWN_KEY = "gemini_post_message_model_disabled_until";
+
+// Second cooldown key: short (10 min) pause after the PRIMARY model answered
+// with a transient 5xx (503 "high demand" etc). Same table/mechanism as the
+// daily-quota key above, just a much shorter window, so a Google-side
+// overload doesn't make every @gemini reply wait 3-6s to rediscover it.
+const GEMINI_OVERLOAD_KEY = "gemini_post_message_overloaded_until";
+const OVERLOAD_COOLDOWN_MS = 10 * 60 * 1000;
+const RETRYABLE_STATUS = new Set([500, 502, 503, 504]);
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Checks app_variables (both cooldown keys, one query) to see whether the
+// primary model is currently paused — either 24h after a daily-quota 429, or
+// 10 min after a transient 5xx. Returns the model to try first plus, when
+// that's the fallback, why (used for the swap warning in the logs). Fails open
+// to the primary model on any DB error.
+async function resolveGeminiModel(admin: any): Promise<{ model: string; reason: string | null }> {
+  try {
+    const { data, error } = await admin
+      .from("app_variables")
+      .select("key, value")
+      .in("key", [GEMINI_MODEL_COOLDOWN_KEY, GEMINI_OVERLOAD_KEY]);
+    if (error || !data) return { model: GEMINI_MODEL_PRIMARY, reason: null };
+    const now = Date.now();
+    const active = (key: string) =>
+      data.some((r: any) => r.key === key && r.value && new Date(r.value as string).getTime() > now);
+    if (active(GEMINI_MODEL_COOLDOWN_KEY)) return { model: GEMINI_MODEL_FALLBACK, reason: "daily_quota" };
+    if (active(GEMINI_OVERLOAD_KEY)) return { model: GEMINI_MODEL_FALLBACK, reason: "overloaded" };
+    return { model: GEMINI_MODEL_PRIMARY, reason: null };
+  } catch (err) {
+    console.error("resolveGeminiModel: lookup failed, defaulting to primary", err);
+    return { model: GEMINI_MODEL_PRIMARY, reason: null };
+  }
+}
+
+// Pauses the primary model for OVERLOAD_COOLDOWN_MS after a transient 5xx.
+// After that, resolveGeminiModel() offers the primary again automatically.
+async function setOverloadCooldown(admin: any): Promise<void> {
+  try {
+    await admin.from("app_variables").upsert({
+      key: GEMINI_OVERLOAD_KEY,
+      value: new Date(Date.now() + OVERLOAD_COOLDOWN_MS).toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error("setOverloadCooldown failed (will just retry the primary next time):", err);
+  }
+}
+
+// ── Debug log (table: gemini_debug_log, migration 007) ──────────────────────
+// One row per notable step of an @gemini attempt, so a silent failure can be
+// read straight from the Table Editor. Best-effort: never throws, never
+// blocks the reply. outcome values: triggered | retry_5xx | fallback_5xx |
+// api_error | empty_reply | no_reply_sentinel | mod_error | mod_flagged |
+// insert_error | posted | exception | unavailable_notice_posted |
+// notice_insert_error
+async function gLog(admin: any, messageId: number | null, outcome: string, extra: Record<string, unknown> = {}) {
+  try {
+    const { raw, ...rest } = extra as any;
+    const { error } = await admin.from("gemini_debug_log").insert({
+      message_id: messageId,
+      outcome,
+      ...rest,
+      raw: raw ? String(raw).slice(0, 4000) : null,
+    });
+    if (error) console.error("gLog insert error:", error);
+  } catch (err) {
+    console.error("gLog failed:", err);
+  }
+}
+
+// Records that gemini-3.6-flash just hit its daily quota, so subsequent
+// calls skip straight to the fallback for the next 24h instead of wasting
+// a request re-discovering the same 429. After 24h, resolveGeminiModel()
+// naturally starts offering the primary model again — no separate "reset"
+// step needed.
+async function recordDailyQuotaExhaustion(admin: any): Promise<void> {
+  try {
+    const disabledUntil = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    await admin
+      .from("app_variables")
+      .upsert({ key: GEMINI_MODEL_COOLDOWN_KEY, value: disabledUntil, updated_at: new Date().toISOString() });
+  } catch (err) {
+    console.error("recordDailyQuotaExhaustion: write failed (will just retry gemini-3.6-flash next time)", err);
+  }
+}
+
+// True only for the specific "requests-per-day, this model, this project"
+// quota violation — NOT for per-minute throttling or any other 429/error.
+// A per-minute limit is exactly that: temporary and unrelated to which
+// model is in use, so it isn't grounds for switching models for 24h (and
+// with only a couple of forum regulars, RPM isn't expected to come up).
+async function isDailyQuotaExhausted(res: Response): Promise<boolean> {
+  if (res.status !== 429) return false;
+  try {
+    const body = await res.clone().json();
+    const violations: any[] = body?.error?.details
+      ?.find((d: any) => typeof d?.["@type"] === "string" && d["@type"].includes("QuotaFailure"))
+      ?.violations ?? [];
+    return violations.some((v: any) => typeof v?.quotaId === "string" && v.quotaId.includes("PerDay"));
+  } catch {
+    return false; // couldn't parse — treat as "not specifically a daily quota", let the normal error path handle it
+  }
+}
+
+// ── Streaming ────────────────────────────────────────────────────────────────
+// Each attempt streams (streamGenerateContent, SSE), so the forum can show the
+// answer while it is written: every ~0.8 s the text so far, cut back to the
+// last whole line or sentence with no half-open $...$, goes out as a
+// "gemini-stream" broadcast (js/forum.js shows it in the thinking row). The
+// primary model is also asked for thought summaries, whose latest headline
+// replaces the row's generic "Thinking" words. Moderation still checks the
+// whole answer once it is complete (maybePostGeminiReply); if it is held back,
+// the client takes the streamed text off screen. Thought parts never count as
+// answer text.
+
+type GeminiProgress = (attempt: number, fullText: string, thoughts: string) => void;
+
+// Text that is safe to show mid-stream: up to the last line break or sentence
+// end where every $...$ and $$...$$ is closed. Never the no-reply sentinel.
+function geminiStreamableText(full: string): string {
+  const head = full.trimStart();
+  if (head.startsWith("[") && (GEMINI_NO_REPLY_SENTINEL.startsWith(head.slice(0, GEMINI_NO_REPLY_SENTINEL.length)) || head.startsWith(GEMINI_NO_REPLY_SENTINEL))) return "";
+  const balanced = (t: string) => {
+    const u = t.replace(/\\\$/g, "");
+    if ((u.match(/\$\$/g) || []).length % 2) return false;
+    return (u.replace(/\$\$/g, "").match(/\$/g) || []).length % 2 === 0;
+  };
+  for (let i = full.length - 1; i > 0; i--) {
+    const c = full[i];
+    const cut = c === "\n" ? i : (/[.!?:]/.test(c) && /\s/.test(full[i + 1] ?? "") ? i + 1 : -1);
+    if (cut > 0 && balanced(full.slice(0, cut))) return full.slice(0, cut).trimEnd();
+  }
+  return "";
+}
+
+// The newest headline of the thought summaries ("**Setting up the integral**").
+function geminiThoughtHeadline(thoughts: string): string {
+  const bold = [...thoughts.matchAll(/\*\*([^*\n]{3,80})\*\*/g)];
+  if (bold.length) return bold[bold.length - 1][1].trim();
+  const lines = thoughts.split("\n").map((l) => l.trim()).filter(Boolean);
+  return lines.length ? lines[lines.length - 1].slice(0, 80) : "";
+}
+
+// Throttled "gemini-stream" broadcasts for one question. `flush` waits for the
+// ones already sent, so none of them can land after the answer itself.
+function makeGeminiStreamer(admin: any, messageId: number) {
+  let sent = { attempt: 0, text: "", thought: "" };
+  let next: { attempt: number; text: string; thought: string } | null = null;
+  let lastAt = 0;
+  let timer: number | null = null;
+  let chain: Promise<unknown> = Promise.resolve();
+  let seq = 0;
+  const push = () => {
+    timer = null;
+    if (!next) return;
+    const p = next;
+    next = null;
+    if (p.attempt === sent.attempt && p.text === sent.text && p.thought === sent.thought) return;
+    sent = p;
+    lastAt = Date.now();
+    const payload = { message_id: messageId, seq: ++seq, attempt: p.attempt, text: p.text, thought: p.thought };
+    chain = chain.then(() => broadcastForum(admin, "gemini-stream", payload));
+  };
+  const progress: GeminiProgress = (attempt, fullText, thoughts) => {
+    next = { attempt, text: geminiStreamableText(fullText), thought: geminiThoughtHeadline(thoughts) };
+    const wait = 800 - (Date.now() - lastAt);
+    if (attempt !== sent.attempt || wait <= 0) {
+      if (timer) clearTimeout(timer);
+      push();
+    } else if (!timer) {
+      timer = setTimeout(push, wait);
+    }
+  };
+  // A status line for the people waiting ("X is busy, switching to Y"),
+  // sent at once. `nextAttempt` is the attempt about to start: its text
+  // replaces whatever the failed one had shown.
+  const notice = (nextAttempt: number, text: string) => {
+    if (timer) { clearTimeout(timer); timer = null; }
+    next = null;
+    sent = { attempt: nextAttempt, text: "", thought: "" };
+    lastAt = Date.now();
+    const payload = { message_id: messageId, seq: ++seq, attempt: nextAttempt, text: "", thought: "", notice: text };
+    chain = chain.then(() => broadcastForum(admin, "gemini-stream", payload));
+  };
+  // The whole answer once Gemini has finished, so the thinking row shows all
+  // of it while moderation and the insert run (streaming cuts at sentences,
+  // and the last stretch is often written between two broadcasts).
+  const complete = (attempt: number, text: string) => {
+    if (!geminiStreamableText(text + "\n")) return; // empty, or the no-reply sentinel
+    if (timer) { clearTimeout(timer); timer = null; }
+    next = { attempt, text: text.trim(), thought: sent.thought };
+    push();
+  };
+  const flush = async () => {
+    if (timer) { clearTimeout(timer); timer = null; }
+    next = null;
+    await chain;
+  };
+  return { progress, notice, complete, flush };
+}
+
+// "gemini-3.6-flash" -> "Gemini 3.6 Flash", for the notices above.
+function geminiModelLabel(model: string): string {
+  return model.split("-").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+}
+
+// One attempt, streamed. A non-OK HTTP answer is returned as is; a streamed
+// one is gathered and handed back as a Response shaped like generateContent's
+// (thought parts left out), so callGemini's retry/fallback logic is unchanged.
+// A network error, a stall (nothing for 30 s) or 75 s in all is returned as a
+// synthetic 504, so it flows through the same retry/fallback path as a 5xx.
+async function callGeminiOnce(
+  model: string,
+  systemInstruction: string,
+  parts: Record<string, unknown>[],
+  attempt = 0,
+  progress: GeminiProgress | null = null,
+  withThoughts = true
+): Promise<Response> {
+  // gemini-3.5-flash-lite rejects any thinkingConfig (see callGeminiLatexAssist).
+  const thoughts = withThoughts && model === GEMINI_MODEL_PRIMARY;
+  const ctrl = new AbortController();
+  const total = setTimeout(() => ctrl.abort(), 75000);
+  let idle = setTimeout(() => ctrl.abort(), 30000);
+  const bump = () => { clearTimeout(idle); idle = setTimeout(() => ctrl.abort(), 30000); };
+  try {
     const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse`,
       {
         method: "POST",
         headers: {
@@ -421,24 +939,214 @@ async function callGemini(
           "x-goog-api-key": GEMINI_API_KEY,
         },
         body: JSON.stringify({
-          systemInstruction: { parts: [{ text: GEMINI_SYSTEM_INSTRUCTIONS }] },
-          contents: [{ role: "user", parts: [{ text: userContent }] }],
+          systemInstruction: { parts: [{ text: systemInstruction }] },
+          contents: [{ role: "user", parts }],
+          ...(thoughts ? { generationConfig: { thinkingConfig: { includeThoughts: true } } } : {}),
         }),
+        signal: ctrl.signal,
       }
     );
+    if (!res.ok) {
+      // Never let the thought summaries cost an answer: a 400 with them on is
+      // retried once without.
+      if (thoughts && res.status === 400) {
+        console.warn("Gemini refused includeThoughts, retrying without:", (await res.text()).slice(0, 300));
+        clearTimeout(total);
+        clearTimeout(idle);
+        return await callGeminiOnce(model, systemInstruction, parts, attempt, progress, false);
+      }
+      return res;
+    }
+    let text = "";
+    let thoughtText = "";
+    let finishReason: string | null = null;
+    let blockReason: string | null = null;
+    let buf = "";
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      bump();
+      buf += decoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line.startsWith("data:")) continue;
+        let ev: any;
+        try { ev = JSON.parse(line.slice(5)); } catch { continue; }
+        const cand = ev?.candidates?.[0];
+        for (const p of cand?.content?.parts ?? []) {
+          if (typeof p?.text !== "string") continue;
+          if (p.thought) thoughtText += p.text;
+          else text += p.text;
+        }
+        if (cand?.finishReason) finishReason = cand.finishReason;
+        if (ev?.promptFeedback?.blockReason) blockReason = ev.promptFeedback.blockReason;
+        progress?.(attempt, text, thoughtText);
+      }
+    }
+    return Response.json({
+      candidates: [{ content: { parts: [{ text }] }, finishReason }],
+      ...(blockReason ? { promptFeedback: { blockReason } } : {}),
+    });
+  } catch (err) {
+    console.error("callGeminiOnce network/timeout/stream error:", err);
+    return new Response(String(err), { status: 504 });
+  } finally {
+    clearTimeout(total);
+    clearTimeout(idle);
+  }
+}
+
+async function callGemini(
+  admin: any,
+  taggerName: string,
+  taggedMessage: string,
+  contextMessages: { author_name: string; body: string }[],
+  problemText: string | null,
+  repliedTo: { author_name: string; body: string } | null,
+  problemImage: { mimeType: string; data: string } | null,
+  solution: { text: string; captions: string[]; stale: boolean } | null,
+  msgId: number
+): Promise<{ text: string | null; unavailable: boolean }> {
+  const contextBlock = contextMessages.length
+    ? contextMessages.map(m => `${m.author_name}: ${m.body}`).join("\n")
+    : "(no earlier messages in this thread)";
+  const problemBlock = problemText ? `\n\nThe problem this thread is about:\n${problemText}` : "";
+  const solutionBlock = solution
+    ? `\n\nThe published worked solution to this problem (supporting information, written by course staff):\n${solution.text}` +
+      (solution.captions.length
+        ? `\n\nIts figure is shown in steps, captioned:\n${solution.captions.map((c, i) => `${i + 1}) ${c}`).join("\n")}`
+        : "") +
+      (solution.stale
+        ? `\n\nNote: the problem was edited after this solution was written, so its numbers or setup may no longer match. Where they differ, the problem text above is what counts.`
+        : "")
+    : "";
+  const repliedToBlock = repliedTo
+    ? `\n\nThis message was sent as a direct reply to this earlier message:\n${repliedTo.author_name}: ${repliedTo.body}`
+    : "";
+
+  const userContent =
+    `Recent thread messages (oldest first):\n${contextBlock}${problemBlock}${solutionBlock}${repliedToBlock}\n\n` +
+    `Nickname of the user tagging you: ${taggerName}\n` +
+    `The message tagging you:\n${taggedMessage}`;
+
+  // Text part first, then the figure (if any) — order doesn't matter much to
+  // Gemini, but this keeps the prompt readable in logs.
+  const parts: Record<string, unknown>[] = [{ text: userContent }];
+  if (problemImage) {
+    parts.push({ inlineData: { mimeType: problemImage.mimeType, data: problemImage.data } });
+  }
+
+  const streamer = makeGeminiStreamer(admin, msgId);
+  let attempt = 0;
+  const once = (m: string) => callGeminiOnce(m, GEMINI_SYSTEM_INSTRUCTIONS, parts, ++attempt, streamer.progress);
+  try {
+    const resolved = await resolveGeminiModel(admin);
+    let model = resolved.model;
+    if (resolved.reason) {
+      console.warn(`Gemini MODEL SWAP: using ${model} instead of ${GEMINI_MODEL_PRIMARY} (${resolved.reason} cooldown active)`);
+      streamer.notice(attempt + 1, `${geminiModelLabel(GEMINI_MODEL_PRIMARY)} is busy, answering with ${geminiModelLabel(model)}…`);
+    }
+    let res = await once(model);
+
+    // 1) Daily quota on the primary -> fallback model for 24h.
+    if (!res.ok && model === GEMINI_MODEL_PRIMARY && (await isDailyQuotaExhausted(res))) {
+      console.log("gemini-3.6-flash: daily quota hit, falling back to gemini-3.5-flash-lite for 24h");
+      await recordDailyQuotaExhaustion(admin);
+      console.warn(`Gemini MODEL SWAP: ${GEMINI_MODEL_PRIMARY} -> ${GEMINI_MODEL_FALLBACK} (daily quota exhausted, 24h cooldown set)`);
+      model = GEMINI_MODEL_FALLBACK;
+      streamer.notice(attempt + 1, `${geminiModelLabel(GEMINI_MODEL_PRIMARY)} is busy, switching to ${geminiModelLabel(model)}…`);
+      res = await once(model);
+    }
+
+    // 2) Primary overloaded (503 etc.) -> 10 min cooldown and straight to the
+    // fallback, no retry (a 503 from the primary is slow and usually repeats).
+    if (!res.ok && model === GEMINI_MODEL_PRIMARY && RETRYABLE_STATUS.has(res.status)) {
+      await gLog(admin, msgId, "fallback_5xx", { model, http_status: res.status });
+      await setOverloadCooldown(admin);
+      console.warn(`Gemini MODEL SWAP: ${GEMINI_MODEL_PRIMARY} -> ${GEMINI_MODEL_FALLBACK} (HTTP ${res.status}, 10 min cooldown set)`);
+      model = GEMINI_MODEL_FALLBACK;
+      streamer.notice(attempt + 1, `${geminiModelLabel(GEMINI_MODEL_PRIMARY)} is busy, switching to ${geminiModelLabel(model)}…`);
+      res = await once(model);
+    }
+
+    // 3) Fallback also failing with a 5xx -> one retry (it's fast, so cheap).
+    if (!res.ok && model === GEMINI_MODEL_FALLBACK && RETRYABLE_STATUS.has(res.status)) {
+      console.warn(`Gemini ${model} returned HTTP ${res.status}, retrying once`);
+      await gLog(admin, msgId, "retry_5xx", { model, http_status: res.status });
+      streamer.notice(attempt + 1, `${geminiModelLabel(model)} is busy too, trying it again…`);
+      await sleep(1500);
+      res = await once(model);
+    }
 
     if (!res.ok) {
-      console.error("Gemini API error:", await res.text());
-      return null;
+      const errText = await res.text();
+      console.error("Gemini API error:", errText);
+      await gLog(admin, msgId, "api_error", { model, http_status: res.status, raw: errText });
+      // Google-side "can't serve you right now" (5xx / timeout-as-504 / 429):
+      // every model we tried failed, so the caller posts a visible notice.
+      // Other errors (400/403/404: bad key, bad model name, bad request) are
+      // OUR bug, not overload — those stay silent so the notice never lies.
+      const unavailable = RETRYABLE_STATUS.has(res.status) || res.status === 429;
+      if (unavailable) console.warn(`Gemini UNAVAILABLE: ${model} failed with HTTP ${res.status} after all fallbacks, no model could answer`);
+      await streamer.flush();
+      return { text: null, unavailable };
     }
 
     const data = await res.json();
-    const reply = data?.candidates?.[0]?.content?.parts?.map((p: any) => p.text).join("").trim();
-    return reply || null;
+    const cand = data?.candidates?.[0];
+    const reply = cand?.content?.parts?.filter((p: any) => !p.thought).map((p: any) => p.text).join("").trim();
+    if (reply) streamer.complete(attempt, reply);
+    await streamer.flush();
+    if (!reply) {
+      // 200 OK but no text (SAFETY block, empty candidate...) — previously silent.
+      await gLog(admin, msgId, "empty_reply", {
+        model,
+        http_status: res.status,
+        finish_reason: cand?.finishReason ?? data?.promptFeedback?.blockReason ?? null,
+        raw: JSON.stringify(data),
+      });
+    }
+    return { text: reply || null, unavailable: false };
   } catch (err) {
     console.error("Gemini call failed:", err);
-    return null;
+    await gLog(admin, msgId, "exception", { raw: String(err) });
+    await streamer.flush();
+    return { text: null, unavailable: false };
   }
+}
+
+// Fixed, hand-written notice posted (as the bot) when every model failed on
+// Google's side — see callGemini's `unavailable`. Static text, so it skips the
+// moderation call. Plain text: this forum only renders LaTeX delimiters.
+function geminiUnavailableNotice(taggerName: string): string {
+  return `@${taggerName}, Google's AI servers are overloaded right now, so I can't answer at the moment. Please try again in a few minutes.`;
+}
+
+async function postGeminiUnavailableNotice(
+  admin: any,
+  humanMsg: { id: number; author_name: string; scope: string; problem_key: string | null }
+): Promise<boolean> {
+  const { error } = await admin.from("forum_messages").insert({
+    author_name: GEMINI_BOT_NAME,
+    device_id: GEMINI_BOT_DEVICE_ID,
+    body: geminiUnavailableNotice(humanMsg.author_name),
+    scope: humanMsg.scope,
+    problem_key: humanMsg.problem_key,
+    reply_to_id: humanMsg.id,
+    moderation_status: "approved",
+  });
+  if (error) {
+    console.error("Gemini unavailable-notice insert error:", error);
+    await gLog(admin, humanMsg.id, "notice_insert_error", { raw: JSON.stringify(error) });
+    return false;
+  }
+  console.warn(`Gemini unavailable notice posted (reply to message ${humanMsg.id})`);
+  await gLog(admin, humanMsg.id, "unavailable_notice_posted");
+  return true;
 }
 
 // Runs the whole @gemini side-effect: gather context, call Gemini, moderate
@@ -456,16 +1164,46 @@ async function maybePostGeminiReply(
   humanMsg: { id: number; author_name: string; body: string; scope: string; problem_key: string | null },
   forceTrigger: boolean,
   repliedTo: { author_name: string; body: string } | null
-) {
-  if (!forceTrigger && !GEMINI_MENTION_RE.test(humanMsg.body)) return;
+): Promise<GeminiOutcome> {
+  if (!forceTrigger && !GEMINI_MENTION_RE.test(humanMsg.body)) return "error";
 
-  const [contextMessages, problemText] = await Promise.all([
+  await gLog(admin, humanMsg.id, "triggered");
+
+  const [contextMessages, problemContext, publishedSolution] = await Promise.all([
     fetchRecentContext(admin, humanMsg.scope, humanMsg.problem_key, humanMsg.id),
-    fetchProblemText(humanMsg.problem_key),
+    fetchProblemContext(humanMsg.problem_key),
+    fetchPublishedSolution(admin, humanMsg.problem_key),
   ]);
+  // Stale only when both hashes are known and differ — an unknown hash on
+  // either side means "can't tell", and the solution goes in unflagged.
+  const solution = publishedSolution
+    ? {
+        text: publishedSolution.text,
+        captions: publishedSolution.captions,
+        stale: !!(publishedSolution.problemHash && problemContext?.hash && publishedSolution.problemHash !== problemContext.hash),
+      }
+    : null;
+  // Only fetched once problemContext is in hand (it's what tells us whether
+  // there's an image URL at all) — not worth parallelizing with the above,
+  // since this is the rarer/slower leg (an extra image download) and most
+  // threads have no figure to fetch.
+  const problemImage = problemContext?.imageUrl ? await fetchProblemImage(problemContext.imageUrl) : null;
 
-  const reply = await callGemini(humanMsg.author_name, humanMsg.body, contextMessages, problemText, repliedTo);
-  if (!reply) return;
+  const { text: reply, unavailable } = await callGemini(
+    admin,
+    humanMsg.author_name,
+    humanMsg.body,
+    contextMessages,
+    problemContext?.text ?? null,
+    repliedTo,
+    problemImage,
+    solution,
+    humanMsg.id
+  );
+  if (!reply) {
+    if (!unavailable) return "error";
+    return (await postGeminiUnavailableNotice(admin, humanMsg)) ? "posted" : "error";
+  }
 
   // Gemini's explicit "I choose not to reply" signal — see the no-reply
   // bullet in GEMINI_SYSTEM_INSTRUCTIONS. .startsWith() rather than a strict
@@ -477,7 +1215,8 @@ async function maybePostGeminiReply(
   const normalizedReply = reply.trim();
   if (normalizedReply === GEMINI_NO_REPLY_SENTINEL || normalizedReply.startsWith(GEMINI_NO_REPLY_SENTINEL)) {
     console.info("Gemini chose not to reply (trivial reply-to, or offensive message).");
-    return;
+    await gLog(admin, humanMsg.id, "no_reply_sentinel", { raw: normalizedReply });
+    return "declined";
   }
 
   // No length cap here: MAX_BODY_LEN only bounds human-submitted payloads
@@ -498,17 +1237,21 @@ async function maybePostGeminiReply(
       body: JSON.stringify({ model: "omni-moderation-latest", input: trimmedReply }),
     });
     if (!modRes.ok) {
-      console.error("Gemini-reply moderation API error:", await modRes.text());
-      return;
+      const modErrText = await modRes.text();
+      console.error("Gemini-reply moderation API error:", modErrText);
+      await gLog(admin, humanMsg.id, "mod_error", { http_status: modRes.status, raw: modErrText });
+      return "error";
     }
     const modData = await modRes.json();
     if (modData?.results?.[0]?.flagged) {
       console.error("Gemini reply was flagged by moderation, not posted.");
-      return;
+      await gLog(admin, humanMsg.id, "mod_flagged", { raw: trimmedReply });
+      return "moderated";
     }
   } catch (err) {
     console.error("Gemini-reply moderation call failed:", err);
-    return;
+    await gLog(admin, humanMsg.id, "mod_error", { raw: String(err) });
+    return "error";
   }
 
   const { error: geminiInsertErr } = await admin.from("forum_messages").insert({
@@ -520,13 +1263,62 @@ async function maybePostGeminiReply(
     reply_to_id: humanMsg.id,
     moderation_status: "approved",
   });
-  if (geminiInsertErr) console.error("Gemini reply insert error:", geminiInsertErr);
+  if (geminiInsertErr) {
+    console.error("Gemini reply insert error:", geminiInsertErr);
+    await gLog(admin, humanMsg.id, "insert_error", { raw: JSON.stringify(geminiInsertErr) });
+    return "error";
+  } else {
+    console.info(
+      `Gemini reply posted (problem=${humanMsg.problem_key ?? "none"}, image=${!!problemImage}, solution=${solution ? (solution.stale ? "stale" : "yes") : "no"})`
+    );
+    await gLog(admin, humanMsg.id, "posted");
+    return "posted";
+  }
+}
+
+type GeminiOutcome = "posted" | "declined" | "moderated" | "error";
+
+// A broadcast on the channel every open forum already listens to (js/forum.js,
+// "forum-messages-changes"); with nobody subscribed it is simply dropped.
+async function broadcastForum(admin: any, event: string, payload: Record<string, unknown>) {
+  try {
+    const channel = admin.channel("forum-messages-changes");
+    await channel.send({ type: "broadcast", event, payload });
+    await admin.removeChannel(channel);
+  } catch (err) {
+    console.error(`${event} broadcast failed:`, err);
+  }
+}
+
+// Tells every open forum that Gemini is done with this question, answered or
+// not (js/forum.js, forumGeminiServerDone): its "thinking" row then turns
+// into the answer, or, with no answer coming, says why (`reason`) and folds
+// at once instead of waiting out the client's 2-minute cap.
+async function announceGeminiDone(admin: any, messageId: number, outcome: GeminiOutcome) {
+  await broadcastForum(admin, "gemini-done", { message_id: messageId, posted: outcome === "posted", reason: outcome });
+}
+
+// maybePostGeminiReply plus the "done" broadcast, for messages that trigger it.
+async function runGeminiReply(
+  admin: any,
+  humanMsg: { id: number; author_name: string; body: string; scope: string; problem_key: string | null },
+  forceTrigger: boolean,
+  repliedTo: { author_name: string; body: string } | null
+) {
+  if (!forceTrigger && !GEMINI_MENTION_RE.test(humanMsg.body)) return;
+  let outcome: GeminiOutcome = "error";
+  try {
+    outcome = await maybePostGeminiReply(admin, humanMsg, forceTrigger, repliedTo);
+  } catch (err) {
+    console.error("Gemini reply failed:", err);
+  }
+  await announceGeminiDone(admin, humanMsg.id, outcome);
 }
 
 export default {
   fetch: withSupabase({ auth: "publishable" }, async (req, ctx) => {
     const payload: PostMessagePayload = await req.json();
-    const { author_name, device_id, body, scope, problem_key, force_latex, reply_to_id } = payload ?? {};
+    const { author_name, device_id, device_secret, body, scope, problem_key, force_latex, reply_to_id } = payload ?? {};
 
     // ctx.supabaseAdmin bypasses RLS — the only client in this file allowed to write.
     const admin = ctx.supabaseAdmin;
@@ -551,6 +1343,34 @@ export default {
     if (device_id.toLowerCase() === GEMINI_BOT_DEVICE_ID.toLowerCase()) {
       return Response.json({ ok: false, error: "This device id is reserved." }, { status: 400 });
     }
+    if (!(await verifyOrRegisterDevice(admin, device_id, device_secret, payload?.device_token))) {
+      return Response.json({ ok: false, error: "device_auth_failed" }, { status: 403 });
+    }
+    const deviceToken = await issueDeviceToken(device_id);
+
+    // Resolves identity_id once for the whole request — used below for both
+    // the ban check and the nickname-enforcement block further down.
+    // Previously these were two separate identity_devices queries for the
+    // same device_id; now it's at most one, and often zero once the
+    // identity token is warm (see verifyIdentityToken's own comment for why
+    // this is cached with a much shorter TTL than the device token above).
+    let identityId: string | null = null;
+    const identityCheck = await verifyIdentityToken(device_id, payload?.identity_token);
+    if (identityCheck.ok) {
+      identityId = identityCheck.identityId;
+    } else {
+      const { data: link, error: linkErr } = await admin
+        .from("identity_devices")
+        .select("identity_id")
+        .eq("device_id", device_id)
+        .maybeSingle();
+      if (linkErr) {
+        console.error("Identity link lookup error:", linkErr);
+        return Response.json({ ok: false, error: "Couldn't verify your identity, try again." }, { status: 500 });
+      }
+      identityId = link ? link.identity_id : null;
+    }
+    const identityToken = await issueIdentityToken(device_id, identityId);
 
     // ── Ban check (escalating bans from red flags, see flag-message.ts) ────
     // Checked before any other content validation/work, since a banned
@@ -573,18 +1393,11 @@ export default {
       banUntil = banRow.banned_until;
     }
 
-    const { data: banLink, error: banLinkErr } = await admin
-      .from("identity_devices")
-      .select("identity_id")
-      .eq("device_id", device_id)
-      .maybeSingle();
-    if (banLinkErr) {
-      console.error("Ban check (identity link) error:", banLinkErr);
-    } else if (banLink?.identity_id) {
+    if (identityId) {
       const { data: identityBanRow, error: identityBanErr } = await admin
         .from("identity_bans")
         .select("banned_until")
-        .eq("identity_id", banLink.identity_id)
+        .eq("identity_id", identityId)
         .maybeSingle();
       if (identityBanErr) {
         console.error("Ban check (identity) error:", identityBanErr);
@@ -676,23 +1489,12 @@ export default {
     // identity through identity_devices, which is what lets multiple
     // devices share one identity without any of them losing this
     // enforcement. See edge-functions/claim-nickname.ts.
-    const { data: myLink, error: myLinkErr } = await admin
-      .from("identity_devices")
-      .select("identity_id")
-      .eq("device_id", device_id)
-      .maybeSingle();
-
-    if (myLinkErr) {
-      console.error("Identity link lookup error:", myLinkErr);
-      return Response.json({ ok: false, error: "Couldn't verify your identity, try again." }, { status: 500 });
-    }
-
-    if (myLink) {
-      myIdentityId = myLink.identity_id;
+    if (identityId) {
+      myIdentityId = identityId;
       const { data: myIdentity, error: myIdentityErr } = await admin
         .from("identities")
         .select("nickname")
-        .eq("id", myLink.identity_id)
+        .eq("id", identityId)
         .maybeSingle();
       if (myIdentityErr) {
         console.error("Identity lookup error:", myIdentityErr);
@@ -805,10 +1607,15 @@ export default {
     // often several seconds — instead of confirming right away like any
     // other message, with the side effects landing a beat later.
     EdgeRuntime.waitUntil(Promise.all([
-      maybePostGeminiReply(admin, inserted, replyToIsGemini, replyToParent),
+      runGeminiReply(admin, inserted, replyToIsGemini, replyToParent),
       sendMentionPushNotifications(admin, inserted, myIdentityId, replyToParentIdentityId),
     ]));
 
-    return Response.json({ ok: true, message: inserted });
+    return Response.json({
+      ok: true,
+      message: inserted,
+      ...(deviceToken ? { device_token: deviceToken.token, device_token_expires_at: deviceToken.expiresAt } : {}),
+      ...(identityToken ? { identity_token: identityToken.token, identity_token_expires_at: identityToken.expiresAt } : {}),
+    });
   }),
 };

@@ -1,55 +1,155 @@
-# Flux — Physics Practice Quiz Platform
+# Flux — PHYS 162 Practice Quiz
 
-Flux is a solo-built, vanilla-JS practice quiz platform for university physics
-courses. It started as one HTML file with six random problems for a PHYS162
-summer term and grew into a full multi-mode quiz app with theming, cross-device
-stats, a moderated class forum with an AI participant, a searchable manual, and
-offline support — no framework, no build step, no bundler.
-
-This repo is the **framework**: one course's content (currently PHYS162) lives
-inside it in a way that's designed to be swapped out wholesale, so the same
-codebase can be redeployed for a different course (PHYS161, etc.) as its own
-separate site with its own database. See [Deploying a new course](#deploying-a-new-course)
-for exactly how.
+This repository is the **PHYS 162** deployment of the Impulse & Flux
+physics practice-quiz platform. The platform code is the same as in
+[Impulse](https://github.com/Aoi-Kuro/impulse) (PHYS 161); everything
+specific to this course lives in `course/`, in `js/course-config.js` under
+`phys162`, and in the handful of [manual-swap items](#manual-swap-items).
+How a course is set up is described in
+[Deploying a new course](#deploying-a-new-course).
 
 > Live site: https://phys162.netlify.app
+>
+> Source: https://github.com/Aoi-Kuro/flux
+>
+> Database: Supabase project `tnvdwirpveqnjyvbuxvw` ("Flux", eu-west-1, Ireland)
+
+## This course: PHYS 162
+
+| Set | Name | Problems | Figures |
+|---|---|---|---|
+| 1 | Electricity & Fields | 84 | 19 |
+| 2 | Circuits & Magnetism | 100 | 31 |
+| 3 | Electromagnetism | 100 | 17 |
+| 4 | Light & Optics | 89 | 10 |
+
+- **Source of the problems.** Every set follows the official exam, problem
+  for problem: P*n* on the site is P*n* in the exam, with the same numbers
+  and answers. Set 1 is the exam's own wording; Sets 2-4 keep the formatted
+  text of the earlier PHYS 162 site wherever it already matched the exam,
+  and use the exam's wording where it did not. Answers are stated in the
+  exam's units (nC, nF, ...). Exam 1's P19 integral is written into the
+  problem as a formula; two answer-key notes (Exam 1 P23, Exam 3 P63) are
+  left out.
+- **Figures.** The exam's original images are in `course/images/quiz_N/`.
+  Their redraws are mostly hand-drawn SVGs from the earlier site (61 of 77,
+  in `tools/figures/handmade/`); the other 16 are drawn in
+  `tools/figures/quiz1.py` and `quiz3.py`. See
+  [Redrawn problem figures](#redrawn-problem-figures).
+- **Not yet for PHYS 162:** common-mistake notes (`quizN-mistakes.js` are
+  empty), figure animations (`course/animations/quizN.js` are empty), exam
+  handouts (there were none), a pinned forum message
+  (`pinnedMessageId: null`) and the Netlify site id (`netlifySiteId`), which
+  `minify.py --deploy` needs before it will deploy.
+- **Random quiz size:** 6 problems, 3 of them from the previous set in
+  cumulative mode (`quizSettings`).
 
 ---
 
 ## Table of contents
 
-- [How it's built](#how-its-built)
+- [This course: PHYS 162](#this-course-phys-162)
+- [How it is built](#how-it-is-built)
 - [Project structure](#project-structure)
 - [The multi-course architecture](#the-multi-course-architecture)
-  - [`course/` — swap this wholesale](#course--swap-this-wholesale)
+  - [`course/` — swapped wholesale](#course--swapped-wholesale)
   - [`js/course-config.js` — the live switch](#jscourse-configjs--the-live-switch)
-  - [What's still framework (shared)](#whats-still-framework-shared)
-- [How each subsystem works](#how-each-subsystem-works)
+  - [Per-course changelog filtering](#per-course-changelog-filtering)
+  - [What stays framework (shared)](#what-stays-framework-shared)
+- [Problem banks](#problem-banks)
+  - [Problem object format](#problem-object-format)
+  - [The quiz registry](#the-quiz-registry)
+  - [Problem ids, numbers and retiring problems](#problem-ids-numbers-and-retiring-problems)
+  - [Adding a quiz](#adding-a-quiz)
+- [Answer checking](#answer-checking)
+- [Front-end subsystems](#front-end-subsystems)
+  - [Page load order](#page-load-order)
+  - [Quiz engine](#quiz-engine)
+  - [Problem flags](#problem-flags)
+  - [Exam handouts](#exam-handouts)
+  - [Stats](#stats)
+  - [Cross-device sync](#cross-device-sync)
+  - [Forum](#forum)
+  - [Push notifications](#push-notifications)
+  - [Worked solutions (site side)](#worked-solutions-site-side)
+  - [Redrawn problem figures](#redrawn-problem-figures)
+  - [Animated figures](#animated-figures)
+  - [Settings](#settings)
+  - [Offline support](#offline-support)
+  - [Theming](#theming)
+  - [Math rendering and the render cache](#math-rendering-and-the-render-cache)
+  - [Top bar](#top-bar)
+  - [Banners and the update checker](#banners-and-the-update-checker)
+  - [Remote settings (`site-version.json`)](#remote-settings-site-versionjson)
+  - [Smaller modules](#smaller-modules)
+- [Lockdown mode (Safe Exam Browser)](#lockdown-mode-safe-exam-browser)
+- [Solutions editor (`/editor`)](#solutions-editor-editor)
+  - [Access](#access)
+  - [Access levels](#access-levels)
+  - [Layout](#layout)
+  - [Figures (TikZ)](#figures-tikz)
+  - [Figures (SVG)](#figures-svg)
+  - [Solution text](#solution-text)
+  - [Several solutions per problem (versions)](#several-solutions-per-problem-versions)
+  - [Reviews](#reviews)
+  - [Saving, publishing and conflicts](#saving-publishing-and-conflicts)
+  - [Link previews](#link-previews)
+  - [Drafts and local history](#drafts-and-local-history)
+  - [Other editor tools](#other-editor-tools)
+  - [Managing editor keys](#managing-editor-keys)
 - [Database (Supabase)](#database-supabase)
+- [Database offline](#database-offline)
 - [Edge functions](#edge-functions)
-- [Running it locally](#running-it-locally)
+- [Device ownership (`device_secret`) and tokens](#device-ownership-device_secret-and-tokens)
+- [Gemini integration](#gemini-integration)
+- [Client-side storage reference](#client-side-storage-reference)
+- [Running locally](#running-locally)
+- [Building for deployment (`minify.py`)](#building-for-deployment-minifypy)
 - [Deploying a new course](#deploying-a-new-course)
-- [Manual-swap items (can't be centralized)](#manual-swap-items-cant-be-centralized)
+- [Manual-swap items](#manual-swap-items)
 - [Versioning](#versioning)
+- [License](#license)
 
 ---
 
-## How it's built
+## How it is built
 
-- **No framework, no build step.** Plain HTML/CSS/JS, loaded as a stack of
-  `<script>` tags in `index.html`, in a deliberate dependency order (see
-  comments in `index.html` itself).
-- **Supabase** for the forum, stats sync, and push notifications — Postgres +
-  Row Level Security + Edge Functions (Deno/TypeScript), called directly from
-  the browser with a public, RLS-restricted "publishable" key.
-- **Netlify** for static hosting.
-- **MathJax** (STIX Two font, vendored locally in `vendor/mathjax/`) for LaTeX
-  rendering, with a persistent IndexedDB render cache for solve-all mode.
-- **A service worker** (`sw.js`) for one narrow purpose: showing a real
-  offline page instead of the browser's default "no internet" screen.
+- **No framework, no build step for development.** Plain HTML/CSS/JS is loaded
+  as a stack of `<script>` tags in `index.html`, in a deliberate dependency
+  order (documented in comments inside `index.html` itself). Files share
+  globals; inline `onclick="…"` handlers call top-level functions by name.
+- **Supabase** backs the forum, stats sync, Solve-All sync, push
+  notifications and worked solutions: Postgres + Row Level Security + Realtime
+  + Edge Functions (Deno/TypeScript). The browser talks to it directly with a
+  public, RLS-restricted *publishable* key; every write goes through an Edge
+  Function.
+- **Netlify** serves the static files, plus two Edge Functions in
+  `netlify/edge-functions/`: `share.ts` for shared solution links and
+  `db-status.ts`, which says whether the database is off. `minify.py`
+  builds the minified site and either zips it or deploys it with the Netlify
+  CLI (see [Building for deployment](#building-for-deployment-minifypy)).
+- **MathJax 3** (STIX Two font, vendored in `vendor/mathjax/`) renders LaTeX,
+  with a persistent IndexedDB render cache for Solve-All mode.
+- **TikZJax** (vendored in `vendor/tikzjax/`, ~9.5 MB) compiles TikZ figures
+  to SVG — but only inside the solutions editor. The practice site only
+  displays the stored SVGs.
+- **DOMPurify** (vendored) sanitizes every solution-figure SVG before it is
+  inlined into a page.
+- **Problem figures** exist twice: the original images in `course/images/` and
+  theme-coloured SVG redraws in `course/figures/`, generated by a Python
+  drawing kit in `tools/figures/` (see [Redrawn problem figures](#redrawn-problem-figures)).
+  Some redraws can be played as short animations, hand-written in
+  `course/animations/` (see [Animated figures](#animated-figures)).
+- **A service worker** (`sw.js`) provides an offline fallback page, the
+  24-hour full offline mode, and Web Push display.
+- Vendored export libraries (**jsPDF**, **svg2pdf**, **jspdf-autotable**,
+  **SheetJS**, embedded IBM Plex fonts) are lazy-loaded only when stats are
+  exported.
 
-There's no `package.json`, no `npm install`, no dev server requirement beyond
-"serve these static files" — see [Running it locally](#running-it-locally).
+There is no `package.json` and no `npm install`. The only development
+requirement is a static file server (see [Running locally](#running-locally));
+Python 3 runs the deploy build (`minify.py`), the figure generator
+(`tools/figures/`) and the answer-engine build (`vendor-src/pt-answer/`).
 
 ---
 
@@ -57,154 +157,214 @@ There's no `package.json`, no `npm install`, no dev server requirement beyond
 
 ```
 flux/
-├── index.html              Main app shell — the quiz UI, landing screen,
-│                            forum/stats/manual panels, and the full
-│                            <script> load order (read its comments first)
-├── offline.html             Fallback page shown by sw.js when there's no
-│                            connection — a standalone page, not a route
-├── sw.js                    Service worker: offline-page fallback + Web
-│                            Push notification display/click handling
-├── version.json              { "version": "X.Y.Z" } — read by
-│                            quiz-engine.js's update-checker
+├── index.html              Main app shell: landing screen, quiz/Solve-All UI,
+│                            Stats/Forum/Manual/Settings/Solution screens,
+│                            every modal, and the full <script> load order
+│                            (its comments are the first thing to read)
+├── offline.html             Fallback page shown by sw.js when a navigation
+│                            fails with no connection (standalone page)
+├── sw.js                    Service worker: offline fallback, 24h full
+│                            offline mode, update-cache purge, Web Push
+├── site-version.json        { "version": "X.Y.Z", "editor": "X.Y.Z" } — site
+│                            and editor versions, polled by the update
+│                            checkers of the site and of the editor, plus
+│                            optional remote settings (see below)
+├── _headers                 Netlify Cache-Control: vendor/, images/, favicon/
+│                            reusable for a day (cuts billed revalidations)
+├── minify.py                Builds the minified site and checks
+│                            site-version.json; zips it, or with --deploy
+│                            deploys it (and netlify/) with the Netlify CLI
+├── netlify/edge-functions/
+│   ├── share.ts             /s/<key>: a shared solution's link preview
+│   └── db-status.ts         /db-status: is the course database on?
+├── seb/                     Safe Exam Browser configs, one per host, and
+│                            quit.html, where leaving lockdown lands
+├── LICENSE                  GNU AGPL v3 (shown on the Copyright screen)
+├── vendor-src/              Sources of vendor/ builds (not deployed)
+│   └── pt-answer/           Answer engine: source, build.py, tests
+├── tools/                   Not deployed
+│   ├── seb/make_config.py   Writes seb/*.seb
+│   └── figures/             Generator of course/figures/ (Python):
+│       ├── svgkit.py        Tiny SVG drawing kit, theme colour names
+│       ├── quiz1.py .. quiz4.py  One function per redrawn image + FIGURES table
+│       ├── manual.py        The manual's own demo drawings (no original image)
+│       ├── common.py        Shared drawing helpers (charges, circuits, fields)
+│       ├── handmade/quiz1..4/  Hand-drawn SVGs, by image name, used before
+│       │                    quizN.py's drawings; credits.json for their badges
+│       ├── inertia.py       Exam handout drawings (empty: PHYS 162 had none)
+│       ├── export.py        Writes course/figures/quizN.js, manual.js, inertia.js
+│       └── preview.py       Before/after review page (preview/, git-ignored)
 │
-├── course/                  ★ Everything specific to the currently-deployed
-│   │                          course. See "The multi-course architecture".
-│   ├── course.json          Historical/stale — used to be a manual
-│   │                        copy-paste reference for title/OG/Twitter/
-│   │                        eyebrow text. That's now automated (see
-│   │                        js/course-config.js's `display` field);
-│   │                        editing this file does nothing.
+├── course/                  ★ Everything specific to the deployed course
 │   ├── quizzes/
-│   │   ├── quiz1.js .. quiz4.js   Problem banks (one file per quiz set)
-│   │   └── quizzes.js       Registry wiring each quiz's name + enabled
-│   │                        flag to its problem array (QUIZZES global)
-│   ├── splashes.json        Minecraft-style main-menu splash text pool
+│   │   ├── quiz1.js .. quiz4.js   Problem banks: Quiz_N_Problems and
+│   │   │                          Quiz_N_Retired arrays (+ optional
+│   │   │                          Quiz_N_Gaps)
+│   │   ├── quiz1-mistakes.js .. quiz4-mistakes.js   Common wrong answers and
+│   │   │                       short notes, shown by js/common-mistakes.js
+│   │   │                       (empty for PHYS 162 so far)
+│   │   ├── handouts.js      Exam handouts per quiz (QUIZ_HANDOUTS), shown
+│   │   │                       by js/handout.js
+│   │   └── quizzes.js       QUIZZES registry + id/number helpers
+│   ├── images/quiz_1..4/    The exams' figure images, as .webp, referenced
+│   │                        from problem text
+│   ├── figures/quiz1.js .. quiz4.js  Redrawn SVG for those images, by file
+│   │                        name (generated by tools/figures/export.py);
+│   │                        manual.js: the manual's demo drawings, by name;
+│   │                        inertia.js: handout drawings (empty here)
+│   ├── animations/quiz1.js .. quiz4.js, manual.js  Animations of
+│   │                        some redrawn figures (hand-written;
+│   │                        js/figure-anim.js plays them; none for the
+│   │                        PHYS 162 sets yet)
+│   ├── splashes.json        Main-menu splash text pool
 │   ├── manual.json          User manual content (sections/subsections)
-│   ├── offline-laws.json    Physics "law of the moment" shown on offline.html
-│   ├── preview.png          Open Graph / Twitter card preview image
-│   └── images/quiz_3/       Figure images referenced from quiz3.js problems
+│   ├── offline-laws.json    "Law of the moment" pool for offline.html
+│   ├── preview.png          Open Graph / Twitter card image
+│   └── course.json          Historical reference only — not loaded by
+│                            anything (see below)
 │
-├── js/                       ★ Framework code — identical across every
-│   │                          course deployment (nothing course-specific
-│   │                          left here except manual-swap exceptions noted
-│   │                          below).
-│   ├── course-config.js      ⚡ Loads FIRST. Reads <head data-course="...">,
-│   │                        exposes STORAGE_PREFIX / SUPABASE_URL /
-│   │                        SUPABASE_PUBLISHABLE_KEY / PUSH_VAPID_PUBLIC_KEY
-│   │                        for the active course. See below.
-│   ├── banner-manager.js    Priority queue for the bottom notification
-│   │                        banners (update / bug-report / theme-nudge)
-│   ├── theme-colors.js      Reads live CSS custom properties into JS, so
-│   │                        canvas/JS-drawn UI (confetti, π-day egg) stays
-│   │                        in sync with the active color theme
-│   ├── themes.js             Color theme picker, custom theme builder,
-│   │                        day/night mode, one-time theme nudge
-│   ├── splash.js             Fetches course/splashes.json, rolls a splash
-│   │                        line on the landing screen
-│   ├── easter.js             Pi Day / Pi Hour easter egg
-│   ├── data/changelog.js    Changelog entries (shared across courses — this
-│   │                        is the *platform's* dev history, not physics
-│   │                        content, so it stays in js/ not course/)
-│   ├── changelog.js          Changelog panel UI + a small "field lines"
-│   │                        cursor toggle
-│   ├── stats.js              Local attempt log (Random 6 mode), synced to
-│   │                        a claimed forum identity
-│   ├── stats-export.js       Stats screen export: CSV / TXT / Excel / PDF
-│   ├── attempts-sync.js      Push/pull quiz attempts to/from Supabase
-│   │                        (sync-quiz-attempts Edge Function)
-│   ├── solve-all-sync.js    Cross-device sync for Solve-All progress
-│   │                        (union-merge, not last-write-wins)
-│   ├── math-cache.js        IndexedDB cache of pre-typeset MathJax output,
-│   │                        keyed by a hash of each problem's LaTeX source
-│   ├── math-render.js       Thin renderMathIn(el) wrapper around MathJax
-│   ├── quiz-engine.js        The quiz engine itself: Practice mode, Solve
-│   │                        Them All mode, Moodle-style number parsing,
-│   │                        unit algebra/conversion, version-update banner
-│   ├── fig-attribution.js   Tap-to-toggle (i) badges on figure images
-│   ├── site-visits.js        Fires once per page load → record-visit
-│   │                        Edge Function (feeds "Total visits" stat)
-│   ├── forum.js              The class forum: read-only feed rendering,
-│   │                        posting (via Edge Function, never direct
-│   │                        .insert()), nicknames/PINs, replies, mentions,
-│   │                        moderation UI, avatar caching
-│   ├── push-notifications.js Web Push subscribe/unsubscribe UI for forum
-│   │                        @mentions
-│   └── manual.js              User manual browser (fetches course/manual.json)
+├── js/                      ★ Framework code, identical across courses
+│   ├── course-config.js     Loads first. Per-course keys/settings → globals
+│   ├── site-config.js       Settings read from site-version.json: poll
+│   │                        intervals, kill switches, sync pause
+│   ├── db-status.js         Notices the database is off; the offline box
+│   ├── logo-offline.js      Red cube and "Limited (DB lost)" meanwhile
+│   ├── banner-manager.js    One-at-a-time queue for the bottom banners
+│   ├── theme-colors.js      Reads live CSS variables for JS-drawn UI
+│   ├── themes.js            Theme presets, custom theme builder, day/night
+│   ├── splash.js            Splash line on the landing screen
+│   ├── easter.js            Pi Day / Pi Hour easter egg
+│   ├── data/changelog.js    Changelog entries (platform history)
+│   ├── data/tips.js         Rotating top-bar tip strings
+│   ├── answer-check.js      Answer field: grading rules, preview box
+│   ├── card-layout.js       Problem card layouts: Inline, Tabs, Legacy
+│   ├── lockdown.js          Lockdown mode: the choice, collecting attempts
+│   ├── lockdown-session.js  Loaded only in Safe Exam Browser: saving, exit
+│   ├── calculator.js        Loaded only in Safe Exam Browser: calculator
+│   ├── stats.js             Attempt log, chart, table, problems overview,
+│   │                        attempt review, Forum & Site panel
+│   ├── stats-export.js      Export to PDF / Excel / CSV / TXT
+│   ├── attempts-sync.js     Attempt sync + shared "live dot" state machine
+│   ├── solve-all-sync.js    Solve-All progress sync (union merge)
+│   ├── math-cache.js        IndexedDB cache of typeset MathJax output
+│   ├── math-render.js       renderMathIn(el) wrapper around MathJax
+│   ├── figure.js            Solution-figure SVG normalize/sanitize/crop
+│   │                        (shared with the editor)
+│   ├── solution-render.js   Solution text → blocks + MathJax (shared with
+│   │                        the editor)
+│   ├── solutions.js         "Solution" buttons and the Solution screen
+│   ├── problem-flags.js     Flag button on problem cards (C1 / C2)
+│   ├── handout.js           Exam handout button after the problem number
+│   │                        + the window that shows the handout
+│   ├── editor-access.js     Hidden long-press entry to /editor on the logo
+│   ├── quiz-engine.js       Quiz engine: Random N, cumulative, filters,
+│   │                        Solve-All, live timer,
+│   │                        full-screen hint, update checker
+│   ├── logo-tumble.js       Logo cube tumble when the main menu appears
+│   ├── fig-attribution.js   Tap-to-toggle (i) attribution badges on figures
+│   ├── figure-anim.js       Play button + speed chip for animated figures
+│   ├── figure-style.js      Swaps problem images for their redrawn SVGs
+│   │                        (Settings › Study › Redrawn figures)
+│   ├── top-bar-scroll.js    Top-bar backdrop state on scroll
+│   ├── top-bar-tips.js      Rotating one-line tips in the top bar
+│   ├── top-bar-quiz-status.js  Clock + battery in the top bar (full screen)
+│   ├── solve-all-nav.js     Solve-All progress rail (wide screens)
+│   ├── changelog.js         Changelog panel + "field lines" cursor effect
+│   ├── manual.js            User manual screen (reads course/manual.json)
+│   ├── license.js           Copyright screen (statements + LICENSE text)
+│   ├── settings.js          Settings schema, storage, panel, backup
+│   ├── settings-search.js   Settings > Search tab: matching + keyword lists
+│   ├── offline-mode.js      "Go offline" download + Cache & storage tools
+│   ├── site-visits.js       Records one visit per page load
+│   ├── forum.js             The class forum
+│   ├── push-notifications.js  Web Push subscribe/unsubscribe UI
+│   └── settings-sync.js     Settings + theme sync across devices
+│
+├── editor/                  Solutions editor, served at /editor/
+│   ├── index.html           Editor page (key gate + app)
+│   ├── editor.js            Editor logic
+│   ├── editor.css           Editor styles
+│   ├── svg-figure.js        SVG-mode figures: layers, colours, build, panel edits
+│   ├── highlight.js         Syntax colours for the TikZ, SVG and solution boxes
+│   ├── manual.js            Editor manual screen (📖, reads editor/manual.json)
+│   ├── manual.json          Editor manual content (sections/subsections)
+│   ├── store.js             Talks to the solutions-admin Edge Function
+│   ├── store-mock.js        Drop-in localStorage stand-in for store.js
+│   ├── share-card.js/.css   The link-preview picture of a solution
+│   └── share-card.html      Test view of that picture (?key=q3_P148i)
 │
 ├── css/
-│   ├── style.css              Core UI: quiz cards, landing screen, theme
-│   │                        presets (body[data-theme="x"] blocks), fonts
-│   ├── forum.css              Forum screen (mirrors stats.css structurally)
-│   ├── stats.css              Stats dashboard screen
-│   └── manual.css             User manual screen
+│   ├── style.css            Core UI, landing screen, theme presets
+│   ├── answer-check.css     Answer field + preview (own file: style.css is
+│   │                        served cache-first by sw.js, this one fresh)
+│   ├── stats.css            Stats screen (+ shared modal styles)
+│   ├── forum.css            Forum screen, Getting Started FAQ
+│   ├── manual.css           Manual screen
+│   ├── license.css          Copyright screen
+│   ├── settings.css         Settings screen + Display hide classes
+│   ├── solve-all-nav.css    Solve-All progress rail
+│   ├── figure.css           Solution figures (shared with the editor)
+│   ├── solutions.css        "Solution" button + Solution screen
+│   ├── card-layouts.css     Looks of the Inline and Tabs card layouts
+│   ├── lockdown.css         Lockdown screens
+│   ├── lockdown-session.css Loaded only in SEB: hides the rest of the site
+│   ├── calculator.css       Loaded only in SEB: calculator
+│   ├── problem-flags.css    Flag button on problem cards + its C1/C2 window
+│   └── handout.css          Exam handout button + its window
 │
-├── images/                   Framework-level images (NOT course-specific)
-│   ├── gemini-logo.svg        Gemini bot avatar in the forum
-│   └── offline/{dark,light}.png   offline.html illustration, both themes
+├── images/                  Framework images (not course-specific)
+│   ├── gemini-logo.svg      Gemini bot avatar in the forum
+│   └── offline/{dark,light}.webp  offline.html illustration
 │
-├── favicon/                   Standard favicon set + site.webmanifest
-│                            ("Flux" branding — shared across courses)
+├── favicon/                 Favicon set + site.webmanifest ("Flux")
 │
-├── vendor/                    Vendored third-party libraries (no CDN
-│                            dependency for these): MathJax, jsPDF, SheetJS,
-│                            fonts
+├── vendor/                  Vendored third-party code (no CDN needed)
+│   ├── mathjax/             MathJax bundle + STIX Two woff fonts
+│   ├── tikzjax/             TikZJax (TeX in WebAssembly), TeX fonts, .sty
+│   ├── dompurify/           DOMPurify
+│   ├── pt-answer/           Answer engine (built from vendor-src/pt-answer)
+│   ├── jspdf/               jsPDF, svg2pdf, jspdf-autotable
+│   ├── sheetjs/             SheetJS (xlsx)
+│   ├── html-to-image/       html-to-image (editor: link-preview pictures)
+│   └── fonts/               IBM Plex embedded for PDF export
 │
-└── superbase/                 [sic — matches the folder name in this repo]
-    │                          Everything for the Supabase backend. This
-    │                          folder describes ONE Supabase project — the
-    │                          currently-deployed course's. A new course
-    │                          gets its own project built from the same
-    │                          files, then course-specific edits (see
-    │                          "Manual-swap items" below).
-    ├── database.sql            Old context-only schema dump — superseded by
-    │                          migrations/000, kept only for reference
-    ├── migrations/              A single consolidated SQL file
-    │                          (000_initial_schema_consolidated.sql) that
-    │                          builds the entire database — tables, indexes,
-    │                          view, functions, trigger, and RLS — in one
-    │                          run against a fresh Supabase project
-    ├── edge-functions/          Deno/TypeScript Edge Functions — see
-    │                          "Edge functions" below for what each does
-    └── schema-phys162.png      Reference screenshot of phys162's schema
+└── superbase/               [sic] Supabase backend for ONE project
+    ├── migrations/          000–012, run in order on a fresh project
+    ├── edge-functions/      Deno/TypeScript Edge Functions
+    ├── database.sql         Old context-only schema dump (reference only)
+    └── schema-phys162.png   Reference screenshot of the phys162 schema
 ```
 
 ---
 
 ## The multi-course architecture
 
-**The model:** this repo is deployed once per course, each time as a
-completely separate Netlify site + Supabase project + (eventually) separate
-GitHub repo. Work on one course's copy, and when it's time to release a
-different course, copy the `course/` folder's contents from that course,
-hand-edit a small, well-marked set of header values, and redeploy. The
+The repository is deployed once per course, each time as a completely separate
+Netlify site + Supabase project (and, eventually, a separate GitHub
+repository). Releasing a different course consists of replacing the contents
+of `course/`, filling in that course's entry in `js/course-config.js`, and
+hand-editing a small, well-marked set of values that cannot be centralized. The
 release step is manual and copy-based rather than templated at build time.
 
-### `course/` — swap this wholesale
+### `course/` — swapped wholesale
 
-Everything in `course/` is real content that differs between courses:
-problem banks, splash text, the manual, the offline-page law list, the OG
-preview image, and course-specific images. To release a different course,
-this entire folder's *contents* (quizzes, splashes, manual, offline-laws,
-preview image, course images) get replaced with that course's versions.
+Everything in `course/` is real content that differs between courses: problem
+banks, figure images, their redrawn SVGs and animations, splash text, the
+manual, the offline-page law list and the preview image. For a different course, the
+entire folder's contents are replaced with that course's versions. The
+drawings behind `course/figures/` (`tools/figures/quizN.py`) are
+course-specific too, although they live outside `course/`.
 
-`course/course.json` is **stale/historical** for the eyebrow labels — those
-are pure in-page text with no crawler involved, so `js/course-config.js`'s
-`display.courseCode` now drives them completely automatically; don't bother
-keeping course.json's eyebrow fields in sync.
-
-Title/OG/Twitter text is a different story: `course-config.js` also updates
-those live in-browser, but that update is invisible to link-preview
-crawlers (Telegram, Discord, WhatsApp, Slack, X, Facebook), which fetch raw
-HTML and never run JavaScript. So the static `<title>`/`<meta>` block in
-`index.html`'s `<head>` still needs its 9 lines hand-edited at release time
-to match that course's `display` values — see the `⚠ EDIT THESE 9 LINES BY
-HAND` comment right above that block, and the [Manual-swap
-items](#manual-swap-items-cant-be-centralized) table.
+`course/course.json` is **historical only**. It used to be a copy-paste
+reference for titles and meta text; nothing loads it today (it is only listed
+in the offline-mode download manifest). The eyebrow labels and the tab titles
+are driven by `js/course-config.js`; the static meta tags are covered under
+[Manual-swap items](#manual-swap-items).
 
 ### `js/course-config.js` — the live switch
 
-This is the one framework file that's aware of multiple courses at once, and
-it's the only place real secrets differ per course:
+This is the only framework file that knows about multiple courses, and the only
+place where per-course keys live:
 
 ```js
 const COURSES = {
@@ -213,313 +373,2327 @@ const COURSES = {
     supabase: { url: '...', publishableKey: '...' },
     pushVapidPublicKey: '...',
     quizSettings: { size: 6, cumulativePrevCount: 3 },
-    pinnedMessageId: 336,
-    display: {
-      courseCode: 'PHYS162',
-      ogDescription: '...',
-      twitterDescription: '...',
-      siteUrl: 'https://your-domain.com/PHYS162_Practice_Quiz.html',
-    },
+    pinnedMessageId: null,
+    changelogScope: 2,
+    display: { courseCode: 'PHYS162', ogDescription: '...', twitterDescription: '...', siteUrl: '...' },
   },
   phys161: {
     storagePrefix: 'phys161',
     supabase: { url: '...', publishableKey: '...' },
     pushVapidPublicKey: '...',
-    quizSettings: { size: 6, cumulativePrevCount: 3 },
+    quizSettings: { size: 7, cumulativePrevCount: 3 },
     pinnedMessageId: 2,
-    display: {
-      courseCode: 'PHYS161',
-      ogDescription: '...',
-      twitterDescription: '...',
-      siteUrl: 'https://your-domain.com/PHYS161_Practice_Quiz.html',
-    },
+    changelogScope: 1,
+    display: { courseCode: 'PHYS161', ogDescription: '...', twitterDescription: '...', siteUrl: '...' },
   },
 };
 ```
 
-It reads `document.head.dataset.course` — set via `<head data-course="phys162">`
-at the very top of both `index.html` and `offline.html` — and exposes seven
-globals every other framework file reads instead of hardcoding:
+The active course is read from `document.head.dataset.course`, i.e. the
+`<head data-course="phys162">` attribute at the top of `index.html`,
+`offline.html` **and** `editor/index.html`. An unknown value logs an error and
+falls back to `phys162`. The file exposes these globals, which every other file
+reads instead of hardcoding values:
 
 | Global | Used for |
 |---|---|
-| `STORAGE_PREFIX` | Every localStorage key and BroadcastChannel name across the app (`themes.js`, `splash.js`, `stats.js`, `forum.js`, `quiz-engine.js`, etc.) — was hardcoded `'phys162_...'` everywhere before this existed |
-| `SUPABASE_URL` / `SUPABASE_PUBLISHABLE_KEY` | Every Supabase call (forum, stats sync, push) |
-| `PUSH_VAPID_PUBLIC_KEY` | Web Push subscription (`push-notifications.js`) — each Supabase project has its own VAPID keypair |
-| `QUIZ_SIZE` | How many problems a "Random N" draw pulls (`quiz-engine.js`'s `newQuiz()`) — was hardcoded `6` everywhere before this existed. Also drives the "🎯 Random N" landing-page label and the two stats-panel empty-state strings, so those stay correct without separate edits. |
-| `QUIZ_CUMULATIVE_PREV_COUNT` | Of `QUIZ_SIZE`, how many come from the *previous* quiz when cumulative mode is on — was hardcoded `3` (i.e. half of 6). The remainder (`QUIZ_SIZE - QUIZ_CUMULATIVE_PREV_COUNT`) comes from the current quiz. Must be `<= QUIZ_SIZE`; course-config.js logs a console error if a course's entry violates that. |
-| `FORUM_PINNED_MESSAGE_ID` | The `forum_messages` row id shown pinned at the top of the forum (`forum.js`'s `renderForumPinnedBanner`) — was hardcoded `336` everywhere before this existed. Each course's Supabase project has its own forum with its own welcome post at a different row id, so there's no sane cross-course default; course-config.js logs a console error if a course's entry omits it, since the pinned banner just silently stays hidden otherwise. |
-| `COURSE_CHANGELOG_SCOPE` | Filters `js/data/changelog.js`'s `CHANGELOG` entries in `js/changelog.js`'s `renderChangelog()` — see "Per-course changelog filtering" below. Fails open (shows every entry, unfiltered) if a course's entry omits it, rather than silently hiding everything. |
-| `COURSE_CODE` / `COURSE_TITLE` | Sets `document.title` and the 4 "eyebrow" labels (`PHYS162 · Practice Mode`, etc.) at load — fully automatic, no crawler involved. Also live-updates the `og:title`/`twitter:title`/`og:description`/`twitter:description`/`og:url` meta tags for anyone who loads the page with JS, but that does NOT reach link-preview crawlers (they fetch raw HTML, no JS) — the static block in `index.html`'s `<head>` still needs hand-editing at release, see [Manual-swap items](#manual-swap-items-cant-be-centralized). `og:image`/`twitter:image` are left as plain static tags since the relative path (`course/preview.png`) is the same for every course. |
+| `ACTIVE_COURSE` | The resolved `data-course` key. |
+| `STORAGE_PREFIX` | Every course-scoped localStorage key and BroadcastChannel name (see [Client-side storage reference](#client-side-storage-reference)). |
+| `SUPABASE_URL` / `SUPABASE_PUBLISHABLE_KEY` | Every Supabase call: forum, sync, push, solutions, visits. A blank value logs a warning and those features quietly disable themselves. |
+| `PUSH_VAPID_PUBLIC_KEY` | Web Push subscription. Each Supabase project has its own VAPID keypair. |
+| `QUIZ_SIZE` | How many problems a "Random N" draw contains. Also drives the "🎯 Random N" landing label and stats empty-state text. |
+| `QUIZ_CUMULATIVE_PREV_COUNT` | In cumulative mode, how many of the `QUIZ_SIZE` problems come from earlier quizzes; the rest come from the selected quiz. Must be `<= QUIZ_SIZE` (an error is logged otherwise). |
+| `FORUM_PINNED_MESSAGE_ID` | The `forum_messages` row shown pinned at the top of the forum. No default exists; an error is logged when it is missing and the banner stays hidden. |
+| `COURSE_CHANGELOG_SCOPE` | Filters changelog entries (see below). When missing, every entry is shown unfiltered and an error is logged. |
+| `COURSE_CODE` / `COURSE_CODE_DISPLAY` / `APP_NAME` | `"PHYS162"`, `"PHYS 162"`, `"Flux"` (`"Impulse"` on PHYS161, from `display.appName`). The course code sets the four eyebrow labels. `APP_NAME` sets the tab titles (`Impulse`, `Impulse \| Offline`, `Impulse \| Editorial`) and, in-browser only, the OG/Twitter titles (`Impulse Practice App`); link-preview crawlers never see that (see [Manual-swap items](#manual-swap-items)). |
 
-A course whose `quizSettings` is missing falls back to phys162's values (6, 3)
-rather than producing NaN-length quizzes — but every course should set its
-own explicitly rather than relying on that fallback. `pinnedMessageId` has no
-such fallback (there's no meaningful "default" pinned message across
-courses) — omitting it just means the banner won't show until it's set.
+A course without `quizSettings` falls back to phys162's values (6, 3). The file
+must load before anything that reads `STORAGE_PREFIX`, so it is the first
+external `<script>` in `index.html`.
 
-It's loaded as the very first external `<script>` — before `banner-manager.js`
-— because `themes.js`/`splash.js`/`easter.js` read `STORAGE_PREFIX` immediately
-at load time, not lazily.
+### Per-course changelog filtering
 
-**To release a new course:** fill in that course's block in `COURSES`
-(Supabase URL/key, VAPID public key, quiz size/cumulative-prev-count), then
-flip the `data-course` attribute on both HTML files' `<head>`.
+Every entry in `js/data/changelog.js` has the shape
+`{ version: "X.Y.Z", note: "...", scope: N }`, newest first. `scope: 0` is
+shown for every course; any other value must equal a course's
+`changelogScope` (currently `phys162: 2`, `phys161: 1`). `renderChangelog()` in
+`js/changelog.js` filters at render time; the array itself is never modified.
 
-### `js/data/changelog.js` — per-course changelog filtering
+- When consecutive entries are hidden between two visible ones, a dashed
+  "⋯ N updates for another course ⋯" pill (`.changelog-gap`) is shown in their
+  place. Hovering swaps its label to "⋯ tap to reveal anyway ⋯"; clicking
+  reveals only that run of entries, in place. A gap is never shown at the top
+  or bottom of the list.
+- Indentation (major → level 0, minor → level 1, patch → level 2) is computed
+  from the full, unfiltered array, so hidden entries never shift the levels of
+  visible ones.
+- The version badge on the changelog button shows the latest *visible*
+  entry's version.
 
-Every entry has a `scope`: `0` means "show for every course". Any other
-value must match a course's own `changelogScope` id
-(`js/course-config.js` — currently `phys162: 2`, `phys161: 1`) to be shown
-at all for that course. `js/changelog.js`'s `renderChangelog()` does the
-filtering at render time — the underlying array is never modified, so
-switching `data-course` is enough to see a different course's history with
-no rebuild step.
+### What stays framework (shared)
 
-When one or more consecutive entries get filtered out between two entries
-that ARE visible, a centered "⋯ updates for another course ⋯" row
-(`.changelog-gap` in `css/style.css`) is shown in their place, so the gap
-reads as "something was skipped here" rather than looking like nothing
-happened between two version numbers. It's never shown at the very top or
-bottom of the list — only strictly between two visible entries.
-
-Version-number indentation (`computeLevels()`) is still computed from the
-FULL unfiltered array, not the per-course visible subset — so a course
-that's missing a given major/minor version (because those entries were
-scoped to the other course) doesn't get its indentation levels
-recalculated as if that gap didn't exist. The version badge on the
-changelog button also reads the latest *visible* entry's version, not
-always `CHANGELOG[0]` — otherwise a course could show a version number in
-that badge that never actually appears anywhere in its own filtered list.
-
-All 145 pre-existing entries (from before per-course scoping existed) were
-retroactively tagged: `2` (PHYS162-only) for anything about actual quiz
-content — specific problems, figures/illustrations, per-quiz corrections —
-since PHYS162 was the only course this repo ever held content for until
-now; `0` (both) for everything about the framework/app itself (forum,
-stats, themes, UI, cross-device syncing, etc.), since none of that depends
-on which course's problems happen to be loaded. No entry currently uses
-`scope: 1` (phys161-only) — that history starts empty and grows from
-whatever changes are made after phys161 actually exists.
-
-### What's still framework (shared)
-
-Everything in `js/` other than `course-config.js`, all of `css/`, the
-generic images (`images/gemini-logo.svg`, `images/offline/`), and
-`favicon/` are identical across every course deployment. `js/data/changelog.js`
-also stays framework-side — it's the *platform's* build history, not physics
-content, so it isn't course data.
+All of `js/` (apart from the per-course block in `course-config.js`), `css/`,
+`editor/`, `images/`, `favicon/` and `vendor/` are identical across
+deployments. `js/data/changelog.js` stays framework-side as well: it is the
+platform's development history, not course content.
 
 ---
 
-## How each subsystem works
+## Problem banks
 
-**Quiz engine** (`quiz-engine.js`) — Two modes: Practice (Random 6, one quiz
-at a time or cumulative) and Solve Them All. Numeric answers are parsed with
-Moodle-compatible rules (`parseMoodleNumber`) and checked with a unit-algebra
-conversion layer, so `3000 m` and `3 km` both validate against an accepted
-unit list per problem.
+### Problem object format
 
-**Theming** (`themes.js` + `theme-colors.js` + CSS custom properties in
-`style.css`) — Presets are CSS blocks (`body[data-theme="x"]`); the picker UI
-and a custom-theme builder (auto-derives surface/border/muted/accent-dim from
-just bg + text) live in JS. `theme-colors.js` reads the *live computed*
-values of CSS variables so JS-drawn UI (canvas confetti, the π-day egg)
-follows theme changes automatically instead of duplicating hex codes.
+Each `course/quizzes/quizN.js` declares two arrays, plus an optional list of
+skipped numbers (see [retiring problems](#problem-ids-numbers-and-retiring-problems)):
 
-**Math rendering** (`math-render.js` + `math-cache.js`) — MathJax (STIX Two,
-vendored) handles inline `$...$` / display `$$...$$` LaTeX. Solve-All mode
-caches typeset output in IndexedDB keyed by a hash of each problem's source
-text, so a repeat visit skips MathJax entirely for unchanged problems.
+```js
+const Quiz_3_Problems = [
+  { id:"P5i", topic:"Gravitational force and field", answer:3.1761e-11, units:["N"],
+    text:"Figure shows five equal masses ... <div class=\"fig-img-wrap\"><img src=\"course/images/quiz_3/unnamed.webp\" alt=\"figure\" width=\"300px\"></div>" },
+  // ...
+];
+const Quiz_3_Retired = [];
+const Quiz_3_Gaps = [87, 105, 106, 122, 125];   // optional
+```
 
-**Splash text** (`splash.js` + `course/splashes.json`) — Minecraft-style
-rotating splash line under the site title. Each entry is `[text, condition,
-mandatory]`; conditions gate on time-of-day/pi-time/etc.
+| Field | Meaning |
+|---|---|
+| `id` | Permanent key, unique within its quiz, never reused (see below). |
+| `topic` | Topic label shown on the card and used by the topic filter. |
+| `answer` | Numeric answer, expressed in `units[0]`. |
+| `units` | Accepted units. `units[0]` is the unit the answer is written in and the reference for SI-prefix conversion. `[]` or `[""]` means dimensionless. |
+| `text` | Trusted HTML with inline `$...$` / display `$$...$$` LaTeX. Figures are `<img>` tags inside `<div class="fig-img-wrap">`, pointing into `course/images/quiz_N/`; images found here are also picked up automatically by the offline-mode download. The `<img>` stays in the data even where a redrawn SVG exists: the swap happens on screen (see [Redrawn problem figures](#redrawn-problem-figures)). |
 
-**Stats** (`stats.js` + `stats-export.js` + `attempts-sync.js`) — Local
-attempt log for Random 6 mode, exportable as CSV/TXT/Excel/PDF. Once a forum
-identity is claimed, `attempts-sync.js` pushes/pulls attempts to Supabase
-(`sync-quiz-attempts` Edge Function) — localStorage becomes a cache/queue,
-not the source of truth.
+### The quiz registry
 
-**Solve-All sync** (`solve-all-sync.js`) — Same identity-linked sync model as
-stats, but progress is a mutable per-problem status map, not an append-only
-log, so cross-device merges are a union (keep whichever side "solved more"
-per problem) instead of last-write-wins.
+`course/quizzes/quizzes.js` defines `QUIZZES`, one entry per quiz slot:
 
-**Forum** (`forum.js`) — Read-only feed rendered client-side from
-`forum_messages` via the RLS-restricted publishable key. All writes (post,
-edit, flag, claim/drop nickname) go through Edge Functions, never a direct
-`.insert()`. Includes nicknames + 5-digit PINs, `@mention` popups, replies,
-DiceBear identicon avatars (cached), and an AI participant (`@gemini`,
-OpenAI-moderated before posting, Gemini-generated) — see `post-message.ts`.
+```js
+{ name: "Gravity and Waves", problems: Quiz_3_Problems, retired: Quiz_3_Retired, gaps: Quiz_3_Gaps, enabled: true }
+```
 
-**Push notifications** (`push-notifications.js` + `sw.js`'s `push`/
-`notificationclick` handlers) — Web Push subscription for forum @mentions.
-Sending happens server-side in `post-message.ts`; the service worker only
-displays the notification and routes a tap back into the right thread.
+`enabled: false` hides a slot from the landing screen. The file also builds a
+lookup index once at load and exposes the helpers every other file uses to turn
+a stored `(quizNum, id)` into something visible:
 
-**Manual** (`manual.js` + `course/manual.json`) — Collapsible docs tree,
-structurally mirrors the Forum/Stats screens. Content is plain HTML strings
-with inline LaTeX, rendered through the same `renderMathIn()` helper.
+| Helper | Returns |
+|---|---|
+| `problemNumber(quizNum, id)` | Displayed number of an active problem (1-based position, skipping gap numbers), or `null`. |
+| `getQuizProblem(quizNum, id)` | The problem object, active or retired, or `null`. Used wherever a stored id must be shown again. |
+| `isProblemRetired(quizNum, id)` | `true` for any id that is not currently served. |
+| `problemLabel(quizNum, id)` | `"P12"` for an active problem, `"DEL"` otherwise. |
 
-**Offline support** (`sw.js` + `offline.html`) — Narrow-purpose service
-worker: shows `offline.html` (with its own theme-matched illustration and a
-random "law of the moment" from `course/offline-laws.json`) instead of the
-browser's default offline screen. Does **not** cache the rest of the app for
-full offline use.
+A load-time check logs a console error for a problem without a string id, and
+for an id that appears more than once within a quiz (across `problems` and
+`retired`).
 
-**Changelog** (`js/changelog.js` + `js/data/changelog.js`) — Version bump
-requires updating three places: `js/data/changelog.js`, `version.json`, and
-`CURRENT_VERSION` in `quiz-engine.js` (the update-checker compares the
-running page's version against `version.json` to show the update banner).
+### Problem ids, numbers and retiring problems
+
+The **id is the permanent key** under which all history is stored: attempts
+(`quiz_attempts`), Solve-All progress, forum threads (`problem_key` =
+`q<N>_<id>`), worked solutions (`problem_solutions.problem_key`, same format)
+and the math cache. It is never shown to students and never has to match the
+problem's position.
+
+What students **see** is the problem's current 1-based position in its quiz's
+`problems` array (`P12`), skipping any numbers listed in `Quiz_N_Gaps`.
+Problems can therefore be reordered or inserted anywhere without any history
+moving with the numbers. The number filter in quiz mode also works on displayed
+numbers, not ids. Code that shows a number goes through `problemNumber()` /
+`problemLabel()` rather than computing `index + 1`; the editor, which does not
+load `quizzes.js`, repeats the same gap-skipping loop in `loadAllProblems()`.
+
+- **New problem:** the next unused id is assigned (an id is never reused), and
+  the object is placed at the position where it should be shown.
+- **Retiring a problem:** its object is *moved*, unchanged, from
+  `Quiz_N_Problems` to `Quiz_N_Retired` in the same file. It is no longer
+  served in Random N or Solve-All and disappears from Solve-All progress, but
+  it still opens from attempt review, stats, forum threads and the Solution
+  screen, labelled **`DEL`**. Stats keep counting its attempts. Moving it back
+  restores its attempt history and forum threads; its Solve-All progress is
+  not restored, because Solve-All pushes overwrite the server row with only the
+  problems currently served.
+- **Retiring without renumbering:** retiring a problem normally shifts every
+  later problem down by one. To keep the later numbers, the retired problem's
+  number (as shown before retiring) is also added to `Quiz_N_Gaps`; numbering
+  then skips it, leaving a hole. For example, Set 3 retired P87, P105, P106,
+  P122 and P125 with `Quiz_3_Gaps = [87, 105, 106, 122, 125]`, so it serves 145
+  problems numbered up to P150 and runs …P121, P123, P124, P126… Gap numbers
+  are final displayed numbers, so several gaps are all listed in the original
+  numbering. Moving a problem back to its old place means removing its number
+  from the gaps too.
+- **Substantial change** (new numbers, different question): the old problem is
+  retired and the new one is added under a fresh id. Keeping the id would
+  carry the old solved status — and the old worked solution — over to what is
+  effectively a different problem. For small edits, the editor and the
+  Solution screen detect the change through `problem_hash` and flag the
+  solution as possibly stale.
+- **Deleting** a problem object outright is avoided whenever anyone may have
+  attempted it (its attempts would show "original text no longer available").
+
+### Adding a quiz
+
+Up to four quiz slots exist. Enabling a prepared slot requires: the bank in
+`course/quizzes/quizN.js`, its `<script>` tag in `index.html` (before
+`quizzes.js`), and `enabled: true` plus a `name` in `QUIZZES`.
+
+Quiz numbers 1–4 are assumed in several places, all of which need extending
+for a fifth quiz: the `<script>` tags in `index.html` (the bank in tier 1,
+`course/figures/quizN.js` in the tier-2 loader list), the forum filter chips
+(`data-filter="q1".."q4"` in `index.html`), the stored-attempt validator in
+`js/stats.js` (`[1,2,3,4]`), the `--q1..--q4` series colors in `css/stats.css`,
+`OFFLINE_CORE_FILES` in `js/offline-mode.js` (bank and figures),
+`loadAllProblems()` in `editor/editor.js` (`[1, 2, 3, 4]`), and `QUIZZES` in
+`tools/figures/export.py` (with a new `tools/figures/quizN.py`). Animations
+are optional: a quiz gets a `course/animations/quizN.js` (in the tier-2 list
+and `OFFLINE_CORE_FILES`) only once one of its figures has one.
+
+---
+
+## Answer checking
+
+Students type the whole answer in **one field**, number then unit
+(`9.81 m/s^2`), as in Moodle. While the field has focus, a box under it shows
+the answer as read (TeX through MathJax, the unit as a fraction) or what is
+wrong with it. The student-facing rules are the "Entering answers & scoring"
+manual page (`quizzes-scoring` in `course/manual.json`), which the ⓘ inside
+every answer field opens (`answerInputHtml` in `js/answer-check.js`).
+
+In use since October 17, 2026 (version 12.4.0); before that the site had
+two boxes, value and unit, checked by its own parser in `quiz-engine.js`.
+
+**Two layers.**
+
+- `vendor/pt-answer/pt-answer.min.js` (global `PTAnswer`, ~40 KB, ~14 KB
+  gzipped): reading numbers and units, unit conversion, the preview TeX. It is
+  adapted from [pt-nu-phys161](https://github.com/omgaXD/pt-nu-phys161)
+  (MIT, © 2026 omga), with its mathjs dependency replaced by a small parser of
+  ours and its unit table replaced by the course's. Source, build script and
+  tests are in `vendor-src/pt-answer/` (see its README); rebuild with
+  `python vendor-src/pt-answer/build.py`.
+- `js/answer-check.js`: the course's rules on top of it, used by every quiz
+  view and the review screen: `gradeAnswer(text, p)`, `splitAnswer` /
+  `joinAnswer`, `answerFeedbackHtml`, `answerInputHtml` and
+  `attachAnswerPreview(input)` (one preview box on `<body>`, since the cards
+  clip their overflow).
+
+**Numbers** (Moodle's "numeric" type): `3.14`, `-0.5`, `.5`, `1.6e-19`,
+`2.998E8`, `5*10^3`, `10^-4`, `10^(-4)`, and arithmetic with
+`+ - * / ^`, brackets and `pi` (`3/4`, `2*pi`, `(1+2)/3`). Numbers side by side
+multiply (`1.5 10^3`), at the same level as `*` and `/`, so `x/2pi` is
+`(x/2)*pi`. `e` is not a constant. No functions (`sqrt(2)`), no comma decimals
+(`3,14`), no `x` for times. Typographic `×`, `·`, `−`, `π` and superscripts
+(`10⁻³`) are read as their ASCII forms.
+
+**Tolerance**: `|value − answer| < 1% · |answer|`, after unit conversion, as
+the plugin's `_relerr < 0.01`: exactly 1% off is wrong. Purely relative, so
+tiny answers (10⁻²⁶ kg) are checked as strictly as large ones; an answer of 0
+accepts only 0.
+
+**Units** (Moodle grammar):
+
+- a space multiplies (`N m`), one `/` divides (`N/C`, `kg m/s^2`),
+  everything after `/` divides (`J/kg K` = `J/(kg K)`), and the part after
+  `/` may be in brackets
+- a second `/` divides again: `m/s/s` is read as `m/s^2`, `kg/m/s` as
+  `kg/(m s)` (Moodle refuses this)
+- `^` raises: `m^2`, `s^-1`, `s^(-1)`, and `m^(2)` is read as `m^2` (Moodle
+  refuses that one); `s^+2` and `m^1.5` are invalid; superscripts work
+  (`m²`, `s⁻¹`)
+- each unit name at most once: `m m` is invalid (write `m^2`)
+- `*`, `·`, `×` between units are invalid
+- units are case-sensitive; `%` is a unit of its own
+- `none` and `(none)` written alone mean no unit, either way round; `rad` is a
+  unit like any other, so a bare number on a `rad` answer loses 0.1, as on NU
+  Moodle
+
+**Conversion** (the unit table in
+`vendor-src/pt-answer/src/core/units/table.ts`):
+
+- SI units take every SI prefix (`Y … y`, with `u`, `mc`, `mk` for micro):
+  `m s g A K mol N J W Pa Hz C V Ohm/ohm/Ω F T Wb H`. They convert through
+  their SI dimensions, so any equivalent spelling is accepted: `J` = `N m` =
+  `kg m^2/s^2`, `V/m` = `N/C`, `Wb` = `V s` = `T m^2`, `Hz` = `s^-1`.
+- `eV` converts to `J` with the plugin's factor, 1 J = 6.24150947e18 eV.
+- Other units convert only within themselves, by their prefixes: `mL` = 0.001
+  `L`, but `km/h` is not `m/s`, `L` is not `m^3`, `min` is not `s`.
+- Names the table doesn't know (`hectares`, `in`) match only themselves.
+
+`p.answer` is in `units[0]`; a student's unit is converted to the first
+accepted unit it matches (`units[0]` first), so `326.9` with `units:["nm"]`
+matches `326.9 nm` and `0.3269 um`. A number with no unit is not scaled.
+
+**Splitting** the field into number and unit: the leftmost split whose unit
+is known and whose number is valid, else any syntactically valid unit; a
+whole answer that is a number on its own is not split at an unknown "unit"
+(`2pi` is 2π); a valid number followed by an invalid unit splits there
+(`0.5 m m`), so it is reported as a unit mistake.
+
+**Scoring** per problem: value ✓ + unit ✓ = **1**; value ✓ + unit wrong,
+missing or invalid = **0.9**; value ✗ = **0**. With a wrong unit the number is
+taken as typed, not converted. Text the plugin's parser can't read at all
+(`5 m/`, `5 m.`, `5 m/(s`) scores 0 even with the right number. No space is
+needed before the unit (`125m/s^2`).
+
+**The real plugin is the reference.** `vendor-src/pt-answer/test/moodle-marks.json`
+holds marks from the unmodified qtype_formulas v6.4.0, which NU runs in 6.3 or
+newer; the penalty of 0.1 is confirmed by marked attempts on NU Moodle. The
+site differs from it on purpose in these ways, each listed in that file:
+every SI equivalent is accepted whether or not the question lists it; `m^(2)`
+and `m/s/s` are read; typographic symbols are read; a unit on a problem with
+none costs 0.1 (Moodle gives 0); every SI unit takes every prefix; `Ohm`, `ohm`
+and `Ω` are one unit.
+
+**Storage is unchanged**: attempts keep `entered_value` / `entered_unit` and
+Solve-All progress keeps `{ans, unit}`, split from the field with
+`splitAnswer` and shown again with `joinAnswer`. The review screen shows the
+points stored at the time, so changing these rules never rescores old
+attempts.
+
+**Two deploy details.**
+
+- The field has `maxlength="200"`: `sync-quiz-attempts` refuses a whole
+  batch of attempts if any `entered_value` or `entered_unit` is longer, and
+  the split pieces can't be longer than what was typed.
+- The field's and the preview's styles are in `css/answer-check.css`, not
+  `css/style.css`: `sw.js` serves `style.css` cache-first, so a change there
+  reaches a returning visitor one load late; `answer-check.css` is not
+  precached, always comes fresh, and is loaded after `style.css`, so it also
+  wins over an older cached copy.
+
+---
+
+## Front-end subsystems
+
+### Page load order
+
+`index.html` loads in tiers:
+
+1. **Inline head scripts.** `history.scrollRestoration = 'manual'` (a reload
+   always starts at the top); an anti-flicker script that reads the saved
+   Display settings from `localStorage.flux_settings` and adds `settings-hide-*`
+   classes to `<html>` before `<body>` exists; the MathJax config, which also
+   creates `window.MathJaxReady` (a promise resolved once MathJax has started,
+   so early callers can await it instead of racing it).
+2. **All stylesheets** load as normal blocking `<link>`s. They are not
+   deferred: the hidden screens and modals are only hidden by those files, so
+   deferring them caused a flash of unstyled markup.
+3. **Tier 1 scripts** (plain tags, in order): `course-config.js`, `lockdown.js`
+   (which adds the session files inside Safe Exam Browser),
+   `site-config.js`, `db-status.js` → `banner-manager.js`, `theme-colors.js`, `themes.js`, `splash.js`,
+   `easter.js` → `course/quizzes/quiz1..4.js`, `quiz1..4-mistakes.js`,
+   `handouts.js` → `data/changelog.js`,
+   `data/tips.js` → `quizzes.js` → `vendor/pt-answer`, `answer-check.js` →
+   `stats.js`, `stats-export.js`,
+   `attempts-sync.js`, `solve-all-sync.js` → `math-cache.js`,
+   `math-render.js` → DOMPurify, `figure.js`, `solution-render.js`,
+   `solutions.js`, `problem-flags.js`, `handout.js`, `editor-access.js` →
+   `quiz-engine.js` → `logo-tumble.js`. The engine boots
+   inline (not on `DOMContentLoaded`), since everything it needs is already
+   parsed by then.
+4. **Tier 2** is loaded by a small sequential loader that only starts after
+   tier 1 has finished, so its bytes never compete with the landing screen:
+   `fig-attribution.js`, `course/figures/quiz1..4.js`, `manual.js`, `inertia.js`,
+   `course/animations/quiz1.js` .. `quiz4.js`, `manual.js`, `figure-anim.js`,
+   `figure-style.js`,
+   `top-bar-scroll.js`, `top-bar-tips.js`, `top-bar-quiz-status.js`,
+   `solve-all-nav.js`, `changelog.js`, `manual.js`, `license.js`,
+   `settings.js`, `settings-search.js`, `offline-mode.js`, the Supabase JS client (jsDelivr CDN),
+   `site-visits.js`, `forum.js`, `push-notifications.js`. When the last one
+   has loaded, the loader sets `window.tier2Loaded` and fires `tier2-loaded`
+   (`logo-tumble.js` waits for it). Problems are first
+   shown with their original images; `figure-style.js` swaps in the redrawn
+   SVGs once it arrives.
+5. `sw.js` is registered on `load`.
+
+Because `settings.js` arrives late, code that needs a setting earlier reads
+the raw `flux_settings` value itself (`_readStudySettingRaw` in
+`quiz-engine.js`, `redrawnFiguresOn` in `figure-style.js`, the inline
+anti-flicker script). Calls into tier-2 code are guarded with
+`typeof fn === 'function'`. `site-config.js` is the opposite case: it loads
+right after `course-config.js` so that every polling script in tier 1 can
+read its intervals.
+
+### Quiz engine
+
+`js/quiz-engine.js` drives every quiz screen.
+
+**Landing screen.** Quiz buttons are rendered from `QUIZZES`
+(`renderQuizButtons`) and labelled "Set #N". A mode switch selects
+**🎯 Random N** or **⚡ Entire Set** (internally "solve-all"); for set 2 and
+later, a second switch selects **📝 Single Set** or **📚 Sets 1–N**
+(internally "cumulative"; the label follows the selected set). Settings can
+pre-select the latest set and the cumulative switch.
+
+**Random N** (`newQuiz`, `render`, `checkAll`). `QUIZ_SIZE` problems are drawn
+from the selected quiz. In cumulative mode, `QUIZ_CUMULATIVE_PREV_COUNT` come
+from all earlier quizzes and the remainder from the selected one. "Check
+answers" scores everything at once, shows the result panel with a score-box
+row (a P⇄Q toggle switches cumulative rows between problem and quiz labels), a
+"Last attempts" mini-panel, per-problem forum buttons and, where published,
+"📘 Solution" buttons. Each attempt is recorded by `stats.js`.
+
+- **Problem Pool Filter**, per quiz, with four modes saved per quiz in
+  localStorage: *none*, *topic* (checkboxes), *number* (ranges such as
+  `3, 5-6, 15-19`, include or exclude; numbers are the displayed ones, so a gap number matches nothing), and
+  *type* (attempt status: not attempted / wrong / almost correct / correct,
+  following the Last/Best switch of the Stats problems overview). An empty
+  filtered pool falls back to the whole quiz. A note appears under the header
+  when a filter narrows the draw. The "↺ Reset" button uses a tap-twice
+  confirmation with a countdown ring instead of `confirm()`.
+- **Live timer** (`#liveQuizTimer`): a floating mm:ss clock while an attempt
+  runs. `isQuizTimerActive()` and the `quiztimer:activechange` window event
+  report whether an attempt is running, independently of whether the clock is
+  shown.
+- **Full screen** for Random N (on by default) is entered when an attempt
+  starts and left when the score is revealed. A 10-second reminder banner
+  ("Settings → Study") is shown once per full-screen session and pauses while
+  a higher-priority banner is up.
+- **Auto-stop** (optional): the attempt is submitted after 50 minutes.
+
+**Entire Set** (`startSolveAll`, `buildSolveAllCards`,
+`checkSingleProblem`, `revealAnswer`). Every problem of the quiz (or of all
+quizzes up to it, in cumulative mode) is shown, ordered or shuffled (an order
+picker page appears unless the order is locked in Settings). Each card is
+checked on its own. "See correct answer" shows the answer under the field and
+marks the card *revealed* (counted as ✗) without locking it: the field and
+"↺ Retry" stay usable, a correct answer then counts as ✓, and the button
+turns into "Hide correct answer" (hiding is per page, not saved). Only a
+correct answer locks a card; `lockedIds` from older builds that locked
+revealed cards are ignored unless the status is `correct`. A wrong try after
+revealing keeps the card *revealed*, since that status outranks wrong in the
+merge. Cards are built in batches with a full-screen "Rendering
+equations…" transition, using the math cache. Progress (status per problem,
+locked cards, typed answers) is saved per quiz and mode, and synced across
+devices once a nickname is claimed. The floating **sticky score** shows solved
+/ correct / partial / wrong counts and a sync dot, plus a filter + flag button
+while any problem of the set is [flagged](#problem-flags): it toggles
+`flags-only` on `#solveAllContainer` (unflagged cards hidden by CSS, the
+current card kept in place), turns itself off when the last flag is removed,
+and resets when Entire Set closes. "🗑 Reset Progress" clears
+the session (locally and on the server). Broken typesetting is fixed from
+Settings › Sync & Storage › *Reset prerendered LaTeX equations*.
+
+**Solve-All progress rail** (`js/solve-all-nav.js`, wide screens only, at
+least 12 cards on show): tick marks every N problems, a "you are here" segment and a
+scroll pointer; clicking jumps. Flagged problems get a dot in their flag
+colour; a tap within `FLAG_MAGNET_PX` of a dot goes to the nearest flagged
+problem, centred on screen. The file is self-contained and watches the DOM
+with a `MutationObserver` instead of being called by the engine (the cards'
+`data-flag` attributes and the container's class included).
+
+### Problem flags
+
+`js/problem-flags.js` adds a flag button at the top right of every problem
+card's header (Random N, Entire Set, Stats attempt review), after the topic.
+The first tap sets C2 (`--accent2`, `PROBLEM_FLAG_DEFAULT`) and opens a small
+window offering C1 (`--accent`); ignoring it keeps C2. Tapping a flagged
+problem removes the flag. Flags are per problem, not per card, stored as
+`{ "q1_P55": 1 | 2 }` under `<p>-problem-flags`, and every card of the same
+problem (other tabs too) follows. They sync across devices with the settings
+(see [Cross-device sync](#cross-device-sync)): one code per set, `flags.q1` …,
+holding `{ P7: 2, … }`, so only while *Sync settings on this device* is on.
+Per set rather than per problem keeps the server well under its 200 codes;
+two devices changing the same set before either syncs keep the newer one.
+
+### Exam handouts
+
+Material students were given in the exam, shown on the site the same way.
+The PHYS 162 exams had none, so `QUIZ_HANDOUTS` is empty here; the feature
+is described as the platform has it (PHYS 161's Set 2 uses it for a table of
+moments of inertia, eight bodies, each with its drawing, name and formula).
+
+- **Data** (`course/quizzes/handouts.js`): `QUIZ_HANDOUTS`, keyed by quiz
+  number, holds `title`, a one-line `note`, the original `image`, the
+  `figures` set holding the drawings and the `items` in reading order
+  (`fig` name in that set, `name`, LaTeX `formula`). A new handout is a new
+  entry here plus its drawings; no code changes.
+- **Button** (`js/handout.js`, `handoutButtonHtml`): *Table*, styled like
+  the Solution button, sits right after the number in the card header of
+  every problem of that quiz, in Random N (in a mixed quiz too), Entire Set
+  and the Stats attempt review. It is outside `.card-check-row`, so the
+  Random quiz lock before *Check answers* doesn't touch it, and lockdown
+  keeps it: the handout was allowed in the exam. On narrow phones only the
+  icon (a ball with an arrow going round it) shows. `css/handout.css` gives
+  it the header's free space, so the topic and the flag stay on the right.
+- **Window**: one shared dialog, made on first open and rebuilt only when
+  Settings › Study › Redrawn figures has changed since. On, it shows a grid
+  of the drawings (`redrawnFigure`, from `js/figure-style.js`) with MathJax
+  formulas; off, the original image. It fades like `.modal-backdrop` and
+  closes with ✕, Esc or a click outside, giving focus back to the button.
+- **Drawings**: `tools/figures/inertia.py`, exported by `export.py` to
+  `course/figures/inertia.js` (`REDRAWN_FIGURES['inertia']`, by name). They
+  are not inside `.fig-img-wrap`, so the figure-swap observer leaves them
+  alone.
+
+**Screen handling.** `goToMainMenu`, `captureScreenScroll` /
+`restoreScreenScroll` and the fade helpers move between screens and restore
+scroll positions.
+
+### Stats
+
+`js/stats.js` records **Random N attempts only** (Solve-All is tracked
+separately as progress). Attempts are stored under `STORAGE_PREFIX + '_stats_v2'`,
+keyed by a content hash, each carrying the quiz, mode (`single`/`cumulative`),
+date, duration, score and a per-problem `answers` array. Once a nickname is
+claimed, localStorage is a cache/queue and the server is the source of truth.
+
+The Stats screen contains:
+
+- **Forum & Site panel**: avatar, nickname, join date and a ⚙ menu (Getting
+  started / Change nickname / Your PIN / Exit); "my messages" and "my quizzes
+  taken"; three tally dials (forum participants, total visits, total quizzes
+  taken by everyone). Values come from the RPCs `get_stats_panel`,
+  `get_total_quiz_attempts` and `get_my_total_quiz_attempts`, refreshed on
+  Realtime pings plus a fallback every 45 s (`poll.stats`), and on return to
+  the tab only when the last refresh is older than that.
+- **Legend, chart (canvas, with tooltip) and filters.**
+- **Attempt log table**, with per-attempt delete and a sync dot.
+- **Topics** (`renderTopicPerformance`): between the attempt log and the
+  overview, the topics of one enabled quiz at a time (a sliding *Quiz 1–4*
+  switch in its header, remembered as `<prefix>_tp_quiz`), each with two
+  thin bars: *average* (the mean points of every answer in that topic) and
+  *best* (each attempted problem's best score, averaged), in accent 1 and
+  accent 2. The average's 95% interval (Wilson score, z = 1.96, which stays
+  inside 0–100% with few answers) is drawn as an error bar |—| across it. All history, like
+  the overview; retired problems count toward their topic.
+- **Topics in this attempt** (Random N result screen, under *Last attempts*;
+  `renderAttemptTopicsMini` in `js/quiz-engine.js`): the same topic rows for
+  just the topics that appeared in the attempt, without quiz grouping, built
+  by the shared `topicRowsForAttemptHtml` / `_tpRowHtml` in `js/stats.js`.
+- **All-problems overview**: one pill per problem in every enabled quiz,
+  colored by that problem's *Last* or *Best* score (switchable, remembered).
+- **Attempt review screen** (`openAttemptReview`): a read-only replay of one
+  attempt, reusing the live quiz card styles.
+- **Export** (`js/stats-export.js`): PDF, Excel (.xlsx), CSV or TXT, via an
+  in-app format picker. The vendor libraries are loaded on demand.
+
+After 5 minutes without interaction on the Stats screen, the Attempt log and
+the Forum & Site panel stop refreshing and dim; any interaction wakes them and
+refreshes immediately.
+
+### Cross-device sync
+
+All three sync modules identify the device with `device_id` + `device_secret` (see
+[Device ownership](#device-ownership-device_secret-and-tokens)); the server
+resolves the device to its claimed identity.
+
+- **Attempts** (`js/attempts-sync.js` ↔ `sync-quiz-attempts`,
+  `delete-quiz-attempt`): one round trip pushes unsynced attempts and pulls the
+  server list. The request carries `known_fingerprint`, a SHA-256 of the
+  `hash:score` pairs the device will hold once the push lands
+  (`attemptsFingerprint`, identical in the client and the function); when the
+  stored list matches, the server answers `unchanged` with only the confirmed
+  hashes instead of resending the whole history (a regraded score changes the
+  fingerprint). It runs on Stats open, after recording or deleting an
+  attempt, on a Realtime Broadcast ping on `attempts:<identity_id>`
+  (migration 003), when the network comes back, on a fallback timer every 45 s
+  (`poll.attempts`) while the tab is visible, every 5 min instead
+  (`poll.attempts_live`) while its Realtime channel is connected, and on
+  return to the tab only when the last sync is older than 45 s. Hashes being deleted are
+  excluded from merges until the delete completes.
+- **Solve-All** (`js/solve-all-sync.js` ↔ `sync-solve-all`): progress is a
+  mutable per-problem map, so merges are a **union** that keeps the "more
+  resolved" status per problem (correct > revealed > partial/wrong). It syncs
+  when a session opens, on a ping on
+  `solveall:<identity_id>:<quiz>_<s|c>` (migrations 004/005), on a fallback
+  every 60 s (`poll.solve_all`; 5 min, `poll.solve_all_live`, while its
+  Realtime channel is connected), on return to the tab after longer than 60 s,
+  and on exit. Pings carry the pushing device's id so a device
+  ignores its own echo, and unchanged snapshots are not re-pushed — together
+  these stop two open devices from ping-ponging. A reset writes a tombstone
+  (`data: null`) rather than deleting, so the reset sticks on other devices;
+  a device that discovers one mid-session returns to the order picker. Tabs of
+  the same browser additionally coordinate through a `BroadcastChannel`.
+- **Settings** (`js/settings-sync.js` ↔ `sync-settings`, migration 011): each
+  synced setting keeps `{v, t, d}` (value, change time on the server's clock,
+  device), and the server merges per setting: newer `t` wins, a tie goes to
+  the higher `d`. Never-stamped values count as `t = 0` at their default and
+  `t = 1` otherwise, so on the first sync a non-default choice beats an
+  untouched default and any real change beats both. Changes are found by
+  diffing against the last-seen values, so every writer is covered. Requests:
+  one per burst of changes (3 s debounce, sent at once on hide), one cheap
+  `known_rev` check per page load (skipped if another tab checked < 30 s
+  ago), one per change on another device (the ping on `settings:<identity_id>`
+  carries the new `rev`, so a caught-up tab asks nothing, hidden tabs wait
+  until shown and visible tabs claim the fetch so only one asks), and a
+  fallback every 15 min (`poll.settings`) shared by all tabs. Tabs of one
+  browser update each other through the `storage` event, with no request.
+  Device-only: Follow device theme (and the day/night mode while it's on),
+  Figure size, battery reduce-motion, Go silent, the Solve-All rail and the
+  whole Sync & Storage tab. Off per device via *Sync settings on this device*,
+  which also stops [problem flags](#problem-flags) from syncing: they ride
+  along as the codes `flags.q1` … (one set each), with no server change.
+- **Remote switches** ([Remote settings](#remote-settings-site-versionjson)):
+  `sync_paused` stops all three kinds of sync (the dots show "Sync is paused";
+  work stays in the browser, deleting an attempt and resetting Solve-All
+  still go through) and catches up as soon as it is removed; `off: ["realtime"]`
+  drops the ping channels and leaves the fallback timers alone.
+- **Live dots**: `_settleLiveDot` drives the sync dots (green pulse = synced,
+  gray pulse = syncing/queued, red = failed, hidden = no identity), letting a
+  pulse finish its cycle before stopping.
+
+Broadcast pings never carry data — only a timestamp (and a device id) — so the
+identity-scoped channel names expose nothing new.
+
+### Forum
+
+`js/forum.js` reads `forum_messages_public` directly with the publishable key
+(RLS allows SELECT only) and never inserts directly: posting, editing,
+flagging and nickname changes go through Edge Functions.
+
+- **Threads**: a message is *global* or attached to one problem
+  (`problem_key` = `q<N>_<id>`). Filter chips (All / Global / Quiz 1–4, plus a
+  per-problem select), replies, `@mention` autocomplete, full-text search over
+  every message, "Load older messages" (pages of 25), and a "new messages" pill.
+  Per-problem forum buttons on quiz cards show message counts; opening one
+  shows a collapsible copy of the problem text above the thread.
+- **Live updates**: one Realtime subscription to Postgres Changes on
+  `forum_messages` drives the unread badges, the open feed and the per-problem
+  counts. A fallback check every 90 s (`poll.forum`, skipped while the tab is
+  hidden) catches a missed event; while the subscription is connected it
+  waits 5 minutes instead (`poll.forum_live`), as a missed push is then all
+  it covers. **Quiet mode**: once the newest message is
+  over 24 h old (learned from a one-column `created_at` request at start-up and
+  from every message seen since), the fallback slows to every 15 minutes
+  (`poll.forum_quiet`); any new message switches it back, and it never applies
+  while the forum screen is open. The longest of the intervals that apply is
+  used.
+- **Read-only switch**: `off: ["forum_posting"]` in `site-version.json`
+  refuses new messages, replies and edits in the composer with a short notice;
+  reading is unaffected (see [Remote settings](#remote-settings-site-versionjson)).
+- **Pinned message**: `FORUM_PINNED_MESSAGE_ID` is painted above the list until
+  dismissed or 24 h after first shown.
+- **Identity**: a nickname (2–40 letters, digits, `.`, `_`, `-`; no spaces so
+  mentions work; `gemini` reserved) plus a 5-digit PIN generated at claim time
+  (returned once by the server, kept on the device and viewable under
+  "Your PIN"). Five wrong PINs lock the identity for 15 minutes. The same identity can
+  be linked to several devices (restore with nickname + PIN), renamed, or
+  exited on one device. New and renamed nicknames pass OpenAI moderation. A
+  **Getting Started** modal is shown before the first quiz Start on a device
+  without a nickname, and by the 👤 beside the logo, which then carries on to
+  Stats: *I'm new* asks for a name, *I have an account* for a name and PIN, with
+  the FAQ folded below. Back returns to it. Enter in the name field moves on to
+  an empty PIN field rather than submitting. Logging in with a name nobody owns
+  returns `not_found` rather than claiming it.
+- **Composer**: LaTeX with `$...$`/`$$...$$`, a live hover preview, an
+  insert-equation modal with a quick grid, and **LaTeX shorthand**: `&x squared&`
+  (inline) or `&&...&&` (display) is converted to real LaTeX server-side by
+  Gemini before posting. When conversion fails, "↻" retries and "Post as is"
+  posts the raw text (`force_latex`).
+- **@gemini**: tagging `@gemini` asks the Gemini bot to reply in the thread
+  (see [Gemini integration](#gemini-integration)). Bot posts use a sentinel
+  `device_id` (`00000000-0000-4000-8000-000000000001`) that humans cannot post
+  with, which is what the official avatar keys off.
+- **Editing** own messages (body and scope) via a modal; **flagging** any
+  message for AI review; a non-dismissible ban banner while a posting ban is
+  active (`check-ban`).
+- **Profiles**: tapping an `@name` chip opens a popup with `get_author_stats`.
+- **Avatars**: DiceBear identicons, cached in localStorage.
+- **Floating forum button** (`#forumFabWrap`): a second entry point visible
+  everywhere except the landing screen and an unchecked Random N attempt, with
+  the same unread and "@" badges.
+
+### Push notifications
+
+`js/push-notifications.js` shows an in-app explanation modal before the
+browser's own permission prompt, subscribes with `PUSH_VAPID_PUBLIC_KEY`, and
+saves or removes the subscription through `save-push-subscription`.
+`post-message.ts` sends a push when a message mentions a claimed nickname or
+replies to one. `sw.js` displays it (unless Settings → Notifications → "Go
+silent" is on, read from IndexedDB `flux-notif-mute`) and opens the right
+thread on tap.
+
+### Worked solutions (site side)
+
+`js/solutions.js` shows solutions written in the [editor](#solutions-editor-editor).
+
+- Reading needs **no Edge Function**: migration 008's RLS policy allows anon
+  SELECT on `problem_solutions` rows with `status = 'published'`, so drafts are
+  unreachable rather than merely hidden.
+- A problem can have **several published solutions**, one per author
+  (migration 013). The default opens first; when there is more than one, a
+  **Versions** box under the problem (styled like the Solution list) offers
+  `Default | By @name | …`, and a tab swaps the figure, text and credit in
+  place without a request (Left/Right/Home/End move between tabs). Tab order
+  is the default, then oldest first (`is_default.desc,created_at.asc,id.asc`).
+- An **index** of published solutions (`id`, `problem_key`, `updated_at`) is kept in
+  localStorage (`<prefix>-solutions-index`) and shared by every tab: it is
+  reused while under 30 minutes old (`poll.solutions`), and only then fetched
+  again, by whichever tab needs it first. A visible tab looks at that copy on
+  load, on return to the tab and every 5 minutes, without a request. A
+  solution published or unpublished in the editor can therefore take up to
+  30 minutes to gain or lose its button in an open tab; an unpublished one
+  still can't be read meanwhile, because a full row is only ever fetched with
+  `status=published`. All of a problem's published rows are fetched the
+  first time it is opened (one request) and kept in memory, and in Cache
+  Storage (`flux-solution-rows-v2`) across loads, until the index shows one
+  of them was unpublished, saved again, or joined by another (compared as
+  one stamp of every `id@updated_at`). While offline mode runs, both come
+  from the offline download.
+- **"📘 Solution"** is shown but disabled in Random N until the score is
+  revealed (so a solution cannot replace the attempt), and only on problems
+  with a published solution; usable from the start in Solve-All, and on every
+  card of an attempt review (Stats), retired `DEL` problems included: their
+  solutions stay published and open like any other.
+- The **Solution screen** replaces the current screen (like the forum) and
+  shows: the problem text (without the answer), a "problem changed since" note
+  when the current problem's hash differs from the stored `problem_hash`, the
+  figure with step navigation (‹ ›, dots, keyboard arrows, swipe, and an
+  autoplay every 2.2 s that stops at the last step or on any manual step, and
+  is skipped under reduced motion) and a caption per step, the solution text,
+  and "Solution by @author" (linked when the editor has an http(s) link).
+  Escape closes it and the previous screen and scroll position are restored.
+- **Figure tools** (right end of the step-navigation row): − / + zoom 100–400%
+  inside a frame that keeps its 100% size (drag to pan with the mouse, native
+  panning by touch; keys + − 0), and a 🔍 magnifier lens (2.5×) that follows
+  the mouse, or appears above the finger while pressing and dragging on touch.
+  Either one stops autoplay and suspends swipe-to-step; both reset per
+  solution.
+- Figures are the stored SVGs. They are **always sanitized** with DOMPurify
+  (`figSanitizeSvg`) before being inlined, then cropped to the drawn content
+  (`figCropToContent`, one shared box for all steps) and scaled by
+  `figure.scale`. `vendor/tikzjax/fonts.css` is loaded on the site because the
+  SVG glyphs use Computer Modern private-use codepoints.
+- **🔗 Share** copies `https://<site>/s/<problem_key>` on the default tab,
+  and `/s/<problem_key>~<id>` on any other (`~` can't be part of a problem
+  id, so the key stays unambiguous); the plain link always opens the
+  problem's current default, a `~id` link that solution (or the default, if
+  it is gone). That link is answered
+  by the Netlify Edge Function `netlify/edge-functions/share.ts` with a tiny
+  page holding the solution's own preview tags (title, description and the
+  picture the editor drew for that solution, see [Link previews](#link-previews);
+  the plain link takes the default's) and a script
+  that sends people on to `/?solution=<key>[~<id>]`; crawlers don't run it, so they
+  keep the tags. No meta refresh, which some crawlers would follow to the
+  plain site. Without a picture (or when unpublished) the site's own preview
+  is used. Netlify's CDN keeps each link's page for 5 minutes. A visitor who
+  has the site installed never reaches the function: `sw.js` redirects `/s/`
+  itself (which also covers full offline mode). On `localhost` the button
+  copies `?solution=` directly, as there is no edge function.
+- Solution text is rendered by `renderSolutionInto` (`js/solution-render.js`):
+  each line becomes its own block inserted as text (never HTML); multi-line
+  `$$…$$`, `\[…\]` and `\begin{env}…\end{env}` blocks are kept together; an
+  unclosed block falls back to one block per line.
+
+### Redrawn problem figures
+
+Every problem image (77 across the four PHYS 162 sets) also exists as an SVG redrawn
+in the reader's theme colours. Settings › Study › **Redrawn figures** (on by
+default) picks which one is shown; off shows the original images.
+
+- **Data**: `course/figures/quizN.js` registers
+  `window.REDRAWN_FIGURES['quiz_N']`, a map from an image's file name
+  (`unnamed(5).webp`) to its SVG text. Two images with the same drawing share
+  one string.
+- **Swap** (`js/figure-style.js`): the quiz data keeps the original `<img>`.
+  One `MutationObserver` on `<body>` replaces each `.fig-img-wrap img` that
+  has a drawing with its SVG (and back, when the setting is off), wherever
+  problem HTML is inserted: quiz cards, Solve-All, attempt review, the
+  Solution screen, cached Solve-All cards. Images without a drawing stay as
+  they are. Ids inside a drawing (clip paths) get a per-copy suffix so two
+  copies on one page never share them. `applyFigureStyle()` restyles the page
+  when the setting is switched.
+- **Look** (`.fig-redrawn` in `css/style.css`): ink is `currentColor` (the
+  theme's text), the two accents are `--svg-blue` / `--svg-red` (vectors and
+  velocities / forces, with objects tinted in the complementary accent),
+  `--svg-fill-white` is the card surface, `--svg-dark` stays dark in both
+  modes (tyres) and `--svg-gold` is the one extra colour. Labels use STIX Two
+  Text. Each drawing has one user unit per pixel, so `--fig-w` (its viewBox
+  width) gives labels the size of the problem text; the Figure size setting
+  scales it like an image.
+- **Math cache**: Solve-All cards are cached with their figures put back as
+  the original `<img>` (`figuresAsOriginal`), so the cache never holds a
+  drawing that a later export changed.
+- **Not changed by redrawing**: offline mode downloads both the images and
+  `course/figures/` (and `course/animations/`); the `@gemini` bot still
+  receives the original image.
+
+**Making or changing a drawing** (`tools/figures/`, Python 3, not deployed):
+
+1. `svgkit.py` is a small drawing kit (`Fig` with lines, arrows, arcs, text,
+   vectors, …) whose colour names (`INK`, `PAPER`, `BLUE`, `RED`, `DARK`,
+   `GOLD`) are the CSS variables above. Coordinates are SVG units, y down;
+   angles in degrees, 0 = east.
+2. `quizN.py` has one function per image and a `FIGURES` table of
+   `(image number, function, caption, problems using it)`; image number 0 is
+   `unnamed.webp`, n is `unnamed(n).webp`.
+3. `python tools/figures/export.py` rewrites `course/figures/quiz1..4.js`
+   (and `manual.js` from `manual.py` and `inertia.js` from `inertia.py`, whose
+   `FIGURES` rows have a name where the quizzes have an image number).
+4. `python tools/figures/preview.py N` writes
+   `tools/figures/preview/qN/index.html`: every original next to its redraw,
+   with a switcher for every theme in light and dark (`preview/` is
+   git-ignored).
+
+A new problem image shows as the original until a drawing for it is added
+and exported.
+
+**Hand-drawn figures.** Most PHYS 162 redraws were drawn by hand for the
+earlier site. They live as plain SVG files in
+`tools/figures/handmade/quizN/<image name>.svg` (e.g. `unnamed(5).svg` for
+`unnamed(5).webp`), each scaled so its viewBox width is the width it is
+shown at, and use the same colour variables as the generated drawings.
+`export.py` takes a hand-drawn file in preference to a drawing in
+`quizN.py` for the same image; to use the generated one instead, list the
+image number in that module's `PREFER_DRAWN`. A drawing's credit, if it has
+one, is kept in `handmade/quizN/credits.json` and sits in the problem text
+as a `.fig-attr` badge beside the image, so it stays when the redraw
+replaces it. To change a hand-drawn figure, edit its SVG file and re-run
+`export.py`.
+
+### Animated figures
+
+A few redrawn figures can be played: a small ▶ under the figure's right
+edge runs a short **qualitative** animation of what happens in the problem
+(no numbers that would give the answer away). Next to it, a speed chip
+cycles 0.5× / 1× / 2×; the choice is shared by every figure and kept per
+device (`<prefix>-fig-anim-speed`). It multiplies Settings › Display ›
+*Default animation speed* (0.25–5×, `display.figAnimSpeed`). Two more
+Display switches change the two kinds below: *Repeat one-shot animations*
+(`figAnimRepeatOneShot`: a one-shot goes round again, and gets a ⏸ that
+lets it finish the round) and *Play looped animations only once*
+(`figAnimLoopOnce`: a loop plays one cycle and stops). The player reads
+them when play is pressed (`figAnimSetting()`).
+
+- **Two kinds.** A *one-shot* animation plays forward for 2–3 s, holds, runs
+  back quickly and stops on the drawing as published; it cannot be paused
+  (the button is disabled until it ends). A *looped* one repeats until
+  paused; its button becomes ⏸, and a paused loop runs on to the end of its
+  cycle — the published drawing — before it stops. A flow (P31's heat
+  packets) also sets `drain`: after that last cycle, `frame` keeps being
+  called with `u` past 1 for `drain` seconds, so the packets under way run
+  out instead of vanishing (pressing ▶ meanwhile picks the flow back up).
+- **Frame rate**: driven by `requestAnimationFrame` with time-based motion,
+  so it runs at the display's refresh rate (60, 120, 144 Hz…) at the same
+  speed everywhere, and pauses in background tabs.
+- **One at a time** (`FIG_ANIM_MAX_PLAYING = 1`), so played figures never
+  pile up on the CPU. Nothing is cut off: starting a figure asks the
+  longest-running other loop to wind down exactly like pause (it finishes
+  its cycle), and an `IntersectionObserver` does the same for a loop
+  scrolled out of view or hidden with its screen. One-shots end within
+  seconds anyway, so they play out and don't count. Raising the constant
+  lets that many loops run together.
+- **Data**: `course/animations/quizN.js` registers
+  `window.FIGURE_ANIMATIONS['quiz_N']`, keyed by image file name like the
+  drawings. Each spec is `{ loop, period }` or `{ duration, hold, back }`
+  plus `init(svg)` → state, `frame(state, u)` and optional
+  `start(state)` / `end(state)`; `u` is the one-shot's progress or the
+  loop's phase, 0..1, and `u = 0` must leave the drawing exactly as drawn.
+- **Moving parts are tagged in the drawing**, not found by coordinates: the
+  figure functions in `tools/figures/quizN.py` wrap them in
+  `<g data-part="…">` and put the geometry an animation needs in
+  `data-geom` (e.g. a path's start and end). Labels, axes and force arrows
+  stay where they are drawn unless they belong to the moving part: the
+  pendulum's θ mark and L follow its string, and on the circling block
+  (P90) r and m keep their drawn offsets along and across the radius.
+  Labels of a turning part stay upright; if they would leave the viewBox
+  mid-turn, the drawing gets the room (the SVG clips at its edges).
+- **One drawing, several problems.** Where problems share an image but
+  differ in what moves, the spec's `start` reads that problem's text (the
+  element around the figure minus the figure's own labels, NFKC-normalised
+  so MathJax's 𝐴 reads as A, with `$` and the invisible times U+2062 that
+  MathJax's hidden MathML puts between letters dropped, so `$ADBA$` reads
+  ADBA) and picks a mode: which wire is plucked, both wires, pulses racing
+  up them, the overtone named (the *n*th overtone has *n* + 1 loops), or
+  the cycle a p–V path takes. With nothing to go on it falls back to a
+  sensible default.
+- **p–V paths** (quiz 4): the segments and arrowheads are tagged
+  (`seg()` / `head_tag()` in `tools/figures/quiz4.py`: a segment named by
+  its end states in drawn order, a line or a cubic Bézier; a head's place
+  and whether it points with or against the drawing). `pvCycle` walks the
+  path the problem names at an even pace, so each of its arrowheads goes
+  once round per loop, turning corners smoothly and taking the colour of the
+  segment it's on; a head running against its drawn direction turns round
+  first, and heads off the path stay put. On an open path (a → b → c) the
+  heads fade out at the last state and back in at the first.
+- **The gas in a cylinder** (P112 and the cycles P90–P93, P150):
+  `gas_inset()` in `quiz4.py` draws a cylinder hidden beside the diagram,
+  and `state_dot()` a dot for the gas's state; `cylinder()` in
+  `quiz4.js` plays the path on them. The piston's place is the volume. The
+  gas and the dot are coloured by temperature on a fixed thermal scale
+  (`THERMAL`: blue, green, yellow, red from the coldest to the hottest state
+  on the path; one set for dark mode and a deeper one for light, picked by
+  `body.light` when play is pressed), the same in every theme; heat coming
+  in is drawn in its red, heat leaving in its blue. The arrow on the rod is the
+  pressure, scaled so its area grows with it: pointing in while the gas is
+  pushed in from outside, out while the gas pushes the piston out, or
+  presses on it while pins hold it at constant volume. Heat arrows at the
+  closed end show heat in or out by the sign of dQ = (f/2) d(pV) + p dV,
+  and an adiabatic step shows an insulating jacket and no heat. Volume and
+  pressure come off the drawing; temperature too (as pV), unless the problem
+  states it for every state of the path (P93, P150), since a drawn adiabat
+  is only roughly one. A looped cylinder fades out over `drain` when paused.
+- **Added parts.** Things that exist only while playing are either drawn
+  hidden (`opacity="0"`, like the cylinders and state dots) or added into
+  an empty tagged group (P31's packets, P99's work area) and removed in
+  `end`, so the drawing at rest is byte-for-byte as exported.
+- **Player** (`js/figure-anim.js`): `toRedrawn` in `figure-style.js` calls
+  `attachFigureAnimation(svg)`, which wraps the SVG in a `.fig-anim` span
+  with the controls; `toOriginal` unwraps it again, so switching Redrawn
+  figures off and the Solve-All math cache both drop the controls. A player
+  stops by itself once its SVG has left the page.
+- **In the manual**: Quizzes › *Figures & animations* shows a looped and a
+  one-shot figure live (`.manual-fig-demo`, see [Smaller modules](#smaller-modules)),
+  built with `redrawnFigure(src, alt)` from `figure-style.js`, the same
+  function `toRedrawn` uses. They are redrawn even while the setting is off.
+  The one-shot is P68's mug. The looped one is drawn for the manual only
+  (`tools/figures/manual.py` → `course/figures/manual.js`, animated in
+  `course/animations/manual.js`, both under the key `manual`, so its
+  placeholder's `data-fig` is `images/manual/coupled-springs`, with no image
+  file behind it): two equal blocks, tinted in the two accents, between
+  three springs with a weak one in the middle. The red block starts pulled
+  aside and its swing passes to the blue one and back (beats); the loop holds
+  6 in-phase and 7 anti-phase swings, so it ends at rest where it began.
+
+Animated now:
+
+- **Quiz 1**: one-shot: P68 mug off the counter, P123 two-pulley hoist, P51
+  plane speeding up from rest down the runway and lifting off, P66 the
+  shell climbing the dashed path (steady across, slowing upward) and
+  bursting at the top, P94 / P95 m₂ falling and dragging m₁ (P94, where m₂
+  is "increased smoothly", loads the plates one by one first), P96 F
+  dragging m₁ left as m₂ rises, P99 / P100 both blocks pushed along, P102
+  the block pulled along, P127 / P128 / P130 m₁ at steady speed up the slope
+  or down it (from the text), P131–P133 the weight hung on gradually while
+  the cord's pull T on A and the static friction f grow equal and
+  opposite, up to the dashed μN mark where the problem asks for a limit
+  (P132, P133) and short of it where it gives everything (P131, from its
+  numbers), P135 / P136 B dragged left at steady speed with A held by the
+  cord or riding on B (that drawing has room on the left for it). Looped:
+  P90 block circling on the table, P92 conical pendulum, P143–P145 the car
+  driving round the loop, the wall's push N (towards the centre) growing
+  at the bottom and shrinking at the top while mg stays the same, sized by
+  v²/(gR) from the problem (P145, with no speed given, at the least speed:
+  N reaches zero at the top); the drawn velocity arrow fades out while the
+  car goes round and back in when it is home (`drain`). Force arrows drawn
+  while playing come from `forceArrow()` in `quiz1.js`, shaped like
+  `Fig.arrow()`. Numbers read from a problem's text are matched as numbers
+  (`\d+(?:\.\d+)?`), so a full stop after one ("is 0.29.") isn't taken in,
+  and the text reads the same before and after MathJax has typeset it.
+- **Quiz 2**: `quiz2.js` walks parts along tracks (`track()`: Bézier,
+  line and arc pieces, sampled) at the speed energy gives them
+  (`timing()`: v from v₀² + 2g·drop, less friction where there is some,
+  integrated into time), so they speed up going down and slow to rest at
+  the top. Blocks on a track are rigid (`riding()`: both ends of the base
+  on the path), so they follow curves and tip over corners as real blocks
+  do; a round stone rests its half-height off the surface. A spring let go
+  from rest pushes for a quarter of its swing, E·(1 − cos) (`springPush()`),
+  so the block leaves at full speed and glides on at that speed. One-shot:
+  P72 / P73 bullet into the ballistic pendulum, which
+  swings up to h; P4 / P5 particle pulled up the half-cylinder at steady
+  speed, cord, R and θ following; P12–P14 suitcase and P26 block hauled up
+  their slopes; P38 / P39 static pull and friction on the box, or (P39,
+  "picks up") the gravel lifted off and the bucket pulling the box along;
+  P40 / P41 spring launch, the block tipping onto the incline and climbing
+  to rest; P42 / P50 / P51 one block from the spring on into picture 2,
+  where it is drawn: keeping its speed and arriving with the drawn
+  velocity arrow, or (with friction) slowing to rest there, the arrow
+  riding on it sized by its speed ("frictionless" in the text decides);
+  P46 block down the track, across
+  the rough part and up the far side only as high as μL/h leaves; P47
+  stone down the hill from its starting speed and to rest on the rough
+  stretch; P58 / P59 block up the hill and over the pit as a projectile;
+  P78 / P79 cord cut, the spring pushing the blocks apart in the masses'
+  ratio; P111 / P112 ball along and up the incline to the drawn stop;
+  P132 wheel (spokes added) turning the way the net torque does; P133
+  bullet sticking at the rim, cylinder turning; P136 / P137 block down the
+  track and along the floor into the dashed square at the rod's foot, rod
+  and block swinging up to θ exactly onto the dashed outline (both are the
+  same rect turned by θ about O in `quiz2.py`; P137 starts at the rod);
+  P144 / P145 plane into the bar, which tips while the plane drops;
+  P147 / P148 string pulled in, the block spiralling faster (speed ∝ 1/r)
+  until the string breaks and it flies off along the tangent. Looped: P54 /
+  P55 coaster car round the loop, P130 / P131 shell spinning with its
+  equator masses. P12–P14 and P38 / P39 drawings got some room (above and
+  below) for their moves.
+- **Quiz 3** (all looped): P17 three stars on one orbit (a third of a turn
+  per loop, so it repeats exactly) and P28 binary stars round their centre
+  of mass; P39 block on a spring and P54 two stacked blocks on a spring
+  (spring redrawn each frame); P105 standing wave on the wire between the
+  posts (overtone from the text); P107 pulses up both wires of the beam, A's
+  faster; P143 wire B vibrating. The partner problems sharing these
+  drawings play their own variant (e.g. wire A only, both wires).
+- **Quiz 4** (every figure but P36's window): P6 the top bar warming and
+  buckling at the crack until it looks like the lower one (with 24 units of
+  headroom in the drawing for it), P29 the rod lengthening, A 2.6 times as
+  much per unit length as B, and P112 the gas cylinder: pushed in at
+  constant pressure while heat leaves (B → D), then held by pins while heat
+  comes in (D → A) (one-shot). Looped: P31 heat packets down the copper,
+  splitting at the junction three to one between brass and steel (their
+  k/L); P90 / P91 / P92 the arrowheads of the named cycle going round the
+  rectangle with diagonals (ADBA, ABDA reversed, ADCBA), P93 and P150 round
+  their cycles, each with the gas cylinder playing the cycle; P97–P100
+  along a → b → c, and for P99, which asks for the work, the area under the
+  path filling in.
+
+To animate another figure: tag its moving parts in `tools/figures/quizN.py`
+and run `export.py`, add a spec to `course/animations/quizN.js` (create the
+file for a new quiz and add it to the tier-2 loader list in `index.html`
+and to `OFFLINE_CORE_FILES` in `js/offline-mode.js`).
+
+### Settings
+
+`js/settings.js` stores settings (synced by `js/settings-sync.js`, see
+[Cross-device sync](#cross-device-sync)) as
+`localStorage.flux_settings` with a schema version and a migration that merges
+saved values over `SETTINGS_DEFAULTS`. `getSetting(tab, key)` /
+`setSetting(tab, key, value)` are the accessors. The screen has five tabs:
+
+| Tab | Settings |
+|---|---|
+| **Display** | *Main screen*: Show floating avatar · Show floating splashes · Show manual button · Show theme selector button · Show daylight switch (sub-setting: Follow device theme). *Animations and figures*: Reduce motion (sub, independent of it: Off / XX% with ▲▼ arrows, 10–40% — reduce motion automatically while the battery is below that and not charging; `navigator.getBattery()`, Chromium only, blocked elsewhere) · Figure size slider (50–200%, scales problem images, redrawn figures and solution figures) · Default animation speed slider (0.25–5×; the speed chip under a figure multiplies it) · Repeat one-shot animations (they go round again until ⏸, which then finishes the round) · Play looped animations only once (one cycle, then they stop by themselves) · Hide animation control buttons (the play button and speed chip, so animated figures stay still) · Logo animation (the logo cube's tumble, `js/logo-tumble.js`) · Hide field lines by default. *Extra*: Show floating forum button · Show running line (top-bar tips) |
+| **Notifications** | Hide update reminder (sub: Update anyway outside quiz mode) · Hide try-new-theme reminder · Hide bug report reminder · Go silent — hides every badge and banner and mutes push (sub: Turn off automatically after 24 hours) |
+| **Study** | Redrawn figures (on: theme-coloured SVGs, off: original images) · Starting a quiz (Ask, Ordinary or Lockdown) · Show live timer · Reset filter on page load · Automatically stop after 50 minutes · Full screen for Random N (sub: Don't show full-screen reminder) · Select last used quiz by default (on) · Select cumulative by default · Hide topic while active · Solve-All: Lock order + Order · Line progress (rail) · Show progress window (sticky score) · Reveal wrong answer instantly |
+| **Sync & Storage** | Sync settings on this device (on by default; never synced itself) · Go offline (24 h) · Cache & storage tools · Backup |
+| **Search** | A search box; matching settings appear under it as their real rows, with a link to their own tab (`js/settings-search.js`) |
+
+**Search** renders the other tabs off-screen and picks every element with a
+`data-row-key` out of them, so a new setting is searchable by its title and
+description as long as its row has that attribute. To make it easier to find,
+add the ways people would describe it to `SETTINGS_SEARCH_KEYWORDS` in
+`js/settings-search.js` under the same key: other words for it, what they want
+to do ("hide", "turn off"), and the problem they're solving ("too small").
+
+Display toggles only add classes to `<html>`; the hiding itself is CSS in
+`css/settings.css`. **Icon style** (Classic = drawn line icons, the default; Modern = emoji) is
+`js/icons.js`: in Classic it wraps each interface emoji in `<span class="ic">`
+(a MutationObserver catches later ones) and paints the icon through an SVG
+mask. The 41 icons, the emoji→icon map and that CSS are all in that file; the
+editor loads it too, so the setting covers both. Sync & Storage's *Reset all settings* restores defaults.
+**Backup** exports every setting except the offline-mode timestamp to a JSON
+file (`app: "flux-settings-backup"`) and imports such a file back.
+`openSettingsStudySection(rowKey)` opens the Study tab scrolled to a row (used
+by the full-screen reminder banner).
+
+### Offline support
+
+Two independent jobs share `sw.js`:
+
+1. **Offline fallback page** (always on). Navigations are network-first; when
+   one fails, the precached `offline.html` is shown, with a theme-matched
+   illustration, the site's theme colors and MathJax (both precached) and a
+   random "law of the moment" from `course/offline-laws.json`. Precached
+   assets (`PRECACHE_URLS`) are served cache-first with background
+   revalidation. `CACHE_NAME` is bumped whenever that list changes. When the
+   update checker detects a new version, the page asks the worker
+   (`purge-update-cache` message) to drop `CACHE_NAME`, so a single reload
+   fetches fresh files. The purge runs at most once per new version per
+   browser, and the refill revalidates (`cache: 'no-cache'`), so unchanged
+   files cost only an empty 304. The worker itself also ignores a purge
+   within an hour of its last refill or install (time kept in IndexedDB
+   `flux-sw-meta`), which caps tabs still running older code that purge on
+   every poll. A new `purge_id` in `site-version.json` asks every browser for
+   one refill the same way ([Remote settings](#remote-settings-site-versionjson)).
+2. **Full offline mode** (`js/offline-mode.js`, Settings → Sync & Storage →
+   "Go offline", tap twice). Pending attempts and Solve-All progress are pushed
+   first; then the core files (including `course/figures/` and
+   `course/animations/`), the MathJax
+   bundle and every image referenced by any problem (active or retired) or
+   by an exam handout (`QUIZ_HANDOUTS`) are
+   downloaded into `flux-offline-mode-v1` (six at a time, bypassing the HTTP
+   cache). Only one download runs at a time: another tap while it runs is
+   ignored, since a second run sharing the cache could delete it after the
+   first had switched the window on. Only a complete download activates the
+   window: the expiry timestamp is written to
+   settings and to IndexedDB `flux-offline-mode`, where `sw.js` reads it. For
+   24 hours, every cross-origin request (Supabase, CDNs) is refused and
+   same-origin requests are served from that cache, even when a connection is
+   available. "Go back online now" ends it early; `endOfflineMode()` also
+   reconnects live sync. The forum and the PDF/XLSX exporters are deliberately
+   not included.
+
+`OFFLINE_CORE_FILES` in `js/offline-mode.js` is maintained **by hand** and must
+list every same-origin file that `index.html` loads; the cache name and
+IndexedDB names must stay identical in `js/offline-mode.js` and `sw.js`.
+
+**Cache & storage** tools (tap twice to confirm): *Reset all settings*
+(every setting back to its default, reload), *Reset all cache* (local
+attempts and Solve-All progress; the server copy returns on next sync),
+*Reset prerendered LaTeX equations* (the whole math cache), *Reinstall service
+worker* (unregister, clear every cache except the offline-mode one,
+re-register, reload).
+
+### Theming
+
+Presets are CSS blocks in `css/style.css` (`body[data-theme="x"]`, each with a
+`.light` variant): **Default, Nord, Sakura, Cyber, Forest, Solar, Dusk, Ocean**. `body.light`
+is day mode. `js/themes.js` provides the picker, the **custom theme builder**
+(background, text, two accents, roundness, font pairing — Plex, Grotesk,
+Quicksand or All-mono — separately for night and day, with surface/border/
+muted/accent-dim derived automatically; nothing is applied until "Save &
+apply"), and a one-time theme nudge banner. `js/theme-colors.js` reads the live
+computed CSS variables so canvas/JS-drawn UI (chart series via
+`quizSeriesColor`, confetti, the π egg) follows the active theme. The editor
+uses the same theme files and storage keys. Each preset (night and day) also
+defines `--svg-blue` / `--svg-red`, the two accents of the
+[redrawn problem figures](#redrawn-problem-figures); a custom theme sets them
+to its accent 1 / accent 2. Solution figures use `--accent` / `--accent2`
+instead (`css/figure.css`). `tools/figures/preview.py` keeps a copy of every
+preset's values for its theme switcher, to be updated with them.
+
+### Math rendering and the render cache
+
+`renderMathIn(el)` (`js/math-render.js`) awaits `MathJaxReady` and typesets an
+element. MathJax's menu and accessibility explorer are disabled, and a stale
+`MathJax-Menu-Settings` key is removed on every load.
+
+**Site-wide LaTeX macros**, defined identically in `index.html`,
+`offline.html`, `editor/index.html` and the TikZ preamble in
+`editor/editor.js` (all four must be kept in sync):
+
+| Macro | Result |
+|---|---|
+| `\dd{x}` | upright d x |
+| `\dv{x}{t}`, `\dv[2]{x}{t}` | (n-th) derivative |
+| `\pdv{f}{x}`, `\pdv[2]{f}{x}` | (n-th) partial derivative |
+| `\vb{F}` | bold vector |
+| `\vu{r}` | bold unit vector with hat |
+| `\abs{x}`, `\norm{v}` | auto-sized \| \| and ‖ ‖ |
+
+**Render cache** (`js/math-cache.js`, IndexedDB `mathRenderCache`): for
+Solve-All cards, the typeset HTML of each problem text is stored together with
+exactly the CSS rules it needs, keyed by a hash of the source text and scoped
+per quiz (`mathCacheKeyFor`). An edited problem misses the cache automatically.
+Typesetting runs a batch at a time, so each card remembers the problem and key
+it was built for (`_saCardSource`); a batch finishing after Solve-All was
+reopened for another quiz is still stored under its own problem. Figures are
+stored as the original `<img>` (see [Redrawn problem figures](#redrawn-problem-figures)).
+`MATH_CACHE_SCHEMA` is bumped when card markup or the render pipeline changes.
+
+### Top bar
+
+- `.top-bar-backdrop` turns from `--bg` to `--surface` once the page scrolls
+  past 28 px (`js/top-bar-scroll.js`, `topbar:scrollstate` event).
+- **Running line** (`js/top-bar-tips.js`): random tips from
+  `js/data/tips.js`, shown only on non-mobile widths, never on Manual or
+  Settings, and only while the bar is in its scrolled state. It fills the real
+  gap between the logo and the icon row.
+- **Quiz status** (`js/top-bar-quiz-status.js`): HH:MM with a blinking colon
+  and, where the Battery Status API exists, battery level/charging — only
+  during a Random N attempt in full screen with enough room, and yielding to a
+  tip (`topbartip:show` / `topbartip:hide` events).
+- Icon row: ⚙️ Settings, 📖 Manual, 🎨 themes, day/night switch. The site logo
+  returns to the main menu; holding it opens the editor entry (see
+  [Access](#access)).
+
+### Banners and the update checker
+
+`window.BannerManager` (`js/banner-manager.js`) shows one bottom banner at a
+time: `update` always preempts (others are paused, not lost); `bug`, `theme`
+and the full-screen reminder queue first-come-first-served. API: `register`,
+`request`, `release`, `cancel`.
+
+- **Update banner**: `site-version.json` is polled every 15 minutes (`poll.update`)
+  while the tab is visible (and on return to it, at most once per interval),
+  also after the banner was dismissed, since the file carries the remote
+  settings below; a mismatch with `CURRENT_VERSION` shows "New version
+  available" with Reload (which purges the service-worker cache first). With
+  "Hide update reminder" on, the banner is suppressed, and "Update anyway
+  outside quiz mode" reloads silently as soon as no timed attempt is running.
+  An update left waiting for 48 hours (dismissed or not), or one the running
+  version is below `min_version` for, is applied regardless of settings, and
+  even during a timed attempt once that attempt has run for 3 hours, but never
+  without warning: a second banner (`#update-forced-banner`, blinking "!",
+  not hidden by the hide settings or Go silent, no ✕) says why ("N days
+  behind" or "marked critical") and counts down 5 minutes, with Reload now.
+  During a timed attempt it waits and says the reload comes 5 minutes after
+  the quiz, with ✕ instead of Reload now (hides it until the quiz ends, when
+  the countdown appears); a quiz started mid-countdown puts it back to waiting, and its end
+  starts a full 5 minutes again. If nobody saw the countdown (tab hidden, or
+  no input since it started), the reloaded page shows "The site was updated
+  while you were away, since you were N days behind / due to a critical fix"
+  once they're back (hidden tab: when shown again; tab left on screen: at the
+  first mouse move, tap or key) for 10 seconds of on-screen time
+  (`#update-done-banner`, receding outline), only when the reload really
+  brought a newer version. At most one forced reload per outdated
+  version per tab per 24 hours (sessionStorage), so a reload that doesn't
+  bring the new version can't loop.
+- **Bug-report nudge** ("Report on Telegram"): at most once a day, after 10
+  minutes of use. The third ✕ turns on "Hide bug report reminder".
+- **Theme nudge**: once, suggesting a preset. Never inside Safe Exam Browser, where it would change the theme mid-quiz. The third ✕ turns on "Hide try
+  new theme reminder". Both counts start over then.
+
+### Remote settings (`site-version.json`)
+
+Besides `version` and `editor`, `site-version.json` can carry settings that
+reach every open tab within one update check, without a release
+(`js/site-config.js`). Every key is optional; a missing, empty, misspelled or
+out-of-range value falls back to its default, and builds from before 12.5.1
+ignore all of them. The file keeps each key as a do-nothing placeholder
+(`"min_version": ""`, `"poll": {}`, `"off": []`, `"sync_paused": false`,
+`"purge_id": ""`), so the options are visible where they are set. The last
+values seen are kept in localStorage, so a page load starts with them.
+`minify.py` checks the file and lists what it will do (see
+[Building for deployment](#building-for-deployment-minifypy)). To act, a
+placeholder is filled in (`"min_version": "12.5.1"`, `"poll": {"forum": 300}`)
+and the site deployed; emptying it again restores the default within one
+check.
+
+```json
+{
+  "version": "12.5.1", "editor": "1.0.0",
+  "min_version": "12.4.6",
+  "poll": { "attempts": 120, "forum": 300 },
+  "off": ["realtime"],
+  "sync_paused": true,
+  "purge_id": "2026-10-23"
+}
+```
+
+| Key | Effect | Default |
+|---|---|---|
+| `min_version` | Tabs on an older version reload 5 minutes after a "marked critical" countdown banner appears, outside a timed quiz (a timed quiz once it has run 3 h), instead of after 48 h. Must not be above `version`. | no minimum |
+| `poll` | Background intervals in seconds, each clamped to its limits: `attempts` 45 (15–3600), `attempts_live` 300 (45–3600, used instead of `attempts` while that Realtime channel is connected), `solve_all` 60 (15–3600), `solve_all_live` 300 (60–3600, likewise), `settings` 900 (60–86400), `stats` 45 (15–3600), `forum` 90 (15–3600), `forum_live` 300 (60–3600, used instead of `forum` while the forum's Realtime channel is connected), `forum_quiet` 900 (60–21600), `solutions` 1800 (60–86400, how long one solutions index fetch is reused), `update` 900 (60–1800), `db_status` 300 (60–3600, how often the database is rechecked while it is off). Zero or a negative value is ignored (default), not clamped to the fastest rate. A changed value takes effect at once. A timer tick is skipped when the same work already ran less than an interval ago (tab return, Realtime ping), so a catch-up isn't repeated seconds later. | values shown |
+| `off` | `realtime`: no Realtime connections; everything runs on its `poll` interval. `forum_posting`: the forum is read-only (no new messages, replies or edits). | nothing off |
+| `sync_paused` | `true`: attempts, Solve-All progress and settings stay in each browser and are neither sent nor fetched; deleting an attempt and resetting Solve-All still go through. Removing it syncs every visible tab at once. | `false` |
+| `purge_id` | Each browser refills its offline cache once per new value (`sw.js` refills at most once an hour, so a fresh install skips it). | none |
+
+Once a key has shipped, never rename it or change its meaning: tabs on older
+builds keep reading the old name.
+
+**How to use it**
+
+1. Fill in the placeholder in `site-version.json` (leave `version` alone
+   unless this is also a release).
+2. Run `python minify.py`. It stops on a typo or an invalid value and ends
+   with a list of what the file will make open tabs do; read that list.
+3. Deploy the zip. Visible tabs pick the change up at their next update
+   check: within 15 minutes by default (`poll.update`). Hidden tabs make no
+   requests at all and apply it the moment they are shown again. New page
+   loads start from the last settings this browser saw and correct
+   themselves at the first check, a second after loading.
+4. To undo, empty the placeholder again and deploy; the default is back
+   within one check.
+
+**Which setting for which situation**
+
+| Situation | Setting | Notes |
+|---|---|---|
+| Release fixes something every open tab must get now | bump `version` and set `min_version` to it | Tabs reload within one check plus the 5-minute countdown; a running timed quiz is never interrupted before it ends or has run 3 h. Only tabs on 12.5.1 or newer read it: older tabs still get the banner and the timed reload (12.4.5+; after 24 h up to 13.2.0, 48 h since), or need a manual reload (12.4.4 and older). |
+| Supabase quota running high | `poll` with longer intervals (`attempts`, `forum`, `update` first) | Takes effect at once, also mid-interval. Realtime still delivers changes, so slower fallbacks mostly cost freshness after a missed ping. |
+| Supabase or its Realtime service is down or flaky | `off: ["realtime"]` | Drops every live connection; the fallback polls carry on unchanged. |
+| Database trouble, or a sync bug | `sync_paused: true` | Work stays in each browser; removing it makes every visible tab sync at once (one catch-up each). |
+| Spam wave on the forum | `off: ["forum_posting"]` | Reading, flagging and moderation go on. Server-side bans are still the real defence. |
+| A broken file in the offline cache | a new `purge_id` (any new string, e.g. the date) | Each browser refills once; see the costs below. |
+
+**What the safety rules guarantee** (checked in the test below):
+
+- A forced reload (`min_version`, or the 48 h rule) happens at most once per
+  outdated version per 24 hours per tab, even when the new code is not
+  actually on the server, so a misconfigured release cannot loop. In that
+  case the update banner stays up after the one reload, since the newer
+  version really is announced but not served.
+- `min_version` above the version the server actually serves is refused by
+  `minify.py`; if it gets through anyway, it reloads nothing once the
+  running version equals `version`.
+- A file that can't be read (404, 500, invalid JSON) changes nothing: tabs
+  keep the last settings they saw. A file that reads but is not an object
+  (`null`, a list) resets every setting to its default. Wrong types and
+  unknown names are ignored key by key.
+- Settings are remembered in each browser. While `site-version.json` is
+  unreachable, a tab keeps the last settings, including a pause, until the
+  file can be read again.
+
+**Measured costs** (one visible tab; the test from 2026-10-23, see below):
+
+| Setting | Requests per open tab |
+|---|---|
+| Defaults, idle | 12 update checks, 80 attempt syncs and 8 forum reads per hour (40 forum reads while the forum is active, 15-min quiet checks otherwise) |
+| Every `poll` value at its minimum | about 240 attempt syncs and 60 update checks per hour (3× and 5× the default) |
+| Every `poll` value at its maximum | about 1 of each per hour |
+| Hidden tab | none |
+| A new `purge_id` | about 100 file requests per browser, once. Unchanged files come back as 304 (about 13 KB in total), but Netlify bills each request. |
+| A forced reload | one page load; mostly 304 revalidations (about 6 files deployed, more locally) |
+| Switching `off: ["realtime"]` on and off | one reconnect per switch back on, nothing more |
+
+**How it was tested.** On 2026-10-23 the site ran from the working tree in
+Edge (Chromium), driven by Playwright with a fast-forwarded clock: a local
+server served the site with a controllable `site-version.json`, and a mock
+Supabase (REST, RPC, Edge Functions and a minimal Realtime WebSocket) logged
+every request. Fifteen scenarios covered the defaults, hidden tabs, every
+`poll` value at its minimum and maximum, Realtime off and flapping, the
+sync pause, `purge_id`, `min_version` with and without a timed quiz,
+dismissed banners, malformed files, two tabs and a remembered pause. Two
+problems found that way are fixed: a zero or negative interval was clamped
+to the fastest rate (now ignored), and every catch-up (tab return, Realtime
+ping) was repeated by the next timer tick seconds later (ticks now skip).
+Safari and Firefox were not covered.
+
+### Smaller modules
+
+- **Splash** (`js/splash.js` + `course/splashes.json`): entries are
+  `[text, condition, mandatory?]`. Conditions: `""` always, `M`/`D`/`E`/`N`
+  (morning/day/evening/night), `P` (near π time or π day), plus date codes for
+  holidays defined in `COND_ACTIVE`. `mandatory: 1` guarantees the line is shown
+  once on its day. Tapping the badge rolls a new line. After 60 s with no
+  activity the bounce eases to a stop, and any activity eases it back, so an
+  idle menu leaves the GPU alone.
+- **Manual** (`js/manual.js` + `course/manual.json`): an array of sections
+  `{ id, icon, title, subsections: [{ id, title, html }] }` with inline LaTeX,
+  shown as a collapsible tree and a content pane. A fallback notice appears
+  when the JSON cannot be fetched (e.g. a `file://` page). Pages can embed
+  live widgets built from the site's own code (listed at the top of
+  `manual.js`): the answer field graded by the real checker, and
+  `.manual-fig-demo`, whose `<span class="manual-fig-demo-fig" data-fig="…">`
+  placeholders (a problem image's path, or `images/manual/<name>` for a
+  drawing of `tools/figures/manual.py`) become redrawn figures with their
+  real play buttons.
+- **Changelog** (`js/changelog.js`): the panel under the landing box, the
+  charge-canvas button with the version badge, a "⚡ field lines" cursor effect
+  (toggleable; can be off by default via Settings) and a GitHub link. Its
+  animation loop runs on the main screen only, the charge redraws at 30 fps, and
+  the full-screen overlay stays hidden unless lines are drawn. With reduced
+  motion the charge holds still and the splash doesn't bounce.
+- **Easter egg** (`js/easter.js`): Pi Hour (3:14 AM/PM) and Pi Day (14 March).
+- **Figure attribution** (`js/fig-attribution.js`): tap-to-toggle `.fig-attr`
+  (i) badges inside problem text; Escape or an outside tap closes them.
+- **Site visits** (`js/site-visits.js`): one fire-and-forget `record-visit`
+  call per page load, sharing the forum's `device_id`.
+- **Copyright screen** (`js/license.js`, `css/license.css`): opened from the
+  "Copyright" link under the changelog button; the statements from
+  `#licenseScreen` in `index.html`, then the full `LICENSE` text, fetched on
+  first use (see [License](#license)).
+
+---
+
+## Lockdown mode (Safe Exam Browser)
+
+An optional way to take a random quiz. Starting one shows a choice on
+`#choicePage`: *Ordinary* is the normal quiz, and *Lockdown browser* opens
+[Safe Exam Browser](https://safeexambrowser.org) (SEB) with
+`seb/<hostname>.seb`, which shows the site full screen and blocks other apps and
+sites. *Remember* saves the answer in `study.quizStartMode`, which Settings >
+Study can change back. Devices SEB doesn't run on skip the choice. Inside SEB,
+`js/lockdown.js` sets `html.lockdown` and `css/lockdown-session.css` hides
+everything except the quiz.
+
+Only `js/lockdown.js` and `css/lockdown.css` load for everyone. The files in
+`LOCKDOWN_SESSION_FILES` load only inside SEB, and `minify.py` packs them into
+one bundle of each, so other visitors never download them.
+
+- **Is SEB installed?** A page can't tell, and losing focus proves nothing:
+  Windows' "Get an app" popup takes it too. So the link is followed at once, and
+  help with *Install* and *Enter lockdown* appears after 10 s, long enough for
+  SEB to start, or sooner through *I don't have it installed*. The site, loaded
+  inside SEB, sends `opened` on the ticket's Realtime channel, and only that (or
+  a collected attempt) takes the normal browser back to the menu.
+
+- **Configs:** `python tools/seb/make_config.py` rewrites `seb/*.seb`. A new host
+  goes in that script's `HOSTS` and in `LOCKDOWN_HOSTS` in `js/lockdown.js`.
+- **Trying it locally:** run `python -m http.server 8000` on port 8000 exactly,
+  open `http://localhost:8000/`, and choose Lockdown browser. Save your work first: SEB
+  takes over the screen, full screen with no taskbar. To leave, use the exit
+  icon in the top bar, or Ctrl+Q if the site won't load (no quit password).
+- **Stats:** SEB is a separate browser with no identity, so attempts travel
+  through a drop-off. The normal browser puts a random ticket in the SEB link
+  (after a second `?`, which is how SEB passes values to the start URL), SEB
+  leaves each attempt under it with the `lockdown-dropoff` Edge Function, and a
+  database trigger pings the ticket's Realtime channel so the normal browser
+  collects it at once. A polling fallback runs only while a ticket has no live
+  channel and is still waiting (15 minutes unless SEB reported opening), and
+  otherwise a ticket is read at most every 30 minutes, on load or focus.
+  The browser keeps a ticket for 8 days, longer than the 7 the server keeps an
+  attempt, so a ticket can't expire while its attempt is still waiting. From there the usual sync takes over. Needs migrations 016 and
+  018 and that function.
+- **Manual:** inside SEB only the page on writing answers remains
+  (`lockdownManualSections`), reached by the ⓘ beside each answer box. Solutions
+  open after *Check answers* as usual; forum polling and the visit counter are off.
+  An [exam handout](#exam-handouts) stays available throughout.
+- **Calculator:** the button by the theme controls opens a floating scientific
+  calculator (`js/calculator.js`), which keeps its state while hidden. `CalcEngine`
+  has no DOM. Typed keys reach it only while it has focus.
+- **Limits:** tickets are made up by the browser, so anyone can create them. A
+  ticket holds 20 attempts, the table 5,000 rows, and rows go after 7 days.
+  When full, only lockdown saves fail until the table clears.
+- **Marking:** collected attempts get `locked: true`, stored in
+  `quiz_attempts.locked` (migration 017). Stats shows a small lock beside the
+  mode. It is a label from the client, like the score, not proof.
+- **Look:** the same link carries the colour theme, day or night mode, custom
+  colours and font, since SEB can't read the normal browser's storage.
+- **Not a security check:** nothing verifies SEB's keys, and grading stays in the
+  browser. The Config Key is a checksum of the settings, and these `.seb` files
+  are public, so it could not prove a session really ran in SEB anyway.
+
+---
+
+## Solutions editor (`/editor`)
+
+A separate page at `/editor/` for writing a worked solution — text with LaTeX
+plus an optional stepped figure in TikZ or SVG — for every problem. It reads the problem
+banks live from the same origin, so it always matches the deployed course.
+
+### Access
+
+- The editor is **not linked** anywhere. Holding the site logo for 2 seconds
+  (`js/editor-access.js`) opens a small "📘 Editorial" panel with *Open* and
+  *Open in new tab*; a normal click still goes to the main menu. Once an editor
+  key is stored in the browser, a 📘 quick link appears next to the logo.
+- The page asks for a **32-character access key**, which is verified by the
+  `solutions-admin` function (`whoami`) before the editor opens. The key is
+  stored in localStorage (`<prefix>-editor-key`) only after the server accepts
+  it, and removed on sign-out (tapping the `@name` in the top bar) or
+  rejection. Keys are per course project.
+- The page carries `noindex, nofollow`.
+
+### Access levels
+
+Each key has a level (`solution_editors.level`, migration 013), shown in the
+top bar after the two version numbers (`13.3.0 · 1.0.1 · L4`).
+`solutions-admin` enforces every rule; the editor only offers what will be
+accepted.
+
+| Level | Name | Can |
+|---|---|---|
+| 0 | Observer | Read everything, drafts included. |
+| 1 | Proposer | Write their own solutions; publishing one, and every later edit to a published one, waits for a reviewer. |
+| 2 | Author | Publish their own solutions directly. |
+| 3 | Reviewer | 2, plus edit anyone's content (its status stays) and approve or reject level-1 submissions. |
+| 4 | Full | 3, plus publish, unpublish and delete anyone's, change credit, choose the default. |
+
+At every level, 0 included, an editor may **delete their own** solutions.
+"Own" is `owner_id` (who created it), never the credit. Lowering someone to
+0 stops their writing while keeping that right; revoking a key ends both.
+Fields of a version the editor can't change are read-only (text can still be
+selected and copied), and the editor's own text tools (snippets, Tab, Enter,
+paste, the SVG window) refuse to write there too.
+
+### Layout
+
+- **Top bar**: logo (back to the site), sidebar toggle, title, `@editor-name`
+  (sign-out) with the site identicon of the nickname signed in on the main
+  site in the same browser, the version label (`site · editor · L<level>`),
+  themes and day/night.
+- **Sidebar**: quizzes as collapsible groups of problems (retired ones
+  included), each marked with its state; **Mine** (count only your own
+  solutions), a filter for "problems with work" and *Others* (other people's
+  solutions, yours there or not; one filter at a time); *Check all*, *Editors*
+  and, for reviewers, *Reviews (N)* at the bottom.
+- **Problem bar**: problem key, state pill (opens the state panel), *Hide
+  figure*, and *Problem* (shows the problem text and accepted answer).
+- **Versions strip** (under the problem bar, when there is a choice): every
+  solution of the problem, ★ on the default, and *+ My version*.
+- **State panel**: current state, sync state, last saved, author, review
+  (when there is one), "problem changed since" (one per line), and the
+  actions *Publish*, *Save draft*, *Unpublish*, *Make default*, *Approve*,
+  *Reject…*, *Load submitted edit*, *Load from database…*, *Clear this
+  problem…*, *History…*, *Check state* (reads the row again and updates the
+  panel and the sidebar dot without touching the fields), *Export all as
+  JSON*. Buttons the key's level can't use are off or hidden.
+- **Split view**: inputs on the left (TikZ or SVG, captions, solution), previews on
+  the right (figure with step viewer, solution). The divider is draggable,
+  keyboard-resizable and resets on double-click; the layout stacks vertically
+  on narrow screens.
+
+### Figures (TikZ)
+
+- The figure is TikZ code compiled **in the browser** by TikZJax, with a
+  preamble added automatically (viewable under "Preamble"): packages
+  `amsmath, amssymb`; libraries `arrows.meta, calc, positioning, angles,
+  quotes, patterns, intersections, decorations.markings,
+  decorations.pathreplacing, decorations.pathmorphing, shapes.geometric`; the
+  site-wide macros; and the theme colors below.
+- **Colors** follow the reader's theme. Black (default, also `ctext`) maps to
+  the text color, `c1`/`c2` to accent 1/accent 2, `c3`/`cbg` to the page
+  background and `c4`/`csurface` to the card background (useful as a fill to
+  knock out what lies behind a label). TikZJax writes them as `#000`,
+  `#ff0001`…`#ff0004`, and `css/figure.css` maps those values to CSS
+  variables, so stored SVGs never need recompiling when a theme changes. The
+  🎨 Colors button previews them in every theme.
+- **Steps**: `\onstep{N}{…}` shows its content from step N on. The highest N
+  sets the step count (max 12); every step is compiled separately with
+  `\thestep` set, and each step gets its own caption. The site cross-fades
+  between steps.
+- Everything is kept inside `\useasboundingbox`; anything outside is clipped.
+  `\useasboundingbox` itself only sets the picture's size, so `figNormalizeSvg`
+  wraps each figure's drawing in a clip set to its viewBox; without it,
+  paths drawn past the box showed beside a tall figure whose height is capped
+  (the SVG element keeps the full width).
+  The preview applies the same crop and size cap as the site.
+- **Scale** (0.25–2, default 1) changes the displayed size of the stored SVG
+  without recompiling.
+- **Compile cache**: every compiled step is also kept in IndexedDB
+  (`<prefix>-tikz-cache`, newest 300 steps), so reopening a problem, reloading
+  the editor or the manual's examples show figures without running TeX. Keys
+  are a hash of the build stamp, the step and the source, so an edit or a
+  changed setup simply misses the cache. Hashing is plain JavaScript (no
+  `crypto.subtle`), so it also works on a plain `http://` address.
+- **Build stamp**: worked out automatically from the packages, libraries and
+  preamble, the SVG clean-up code (`figNormalizeSvg` and its helpers in
+  `js/figure.js`), TikZJax's scripts (`tikzjax.js`, `run-tex.js`, read back as
+  loaded) and `FIG_BUILD_VERSION` (`editor/editor.js`, bumped by hand only for
+  TikZJax's TeX data: `core.dump.gz`, `tex.wasm.gz`, `tex_files`). If the
+  scripts can't be read the stamp is unknown: nothing is stamped or flagged
+  and the persistent cache is skipped. `js/figure.js` is minified for
+  deployment, so a local editor and the deployed one have different stamps.
+  Each saved TikZ figure stores it as `figure.build`, only when its SVGs were
+  compiled under the current setup. The state panel's *Figure setup* row
+  (with a *Rebuild figure* button) and *Check all* show figures built under
+  another setup, or before stamps existed; readers only get stored SVGs, so
+  those keep the old output until rebuilt.
+- Compiles run in a queue with a per-source SVG cache and a 90 s timeout. On
+  a TeX error, the first `!` line and its source line are shown, with the full
+  TeX log available, and a *Go to line N* button that scrolls the TikZ box to
+  that line and flashes it. TeX's `l.N` is mapped to the box's own numbering
+  (TikZJax puts the preamble on the lines before the code); for an error
+  inside a multi-line argument such as `\onstep{N}{…}`, which TeX reports on
+  the closing brace, the tokens in TeX's context are looked up further up.
+- The TikZ and SVG boxes show VS Code-style line numbers (the caret's line
+  brighter); `edHighlight(textarea, lang, { lineNumbers: true })` in
+  `editor/highlight.js`. *↩ Wrap* wraps long lines instead of scrolling
+  sideways, one choice for both boxes and every problem (`<prefix>-editor-wrap`).
+  While wrapped, each number sits on its line's first row and takes the
+  line's full height, measured on a hidden copy of the text at the same width
+  and font; *Go to line* uses the same measurements.
+- At save time each SVG is normalized (`figNormalizeSvg`: canonical colors,
+  fixed sizes removed, the drawing clipped to its viewBox, ids prefixed so
+  several inline SVGs never collide).
+
+### Figures (SVG)
+
+The **TikZ / SVG** switch above the figure box picks how a problem's figure is
+written (TikZ by default). Each kind keeps its own text, so switching loses
+nothing. Only the selected kind is compiled and shown to readers, but both
+texts are saved with the row (a change to either one counts as unsaved), and
+a saved figure reopens in its kind. The logic is in `editor/svg-figure.js`.
+
+- **Body only**: the shapes, no `<svg …>` header, since every drawing app
+  writes a different one. A whole pasted file works too (its header is
+  ignored). Parsing is lenient (HTML parser in an inert `<template>`), so
+  Inkscape's `inkscape:`/`sodipodi:` markup is fine.
+- **Box**: fitted automatically to what is drawn (stroke widths, arrowhead
+  markers and text included, with margin; the site then crops tighter, as for
+  TikZ). The optional *Crop box* field (`x y width height`) clips instead, like
+  `\useasboundingbox`.
+- **Colors**: `#000` text, `#f00` accent 1, `#00f` accent 2, `#eee` card
+  background (also `c1`–`c4` and the stored `#ff000N` values). They are
+  converted to the same stored values TikZ figures use. Any other colour
+  stays fixed: the editor warns about it, lists it in pre-publish checks, and
+  *Layers & colours* maps it to a theme colour.
+- **Steps = layers**: top-level groups, first in the file = step 1, each
+  adding to the one before. `<g data-layer="Name">` marks a layer; without
+  any, Inkscape layers (`inkscape:groupmode="layer"`), then any top-level
+  `<g>`, are used. `data-steps="n"` gives a layer n steps of its own and
+  `data-step="r"` on an element inside it shows that element from the
+  layer's r-th step. Elements outside every layer are always shown; a hidden
+  layer (`display="none"`) is left out. Captions are labelled with the layer
+  names.
+- **Cleaning** before storing: `style=""` and `<style>` classes become
+  presentation attributes, `<use>` becomes copies, prefixes, classes, event
+  handlers, images and hidden parts are removed, and black becomes the default
+  fill. Everything put on screen goes through DOMPurify first.
+- **Layers & colours** (button next to 🎨 Colors): a window listing every
+  layer and element with a preview (hovering a row highlights it, step buttons
+  show the figure up to a step). It can hide, rename, reorder, add and delete
+  layers (a layer with everything in it), set a layer's step count and each
+  element's step, move or delete elements (moving keeps their position and
+  inherited styling) and map fixed colours. A mapped colour stays listed,
+  set to what it became, so it can be re-mapped or put back with *Keep
+  fixed*: the original is remembered in the source (`data-was-fill="…"`, or
+  a `was …` comment in a `<style>` block; stripped from stored figures).
+  Captions can be edited under the preview (all steps, or the chosen step's
+  with its rendering). Every change is written into the SVG text as one
+  edit; Ctrl+Z / Ctrl+Shift+Z (and Undo / Redo) step back and forth inside
+  the window, and the text box's own Ctrl+Z works too.
+- Stored as `figure = { kind: "svg", svgSrc, svgBox?, tikz, steps, scale? }`
+  (a TikZ figure has no `kind`, and carries `svgSrc` only when there is SVG
+  text too); the site uses only `steps`, whichever kind made them.
+
+### Solution text
+
+Plain text with `$…$`, `\(…\)`, `$$…$$`, `\[…\]` and environments, rendered
+exactly as on the site (`renderSolutionInto`). Both code boxes offer
+**snippets** in VS Code style: typing a prefix shows suggestions (↑/↓ to
+choose, Tab or Enter to insert, Esc to close, Ctrl+Space lists everything),
+with `${1:…}` tab stops visited by Tab/Shift+Tab. The TikZ list covers
+pictures, bounding boxes, arrows, nodes, blocks, axes, inclines, angles,
+ground/wall hatching, springs, braces, dimensions, `\onstep`, loops and
+scopes; the solution list covers math blocks (`$$`, `equation`, `align`),
+`aligned`, `cases`, fractions, roots, the derivative macros, integrals,
+accents, brackets, units, relations and Greek letters. Outside a suggestion
+list or tab stops, Tab indents like a code editor (two spaces at the caret,
+or every selected line) and Shift+Tab outdents. Enter keeps the line's
+indentation; on a line that is only indentation it removes one level instead
+of starting a line, until none is left (Shift+Enter is a plain line break).
+
+The TikZ, SVG and solution boxes are **syntax-coloured** (`editor/highlight.js`):
+a `<pre>` with the textarea's own classes is drawn behind it and the
+textarea's text is transparent, so typing, selection, undo and snippets are
+untouched. Commands, environment names, options, numbers, math regions and
+`%` comments (SVG: tags, attributes, values, comments, with the `data-layer`/
+`data-step(s)` attributes picked out) get theme colours softened toward the text colour (`.ed-hl` in
+`editor/editor.css`); only colour changes, never width.
+
+### Several solutions per problem (versions)
+
+- Each editor has at most one solution per problem; the site shows them as
+  tabs (see [Worked solutions](#worked-solutions-site-side)). Exactly one
+  published solution per problem is the **default**, kept by migration 013's
+  triggers whatever writes the row: the first one published becomes it, *Make
+  default* (level 4) moves it, and unpublishing or deleting it promotes the
+  oldest remaining published one.
+- The **Versions strip** lists them (`You`, `@name`, `★` = default, `· draft`,
+  `· in review`). A problem opens on your own version, else the default.
+  *+ My version* (shown while you have none there) opens an empty window of
+  your own; publishing it adds a tab, never the default.
+- **Switching tabs loses nothing and asks nothing**: unsaved changes are
+  set aside for the version they belong to and come back when you switch to
+  it (`•` on a tab = changes kept). Which version each window holds and the
+  kept changes are stored in `<prefix>-editor-versions`, so a reload opens the
+  same version with its own text. Rows already read are reused, so switching
+  back is instant.
+- **Mine** (sidebar, `<prefix>-editor-mine-only`): the dots, the filter and
+  Alt+N count only your own solutions, so a problem with only someone else's
+  counts as open work. Off, a dot stands for the version you work on there.
+
+### Reviews
+
+- A level-1 editor's **Submit for review** saves the row with status
+  `review` (invisible to readers). Their edit to an already published
+  solution leaves the row as it is; the edit waits in `solution_reviews` and
+  readers keep the published version until it is approved.
+- Reviewers (level 3+) see *Reviews (N)* in the sidebar and, on the
+  solution, the review line with *Approve*, *Reject…* (a note for the author,
+  typed in the state panel; Ctrl+Enter rejects) and *Load submitted edit*
+  (puts a pending edit into the window to read).
+- A decision is about what the reviewer read: if the author resubmitted or
+  saved since, nothing is decided and the new version is shown. Nobody below
+  level 4 decides on their own submission. Approving draws the solution's
+  link preview (level-1 authors can't set one themselves).
+- The author sees the outcome on their solution ("rejected by @name: …").
+  A rejection keeps the note until they resubmit.
+
+### Saving, publishing and conflicts
+
+- A row is a **draft** (visible only in the editor), **in review** (level-1
+  submissions, also editor-only) or **published** (visible on the site).
+  *Unpublish* returns it to draft.
+- **Clear this problem…** asks whose solution to delete, from any tab:
+  *Delete mine*, and for level 4 one button per other version. A deleted
+  solution goes with its link preview, its pending review and the changes
+  kept for it in this browser; the window then opens what is left. With
+  nothing stored that you may delete, it only empties an unsaved window.
+- Every save stores `problem_hash` (SHA-256 of text, answer and units, first 32
+  hex chars — `problemHashOf` in the editor and `solutionProblemHash` on the
+  site must stay identical).
+- Publishing is the only way a solution reaches the site; a row whose problem
+  disappeared from the quiz files (deleted rather than retired) is reported
+  as an orphan by *Check all*.
+- Saves send the `updated_at` last seen. When another editor saved in between,
+  the server answers **409** with the current row and nothing is overwritten;
+  the editor then offers *Load theirs*, *Overwrite with mine* (saves again
+  against their version) and *Preview*.
+- **Asked before replacing** a stored version that isn't simply your own
+  draft: publishing over the published version (*Replace published*), saving
+  a draft over it, which takes it off the site (*Unpublish and save*), and
+  saving over another editor's draft (*Overwrite*). *Load from database…*
+  asks too.
+- **Preview** (on all of these) opens both versions side by side: this window
+  on the left, the stored one on the right, each headed with whose it is and
+  when it was saved; then the figure with every step and caption, and the
+  solution, each section marked *same* or *different*. The confirmation's
+  buttons are repeated at the bottom.
+- **Pre-publish checks** (warnings, "Publish anyway" is always offered): empty
+  solution, unbalanced `$`, `$$`, `\[ \]`, `\( \)`, braces or
+  `\begin`/`\end`, captions without a figure step, partially captioned steps,
+  and a problem changed since the last save. Publishing is refused while a
+  figure is still compiling.
+- **Credit** (level 4 only; everyone else's solutions are credited to them
+  and keep that credit): every publish asks "Who wrote this solution?" — the signed-in
+  editor is preselected (Enter publishes), the row's current credit comes
+  next ("latest publish"), then every other active editor; Esc cancels. The
+  chosen editor becomes `author` (shown on the site as "Solution by @name",
+  with their link); the server only accepts an active editor's name. Drafts
+  keep the existing credit. `saved_by` is always whoever's key saved, and is
+  what *By:* and the overwrite/conflict warnings show (*By:* adds "credited
+  to @name" when the two differ). While the published version matches the
+  window, the Publish button reads *Change credit…*: the same question, then
+  the `set-credit` action, which changes only `author`/`author_link` (never
+  the content) and is refused if the row changed since it was loaded. The
+  credit is stored as the editor's id (`author_id`, migration 014), so
+  renaming an editor in `solution_editors` carries over to all their
+  solutions.
+- **Ctrl+S** re-publishes a published solution, or saves anything else as a
+  draft, asking first in the cases above (a toast points to the state panel).
+
+### Link previews
+
+A shared solution link previews as a picture laid out at 1920×1080 and
+stored as a 1280×720 JPEG (`editor/share-card.js` + `.css`), always in the
+Ocean dark theme: the
+course name (Kanit), course code and `Q3 P143` on top; the problem's
+condition on the left (40%), vertically centred, typeset with MathJax; on the
+right (60%) the figure's last step with `N / N`, or, for a solution without a
+figure, the start of the solution text (centred if it fits, otherwise faded
+out at the bottom; too-wide equations are scaled down). The condition steps
+down from 44 to 32 px to fit, is capped at 680 visible characters (the
+longest problem today is ~650), and is trimmed word by word if it still
+overflows, so it never runs off the card. Figure fills (c3/c4) are the page
+colour and the background bubbles keep to the edges, so they never show as
+boxes. A solution that isn't its problem's default also shows **"Solution by
+@name"** under the brand (its credited author), and its title becomes `Q3
+P143 · Solution by @name | Flux`; the default names nobody.
+
+- **When:** as part of publishing. The picture is drawn from the content
+  being published first ("Publishing… drawing the link preview"), then sent
+  in the same `save` request, which stores both together. If only the
+  picture fails, the solution is still published and the message says so.
+  *Rebuild figures* redraws the picture of each published one it re-saves.
+  A level-1 submission draws none; the reviewer's editor draws it on
+  approval.
+- **The name follows the default:** each card stores whose name it shows
+  (`share.by`, null on a default). When the default moves (*Make default*,
+  or an unpublish or delete promoting another) or an alternative's credit
+  changes, the affected cards are redrawn straight away; a card that still
+  shows the wrong name counts as out of date.
+- **Check all** lists published solutions whose picture is missing, drawn
+  from an older version, from an older design (`ShareCard.DESIGN`; bump it
+  after changing the card's look), or showing the wrong name, with **Make N
+  link previews**. Reviewers and full editors get every version listed;
+  others only the solutions they may redraw. Cards are drawn one at a time
+  (MathJax, in the page) while the next row is read ahead and finished cards
+  upload in the background, three at once.
+- **Switching problems while saving:** everything a save or publish needs is
+  taken when it starts, so opening another problem never changes or stops
+  it. Its buttons stay off until it finishes; the result shows in the state
+  panel, or as a toast if another problem is open by then.
+- **How:** the card is built off-screen and turned into a JPEG (~100–130 kB)
+  by html-to-image (`vendor/html-to-image`). The Google fonts the card uses
+  (latin, latin-ext and greek subsets) are fetched once and inlined, as the
+  library can't read that cross-origin stylesheet; MathJax and TikZ fonts it
+  embeds itself.
+- **Stored** by `solutions-admin`'s `share-card` action (migration 012): the
+  JPEG in the public `share-cards` bucket under a new name each time
+  (`<problem_key>-<id>-<ms>.jpg`; the old one is deleted), and
+  `{ image, title, description, for, design, by }` in
+  `problem_solutions.share` (`for` = the `updated_at` it was drawn for). With
+  a publish it is written with the row; `share-card` writes it only if the row
+  is still that published version, never touching `updated_at`. Title: `Q3 P143 · Solution | Flux`;
+  description: the condition as plain text (maths turned into symbols,
+  superscripts and subscripts), up to 200 characters.
+- **Test view:** `/editor/share-card.html?key=q3_P148i` draws any problem's
+  card from its published solution (◀ ▶ step through them; *No figure*,
+  *Longest* and *JPEG* to try the other cases and the stored picture).
+
+### Drafts and local history
+
+- Field contents are kept per problem in localStorage (`<prefix>-editor-drafts`,
+  debounced, flushed on tab hide/close), so nothing typed is lost on reload,
+  sign-out or update.
+- **History…** lists earlier versions kept **only in this browser**
+  (`<prefix>-editor-history`): one on every save/publish, one before anything
+  replaces the fields (load from database, clear, restore), and one every 10
+  minutes while typing; identical consecutive versions are stored once. Up to
+  30 per problem and 400 in total. Figures are stored as source (TikZ and
+  SVG text) and recompile on restore.
+- Each version has **Preview**: the compare window (see above) with this
+  window on the left and that version on the right, headed with its label and
+  when it was kept. Its figure is built for the preview (SVG at once, TikZ
+  through the normal TeX queue); *Restore* is repeated at the bottom.
+
+### Other editor tools
+
+- **Check all**: re-reads every stored row and lists stale solutions (problem
+  changed), figures not built with the current setup, published, drafted,
+  orphaned (no matching problem) and locally unsaved work; each line selects
+  that problem. *Rebuild N figures* (and *Rebuild figure* in the state panel,
+  for the open problem) recompiles those figures from their saved TikZ and
+  saves them back with the same status, text, captions, credit and
+  `problem_hash`. Skipped and listed: rows saved meanwhile by someone else,
+  rows credited to a revoked editor, figures whose step count changed (their
+  captions would land on the wrong steps), and everything once the editor
+  window is outdated. Rebuilds compile step by step behind the live preview,
+  and Check all is disabled while one runs. Check all also refreshes the
+  index, showing work published by another editor meanwhile. Each line
+  opens that problem (on that version, for someone else's link preview). It
+  only runs when clicked.
+- **Full preview**: shows the solution as currently written (saved or not)
+  on the site's real Solution screen, in an overlay over the editor. The
+  site page (`/?solutionPreview=1`) gets the solution from the editor by
+  `postMessage`; nothing is stored.
+- **Editors**: active editors and their links.
+- **Export all as JSON**: `{ rows, reviews? }`, every solution of every
+  problem (reviews with their content for level 4), as a backup file.
+- **Keyboard**: Alt+↑ / Alt+↓ previous/next problem (respecting the filter on),
+  Alt+N next problem with no work (with *Mine* on: none of yours).
+- **Version label**: both numbers of `site-version.json` at load, then the
+  key's access level once the server has confirmed it (`13.3.0 · 1.0.1 ·
+  L4`; the tooltip spells them out). When either number moves on, that part
+  turns red ("(outdated)!") and a tap reloads after purging the
+  service-worker cache (drafts are kept).
+- **Manual** (📖 in the top bar, also reachable at the key gate): the
+  practice site's manual layout (`css/manual.css`) with editor-only content
+  from `editor/manual.json`. Its live examples run on the editor's own
+  engines: TikZ through the editor's compile queue (`window.edCompileTikz`),
+  SVG through `svgfBuild`, solution text through `renderSolutionInto`
+  (`.edm-demo[data-demo="tikz|svg|sol"]` in the JSON). The open page is kept
+  until reload; Esc closes it.
+- **Offline stand-in**: replacing `/editor/store.js` with
+  `/editor/store-mock.js` in `editor/index.html` runs the editor with
+  localStorage instead of the database (same API, marked "offline stand-in").
+
+### Managing editor keys
+
+Editor management needs the `SOLUTIONS_ADMIN_KEY` secret and is done by
+calling `solutions-admin` directly (the `x-admin-key` header is accepted as an
+alternative to `admin_key` in the body):
+
+```bash
+curl -X POST "https://<project>.supabase.co/functions/v1/solutions-admin" \
+  -H "Content-Type: application/json" \
+  -H "apikey: <publishable key>" -H "Authorization: Bearer <publishable key>" \
+  -d '{"action":"create-editor","admin_key":"<admin key>","name":"someone","link":"https://t.me/someone"}'
+```
+
+| Action | Body | Effect |
+|---|---|---|
+| `create-editor` | `name`, `link?`, `level?` (0–4, default 0) | Returns a new 32-hex key **once**; only its salted, peppered hash is stored. |
+| `set-editor-level` | `name`, `level` | Changes an active editor's [access level](#access-levels). |
+| `set-editor-link` | `name`, `link` (`""`/`null` clears) | Sets the http(s) link behind "Solution by @name"; a trigger (migrations 009/014) updates `author_link` on that editor's existing rows. |
+| `revoke-editor` | `name` | The key stops working immediately, including for deleting their own solutions; the row is kept so past solutions keep their author. |
+
+A lost key cannot be recovered: the editor is revoked and a new one created.
+
+The same can be done in Supabase's Table Editor (`solution_editors`): edit
+`level` (0–4; anything else is refused), set `revoked_at` to now to revoke,
+or edit `name` to rename (their solutions follow, migration 014). Never edit
+`key_hash` or `key_salt`. After a rename, *Check all* redraws the link
+previews that showed the old name.
 
 ---
 
 ## Database (Supabase)
 
-Schema is Postgres + Row Level Security. The entire database — every table,
-index, view, function, trigger, and RLS policy — is built by running a
-single file, `superbase/migrations/000_initial_schema_consolidated.sql`,
-once against a fresh Supabase project. It was reconstructed and verified
-directly against the live phys162 database (table defs, `pg_get_functiondef`
-output, `pg_indexes`, `pg_policies`, `pg_tables`), not derived from
-guesswork. `superbase/database.sql` is an old context-only dump kept for
-reference; it's superseded by the migration file and was never meant to be
-run directly.
+The schema is Postgres + Row Level Security. A course's project is built by
+running `superbase/migrations/` **in order** in the SQL editor of a fresh
+project, or `superbase/migrations/ALL.sql` alone (all of them folded into one
+script; never both). `superbase/database.sql` is an old context-only dump,
+superseded and never meant to be run.
 
-Core tables (see `000_initial_schema_consolidated.sql` for exact columns):
+**Moving a course to another Supabase project** (other region or account):
+follow [`superbase/dev/MIGRATION.md`](superbase/dev/MIGRATION.md) — schema,
+secrets, Edge Functions, a verified data copy and the site switch, with
+about 5 minutes of read-only site. The tools it uses are in `superbase/dev/`.
+
+| Migration | Adds |
+|---|---|
+| `000_initial_schema_consolidated.sql` | The entire base schema — tables, indexes, the `forum_messages_public` view, RPCs, the attempt-counter trigger and RLS — reconstructed and verified against the live phys162 database. |
+| `001_device_secrets.sql` | `device_secrets` (see [Device ownership](#device-ownership-device_secret-and-tokens)). |
+| `002_app_variables.sql` | `app_variables`, a key/value table for small state shared across Edge Function calls (Gemini cooldowns). |
+| `003_attempts_realtime_broadcast.sql` | The "anon can receive broadcasts" policy on `realtime.messages`, and a trigger pinging `attempts:<identity_id>` on any attempt change. |
+| `004_solve_all_realtime_broadcast.sql` | Trigger pinging `solveall:<identity_id>:<quiz>_<s\|c>` on progress upserts (needs 003's policy). |
+| `005_solve_all_device_id.sql` | `solve_all_progress.device_id`, included in the ping so a device can ignore its own echo. |
+| `006_site_visits_realtime_broadcast.sql` | Statement-level trigger pinging `site-visits` on new visits. |
+| `007_gemini_table.sql` | `gemini_debug_log` (RLS on, no policies; written by `post-message`). |
+| `008_problem_solutions.sql` | `problem_solutions` (anon may read published rows only) and `solution_editors` (no policies). |
+| `009_editor_links.sql` | `solution_editors.link`, `problem_solutions.author_link`, and the trigger that keeps them in sync. |
+| `010_solution_credit.sql` | `problem_solutions.saved_by` (who saved last), so `author` can be the credited editor. Run before deploying the `solutions-admin` that writes it. |
+| `011_settings_sync.sql` | `settings_sync` (one row per identity, RLS on, no policies), `merge_settings_sync()` (per-setting merge, bumps `rev` only on a real change) and the trigger pinging `settings:<identity_id>` with `{rev, device_id}`. Run before deploying `sync-settings`. |
+| `012_share_cards.sql` | `problem_solutions.share` (the link-preview picture's name, title, description and what it was drawn from) and the public `share-cards` storage bucket (JPEG only, 2 MB). Run before deploying the `solutions-admin` that writes it. |
+| `013_solution_levels_and_alternatives.sql` | `solution_editors.level` (0 observer … 4 full; existing editors set to 4), several solutions per problem (`problem_solutions.id` primary key, `owner_id`, `created_at`, `is_default`; one per author per problem), the triggers that keep exactly one default per problem, status `review`, and `solution_reviews` (pending edits and review notes; no policies). Deploy together with the `solutions-admin` that uses it. |
+| `014_solution_author_id.sql` | `problem_solutions.author_id`: the credit as an editor id (`author`/`author_link` stay as a copy of that editor's name and link). The 009 trigger now matches by id, so renaming an editor carries over to their solutions (and to `saved_by`); a trigger re-links `author_id` when `author` is changed without it. Run before deploying the `solutions-admin` that writes it. |
+| `015_forum_view_security_invoker.sql` | `forum_messages_public` reads with the visitor's rights (`security_invoker`), fixing Supabase's "Security Definer View" warning; visitors may read `identities.id`, `nickname`, `avatar_svg` (never `pin_hash`/`pin_salt`), only for people who have posted. |
+| `016_lockdown_dropoffs.sql` | `lockdown_dropoffs`: finished lockdown attempts waiting for the normal browser (RLS on, no policies). |
+| `017_quiz_attempts_locked.sql` | `quiz_attempts.locked`, the lock beside an attempt in Stats. Run before deploying the `sync-quiz-attempts` that reads it. |
+| `018_lockdown_dropoffs_realtime.sql` | Trigger pinging `lockdown:<ticket>` when an attempt lands, so it's collected at once. |
+
+**Tables**
 
 | Table | Purpose |
 |---|---|
-| `forum_messages` | Forum posts — global or per-problem, with reply threading and edit/flag state |
-| `identities` | Claimed nickname + PIN-hash identities |
-| `identity_devices` | Links a device_id to a claimed identity (multi-device support) |
-| `forum_flags` | Moderation flag queue |
-| `site_visits` / `site_device_sightings` | Visit counters (record-visit.ts) |
-| `device_bans` / `identity_bans` | Moderation bans |
-| `quiz_attempts` / `quiz_attempts_counter` | Synced Random 6 attempt log + persistent counters |
-| `solve_all_progress` | Per-identity, per-quiz solved-problem status map |
-| `push_subscriptions` | Web Push subscriptions, keyed by device_id / identity_id |
+| `forum_messages` | Forum posts — global or per-problem, reply threading, edit and flag state. Publicly readable. |
+| `identities` | Claimed nickname + PIN hash/salt, failed-attempt lockout. |
+| `identity_devices` | Links `device_id`s to an identity (multi-device). |
+| `forum_flags` | Flag log, used for the per-device rate limit. |
+| `site_visits` / `site_device_sightings` | Visit counters (`record-visit`). |
+| `device_bans` / `identity_bans` | Rolling red-flag counters and escalating posting bans. |
+| `quiz_attempts` / `quiz_attempts_counter` | Synced Random N attempt log + increment-only counters (deleting an attempt never lowers the totals). |
+| `lockdown_dropoffs` | Lockdown attempts waiting under a ticket: deleted once collected, and after 7 days otherwise. Only `lockdown-dropoff` reaches it. |
+| `solve_all_progress` | Per identity, per quiz, per mode Solve-All status map (`data: null` = reset tombstone). |
+| `push_subscriptions` | Web Push subscriptions by device / identity. |
+| `device_secrets` | Salted + peppered hash of each device's secret. No policies. |
+| `app_variables` | Small cross-invocation state. No policies. |
+| `gemini_debug_log` | One row per notable step of an `@gemini` attempt, for diagnosing silent failures. No policies. |
+| `problem_solutions` | `problem_key`, `solution`, `figure` (`{ tikz, steps: [{ svg, caption }], scale }`, plus `kind`/`svgSrc`/`svgBox` for SVG figures), `status`, `author` (credited editor's name, a copy), `author_id` (the credit, by id), `author_link`, `saved_by` (who saved last), `problem_hash`, `updated_at`, `id`, `owner_id` (who created it; "own" means this), `created_at`, `is_default` (one per problem). `status` is `draft`, `review` or `published`. |
+| `solution_editors` | Editor name, key hash/salt, link, `level` (0–4), `revoked_at`. No policies. |
+| `solution_reviews` | One open review per solution: a proposed edit to a published row (or none, for a new submission), its state and review note. No policies. |
+
+**RPCs**: `get_author_stats(p_author_name)`, `get_unique_participants_count()`,
+`get_stats_panel(p_device_id)`, `get_total_quiz_attempts()`,
+`get_my_total_quiz_attempts(p_device_id)`.
+
+**Realtime**: Realtime must be enabled for the project. Broadcast (003–006)
+needs no publication; the forum's Postgres Changes subscription requires
+`forum_messages` to be part of the `supabase_realtime` publication.
 
 ---
+
+## Database offline
+
+The database gets paused between semesters, and there is nothing to set: the
+site works it out. A paused Supabase project has no DNS record, so a browser
+sees "Failed to fetch", the same as a dead network, and the 540 status in
+Supabase's docs never arrives (measured 2026-11-07). So after a request to
+Supabase fails, `js/db-status.js` asks `/db-status`, a Netlify Edge Function
+that probes the database and, if the host doesn't answer, looks the name up in
+DNS. It says `paused` only on proof (a 540, or NXDOMAIN; a deleted project looks
+the same), and `down` for anything else that fails. Netlify's CDN keeps the
+answer for 60 s.
+
+`dbOffline()` is true for `paused` at once, and for `down` once a second check a
+minute later agrees. While it is true, `html.db-offline` is set, which shows
+every `.db-offline-box` and lets the CSS hide what can't work. `/db-status`
+failing, or answering `up`, means the trouble is on the viewer's side: nothing
+changes and the usual "check your connection" text stays.
+
+The logo shows it too (`js/logo-offline.js`): the cube's picture is swapped for
+a red one in three shades, during a tumble so the swap can't be seen, and
+"Limited (DB lost)" flies out of it to sit under the course name, L under L.
+Every logo animation runs on the same elements, so they all go on in red.
+
+| Feature | With the database off |
+|---|---|
+| Quizzes, Solve-All | Work. Attempts and progress wait on the device (`siteSyncPaused()` is true for `paused`), and go up by themselves once it is back |
+| Registering | New accounts are made on the device and registered later: see [Signing up while it is off](#signing-up-while-it-is-off). Logging in to an existing account waits. Without a usable `nickname-hashes.json` the nickname step is skipped and attempts wait until a name exists |
+| Lockdown | **Refused**, on any problem and not only a confirmed one: an attempt that can't reach the drop-off is lost when SEB closes. `openLockdownView()` asks first and offers an ordinary quiz. Inside SEB the Start button goes away. Also refused for an account made offline until it is registered |
+| Forum | Box; composer, filters, search and alerts hidden. Messages this tab already loaded stay |
+| Stats | Box. The attempt log is local and still works |
+| Solutions | The button shows on every problem, as the list of published ones may be out of reach. Opening one gives this browser's stored copy, however old, or the box |
+| Editor | Box on the key screen and over the app. Drafts stay in the browser; saving fails with a one-line reason |
+| Settings sync, push, visit counter, Realtime | Sync waits, Realtime is off, the rest fails quietly |
+| Go offline | Works, but the download has no solutions (listed as failed) |
+
+Starting lockdown and a new device registering are the only things that ask
+`/db-status` while the site is healthy. Without the Edge Function (a zip upload,
+a local copy) the check reads as "up" and the site behaves as before.
+
+### Signing up while it is off
+
+`js/offline-account.js`. A new device checks the nickname it wants against
+`nickname-hashes.json`, which `minify.py` fetches at every build from this
+course's own database (`nickname_hashes()`, migration 019): the first 20 bits of
+`sha256(salt:nickname_lower)` per name, with a random salt per database, so the
+file can't be read back into names. About 1 free name in 500 reads as taken.
+The file names its course and Supabase project, and the page ignores one that
+isn't its own.
+
+If the name reads as free, the account is made on the device with a PIN made
+there too, and kept as a "pending" account: quizzes run, attempts wait
+(`synced:false`), the forum is read-only, lockdown is refused. When the
+database is back it is claimed with `claim-nickname`'s `offline_created` mode,
+which takes the device's PIN and, for a taken name, answers `taken` without
+ever trying that PIN on the owner's account. A taken or refused name puts a
+rename window in front of Quizzes and Solve them all (with "it's mine: log in");
+a pending account older than a week (Netlify's clock, from the `Date` header)
+gets a window with a ready message for the admin instead.
+
+The name rules live in `js/nickname-rules.js`; the same block is copied into
+`claim-nickname.ts` and the build stops if the two differ. Names are compared
+after NFC and trimming.
+
+The build stops if the database doesn't answer and there is no earlier list for
+the same course and project (kept in `%LOCALAPPDATA%/impulse-minify/`).
+`--no-nickname-hashes` builds without one, which turns offline sign-up off.
+`--deploy` also refuses a linked Netlify site other than the course's
+`netlifySiteId` in `js/course-config.js`.
 
 ## Edge functions
 
-All deployed with auth mode **"publishable"**, **"Verify JWT with legacy
-secret" OFF**, unless noted. Client code never calls Postgres directly for
-writes — everything below is what stands between the public key and the
-database.
+All are deployed with auth mode **"publishable"** and **"Verify JWT with legacy
+secret" OFF**. Client code never writes to Postgres directly — these functions
+stand between the public key and the database. Request bodies carry
+`device_id` + `device_secret` (plus the optional tokens below).
 
-| Function | Purpose | Secrets used |
+| Function | Purpose |
+|---|---|
+| `post-message.ts` | Post a message: ban check, LaTeX-shorthand conversion, OpenAI moderation, insert; `@gemini` replies; mention/reply push notifications. |
+| `edit-message.ts` | Edit an own message (body, scope), re-moderated. |
+| `flag-message.ts` | Flag a message: 5 flags per device per hour; Gemini judges only the flagged message (with surrounding context) and any failure keeps it; 3 deletions within 24 h ban the author's device or identity for 24 h, then 48 h, then 72 h. |
+| `claim-nickname.ts` | New claim, link another device (PIN), rename (PIN), or no-op; PIN lockout; nickname moderation. |
+| `drop-nickname.ts` | Exit this device (the nickname stays claimed); tells the client to drop its identity token. |
+| `check-ban.ts` | Whether the calling device/identity is banned. |
+| `record-visit.ts` | Log a page visit. |
+| `sync-quiz-attempts.ts` | Push/pull attempts. With a matching `known_fingerprint` it answers `unchanged` (confirmed hashes only) instead of the full list; a client without one always gets the full list. |
+| `lockdown-dropoff.ts` | Carries lockdown attempts from Safe Exam Browser to the student's normal browser, under a random ticket. No device or identity. |
+| `delete-quiz-attempt.ts` | Delete one synced attempt. |
+| `sync-solve-all.ts` | Pull, push or reset (tombstone) Solve-All progress. |
+| `sync-settings.ts` | Push changed settings and get back the merged set in one call; with no changes and a matching `known_rev` it answers `unchanged`. Clamps future timestamps to server time and returns `server_now` for the client's clock offset. |
+| `save-push-subscription.ts` | Register/remove a Web Push subscription. |
+| `solutions-admin.ts` | Everything the editor needs, checked against the key's [access level](#access-levels): `whoami` (with level), `editors`, `index`, `get`, `list` (a problem's versions), `save` (by `id`, `new` for your own version, or a bare `problem_key`; 409 conflict check written atomically), `set-credit`, `set-default`, `share-card` (stores a link-preview JPEG and whose name it shows, 409 if the row moved on), `delete` (also removes the picture and review), `reviews`, `review-approve`, `review-reject` (both refused with 409 `changed` if the author moved on since the reviewer read it), `export`; and, with the admin key, `create-editor`, `set-editor-level`, `set-editor-link`, `revoke-editor`. Validates sizes (solution ≤ 60 000 chars, ≤ 12 steps, SVG ≤ 400 000 chars per step, TikZ ≤ 20 000, caption ≤ 500) and rejects SVG containing `<script>`, `<foreignObject>`, `<iframe>`, `<object>`, `<embed>`, `on…=` handlers, `javascript:`, `data:text/html` or `<!ENTITY` before storing; DOMPurify in the browser remains the real defence. |
+
+**Secrets** (Edge Function secrets are project-wide):
+
+| Secret | Used by | Notes |
 |---|---|---|
-| `post-message.ts` | Post a forum message — OpenAI moderation, then insert; handles `@gemini` replies and sends mention push notifications | `OPENAI_API_KEY`, `GEMINI_API_KEY`, `VAPID_PRIVATE_KEY`/`VAPID_PUBLIC_KEY`/`VAPID_SUBJECT` |
-| `edit-message.ts` | Edit an existing message (own messages only) | `OPENAI_API_KEY` |
-| `flag-message.ts` | Flag a message for moderation review | `GEMINI_API_KEY` |
-| `claim-nickname.ts` | Claim a nickname + PIN (v2, multi-device identities) | `PIN_PEPPER` |
-| `drop-nickname.ts` | Release a claimed nickname (v4, exit-only) | `PIN_PEPPER` |
-| `check-ban.ts` | Check whether the calling device/identity is banned | — |
-| `record-visit.ts` | Log a page visit for the site-visits counters | — |
-| `sync-quiz-attempts.ts` | Push/pull local quiz attempts to/from the server | — |
-| `delete-quiz-attempt.ts` | Delete a single synced attempt | — |
-| `sync-solve-all.ts` | Pull + union-merge + push Solve-All progress | — |
-| `save-push-subscription.ts` | Register/remove a Web Push subscription | — |
+| `OPENAI_API_KEY` | post-message, edit-message, claim-nickname | OpenAI moderation. |
+| `GEMINI_API_KEY` | post-message, flag-message | `@gemini`, LaTeX assist, flag review. |
+| `PIN_PEPPER` | claim-nickname | Mixed into PIN hashes. `openssl rand -hex 32`. |
+| `DEVICE_SECRET_PEPPER` | all ten device-authenticated functions | Mixed into `device_secret` hashes. `openssl rand -hex 32`. |
+| `DEVICE_TOKEN_SECRET` | same ten | HMAC key for device/identity tokens. When unset, the functions run in DB-only mode. |
+| `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` / `VAPID_SUBJECT` | post-message | Web Push signing (`npx web-push generate-vapid-keys`). |
+| `SOLUTIONS_KEY_PEPPER` | solutions-admin | Mixed into editor key hashes. `openssl rand -hex 32`. |
+| `SOLUTIONS_ADMIN_KEY` | solutions-admin | The owner-only key for editor management. `openssl rand -hex 32`. |
 
-`PIN_PEPPER` is an extra secret input mixed into the PIN hash (on top of
-normal salted hashing) so PIN hashes can't be brute-forced offline even with
-full database access.
+The ten device-authenticated functions are post-message, edit-message,
+flag-message, claim-nickname, drop-nickname, sync-quiz-attempts,
+delete-quiz-attempt, sync-solve-all, sync-settings and save-push-subscription. `check-ban`
+and `record-visit` deliberately need no secret; `solutions-admin` uses editor
+keys instead.
 
 ---
 
-## Running it locally
+## Device ownership (`device_secret`) and tokens
 
-No build step — this is a static site plus a remote Supabase backend.
+**The problem.** `device_id` is public — `forum_messages_public` exposes it on
+every message — so trusting it alone would let any forum reader act as another
+device: edit or delete their messages, read or wipe their quiz history, post
+under their nickname, or log them out.
+
+**`device_secret`.** A second, 32-byte random value is generated once on the
+client next to `device_id` (`getForumDeviceSecret()` in `forum.js`) and sent
+with every write. The server stores only a salted + `DEVICE_SECRET_PEPPER`-
+peppered hash in `device_secrets`. Verification is **trust-on-first-use**: the
+first request for a `device_id` registers its secret; later requests must
+match (`verifyOrRegisterDevice()`, duplicated in each function). `device_id`
+stays public — it is simply no longer sufficient.
+
+Rolling this out to a project that already has users is a race: if an
+attacker registers a leaked `device_id` before its real owner, the owner gets
+`device_auth_failed` until that row is removed from `device_secrets` by hand.
+The backend and the front end are therefore deployed as close together as
+possible.
+
+**Tokens** (reduce database and log volume):
+
+- **Device token** — after a successful DB verification, the server returns
+  an HMAC-signed `device_token` (`deviceId:expiresAt`, TTL 12 h). While valid,
+  it lets the next call skip the `device_secrets` lookup. The secret is still
+  sent every time as the fallback.
+- **Identity token** — a separate HMAC token for the `device_id → identity_id`
+  resolution (TTL 5 min, since an identity can be reassigned on exit/claim).
+  `claim-nickname` issues it but never trusts it: it always reads
+  `identity_devices` live, because a stale "no identity" token sent an
+  already-linked device down the create path (`identity_devices_pkey`
+  errors). `drop-nickname` returns `clear_identity_token`; the client deletes it and
+  other open tabs reload through a `storage` event (deferred during a timed
+  attempt).
+
+Both are cached in localStorage and refreshed from every write response by
+`applyDeviceToken(json)` in `forum.js`.
+
+---
+
+## Gemini integration
+
+**`@gemini` replies** (`callGemini()` in `post-message.ts`):
+
+- Primary model `GEMINI_MODEL_PRIMARY` (`gemini-3.6-flash`), fallback
+  `GEMINI_MODEL_FALLBACK` (`gemini-3.5-flash-lite`).
+- A **429 with a `PerDay` quota id** on the primary writes a 24 h cooldown to
+  `app_variables` (`gemini_post_message_model_disabled_until`) and retries the
+  same request on the fallback.
+- A **5xx** from the primary writes a 10-minute cooldown
+  (`gemini_post_message_overloaded_until`) and goes straight to the fallback;
+  a 5xx from the fallback is retried once after 1.5 s.
+- `resolveGeminiModel()` reads both keys first, so a model already known to be
+  unavailable is skipped; after a cooldown expires the primary is offered again
+  automatically.
+- When every model fails with an overload-type error, a visible "unavailable"
+  notice is posted; configuration errors (400/403/404) stay silent.
+- The model receives the tagged message, recent thread context, the problem
+  text fetched from `SITE_ORIGIN` and the problem's figure image. It may answer
+  `[[NO_REPLY]]` to stay silent (replies to its own messages, hostility).
+  Replies pass OpenAI moderation before insertion.
+- Each notable step is logged to `gemini_debug_log`.
+
+**LaTeX shorthand assist** (`&…&` / `&&…&&`) and **flag review**
+(`flag-message.ts`) are pinned to `gemini-3.5-flash-lite` and are not part of
+the fallback.
+
+`SITE_ORIGIN` and `GEMINI_SYSTEM_INSTRUCTIONS` near the top of
+`post-message.ts` are course-specific (see [Manual-swap items](#manual-swap-items)).
+
+---
+
+## Client-side storage reference
+
+Course-scoped keys start with `STORAGE_PREFIX` (shown as `<p>`).
+
+| Storage | Key | Contents |
+|---|---|---|
+| localStorage | `flux_settings` | All settings (not course-prefixed). |
+| localStorage | `<p>-theme`, `<p>-color-theme`, `<p>-custom-theme`, `<p>-theme-nudge-shown` | Day/night, preset, custom theme, nudge flag. |
+| localStorage | `<p>_stats_v2`, `<p>_po_mode`, `<p>_tp_quiz` | Attempt log; Last/Best overview mode; quiz shown in Topics. |
+| localStorage | `<p>_sa_q…` | Solve-All progress per quiz and mode. |
+| localStorage | `<p>_topics_q…`, `<p>_filtermode_q…`, `<p>_numfilter_q…`, `<p>_typefilter_q…` | Problem Pool Filter state per quiz. |
+| localStorage | `<p>_forum_device_id`, `<p>_forum_device_secret`, `<p>_forum_device_token`, `<p>_forum_identity_token` | Device identity and tokens. |
+| localStorage | `<p>_forum_nickname`, `<p>_forum_pin`, `<p>_forum_display_name`, `<p>_forum_avatar_cache`, `<p>_forum_last_seen_id`, `<p>_forum_pin_*` | Forum identity, avatars, unread tracking. |
+| localStorage | `<p>_splash_mandatory_shown`, `<p>-bug-nudge-shown` | Splash and nudge bookkeeping. |
+| localStorage | `<p>_deploy_msg_seen` | Version and text of the last `DEPLOY_MESSAGE` handled (shown or skipped). |
+| localStorage | `<p>-problem-flags` | Problem flags: `{ "q1_P55": 1 \| 2 }` (1 = C1, 2 = C2). |
+| localStorage | `<p>-fig-anim-speed` | Animated figures' speed: `0.5`, `1` or `2`. |
+| localStorage | `<p>_lockdown_tickets` | Lockdown tickets this browser still reads: `[{ id, createdAt, opened, collected, checkedAt }]`, for 8 days. |
+| sessionStorage | `<p>_splash_seen` | Splash lines shown recently in this tab (not repeated). |
+| sessionStorage | `<p>_lockdown_ticket` | Inside Safe Exam Browser: the ticket from the link, kept across reloads. |
+| localStorage | `<p>-editor-key`, `-editor-drafts`, `-editor-history`, `-editor-last`, `-editor-sidebar`, `-editor-split`, `-editor-wrap`, `-editor-server-mock` | Editor state (the last one only with `store-mock.js`). |
+| localStorage | `<p>-solutions-index` | Published-solution index (`{at, rows}`), shared by all tabs; refetched once it is 30 minutes old (`poll.solutions`). |
+| localStorage | `<p>-site-config`, `<p>-purge-id` | Last remote settings seen in `site-version.json`; last `purge_id` acted on. |
+| localStorage | `<p>-db-status` | Last answer from `/db-status` (`{state, at, since}`), shared by all tabs. |
+| localStorage | `<p>_pending_account`, `<p>_server_time` | An account made while the database was offline (`{nickname, pin, createdAt, conflict?}`), and the last Netlify `Date` seen, for its one-week limit. |
+| localStorage | `<p>-update-outdated`, `<p>-update-forced`, `<p>-update-purged` | Update checker: when this version was first seen outdated, last forced reload, last update purge. |
+| IndexedDB | `mathRenderCache` | Typeset Solve-All problem HTML + CSS. |
+| IndexedDB | `<p>-tikz-cache` | Editor only: compiled TikZ steps (newest 300). |
+| IndexedDB | `flux-notif-mute` | "Go silent" flag for `sw.js`. |
+| IndexedDB | `flux-offline-mode` | Offline-mode expiry for `sw.js`. |
+| IndexedDB | `flux-sw-meta` | Time of `sw.js`'s last precache refill (purge limit). |
+| Cache Storage | `CACHE_NAME` (e.g. `phys162-offline-v12`) | offline.html and its assets. |
+| Cache Storage | `flux-offline-mode-v1` | Full offline-mode download. |
+| BroadcastChannel | `<p>-solve-all-sync` | Same-browser Solve-All coordination. |
+
+---
+
+## Running locally
+
+No build step is needed; the site is static and talks to the remote Supabase
+project configured in `js/course-config.js` (there is no local backend).
 
 ```bash
-# from the repo root
-python3 -m http.server 8000
+# from the repository root
+python -m http.server 8000
 # or: npx serve .
 ```
 
-Then open `http://localhost:8000`. The forum/stats/push features will talk to
-whatever Supabase project is configured for the active course in
-`js/course-config.js` — there's no local/mock backend.
+The site is then available at `http://localhost:8000/` and the editor at
+`http://localhost:8000/editor/`. The repository root must be the server root:
+the editor uses `<base href="/">` and absolute paths.
 
-Service worker note: `sw.js` only activates over `https://` or `localhost` —
-a plain `file://` open won't register it, so use the local server above if
-you need to test offline behavior.
+- `file://` pages do not work: `fetch()` of the JSON files fails and the
+  service worker cannot register (it needs `https://` or `localhost`).
+- The editor can be run without the database by swapping in
+  `editor/store-mock.js` (see [Other editor tools](#other-editor-tools)).
+
+---
+
+## Building for deployment (`minify.py`)
+
+```bash
+python minify.py                  # -> ../<folder>-netlify.zip
+python minify.py path/to/out.zip  # -> that file
+python minify.py --deploy         # build, then deploy to Netlify
+```
+
+**`--deploy`** is the only way the Edge Functions in `netlify/edge-functions/`
+(shared solution links, database status) go live: a zip uploaded by hand deploys the static
+files only. It needs, once per machine, Node.js and the Netlify CLI
+(`npm install -g netlify-cli`, then `netlify login`), and once per project
+folder `netlify link` (stored in `.netlify/`, git-ignored; `NETLIFY_SITE_ID`
+overrides it). The build is the same as for the zip; `share.ts` and
+`db-status.ts` are then copied next to it with this course's Supabase URL, publishable key and
+names filled in from `js/course-config.js` (the course in `index.html`'s
+`<head data-course>`), and `netlify deploy --prod` runs from that folder.
+
+The script never writes into the project folder. It copies the site to a
+temporary folder, leaving out `.git`, `superbase/`, `netlify/`, `vendor-src/`, `tools/`,
+`README.md`, `*.zip`, `*.py` and editor/IDE folders, then:
+
+- minifies own `.js` and `.css` with **esbuild** (whitespace, syntax and
+  **local** names only — top-level names are never renamed, because files
+  share globals, inline handlers call them by name and the editor reads
+  `Quiz_N_Problems` by name);
+- minifies inline `<script>`/`<style>` in HTML, removes HTML comments and
+  indentation (`<pre>`/`<textarea>` untouched);
+- compacts `.json` and `.webmanifest`;
+- copies `vendor/` unchanged;
+- **bundles** `index.html` and `editor/index.html` (each page its own
+  bundles): every run of adjacent local `<script src>` tags, the local entries
+  of the tier-2 loader list, and every run of adjacent stylesheets become one
+  file each in `js/bundle/` and `css/bundle/`, named by a hash of their content
+  and cached for a year (`_headers`). A JS bundle runs each original file as
+  its own inline `<script>`, in order, so load-order guards, hoisting and
+  per-file errors behave exactly as with separate files; `//# sourceURL` keeps
+  each file's name in DevTools. `vendor/mathjax` and `vendor/tikzjax` are left
+  out (they locate files from their own URL), and the original files still
+  ship (offline.html, `sw.js` and the editor fetch some by name). A repeat visit
+  re-checks about 6 files instead of 54.
+
+Before zipping, it checks that every minified script (including inline ones)
+still parses, that every top-level name is still present, and that every JSON
+file holds the same data; on any failure nothing is zipped. esbuild is
+downloaded once from the npm registry into a per-user cache folder.
+
+It also checks `site-version.json` ([Remote settings](#remote-settings-site-versionjson)):
+only known keys, values of the right type within their limits (read from
+`js/site-config.js`), `version` equal to `CURRENT_VERSION` and to the newest
+changelog entry, and `min_version` not above `version`; any failure stops the
+build. At the end it lists what the file will make open tabs do, compared with
+the last commit: a new version, forced reloads below `min_version`, changed
+intervals (with requests per hour per open tab), Realtime off, a read-only
+forum, paused sync, a cache refill for a new `purge_id`.
 
 ---
 
 ## Deploying a new course
 
-1. **Duplicate the repo** into a new one for the new course (this repo's
-   design assumes each course is a fully separate repo/site, not a branch).
-2. **Stand up a new Supabase project.** Run
-   `superbase/migrations/000_initial_schema_consolidated.sql` once against
-   it — this single file builds the entire database (tables, indexes, view,
-   functions, trigger, RLS), verified to match the live phys162 project
-   exactly.
-3. **Deploy the Edge Functions** in `superbase/edge-functions/` to that
-   project, same auth-mode settings noted in each file's header comment. Set
-   its secrets: `OPENAI_API_KEY`, `GEMINI_API_KEY`, `PIN_PEPPER`, and a fresh
-   `VAPID_PRIVATE_KEY`/`VAPID_PUBLIC_KEY`/`VAPID_SUBJECT` triple (e.g. via
-   `npx web-push generate-vapid-keys`).
-4. **Edit `superbase/edge-functions/post-message.ts` by hand** in the new
-   project's copy — `SITE_ORIGIN` and `GEMINI_SYSTEM_INSTRUCTIONS` are
-   course-specific and can't be centralized (Edge Functions run in a separate
-   Deno runtime with no access to `course-config.js`). Both are marked
-   `⚠ COURSE-SPECIFIC — MANUAL EDIT AT RELEASE` in that file.
-5. **Fill in `js/course-config.js`**: add (or fill in) that course's entry in
-   `COURSES` — `storagePrefix`, `supabase.url`, `supabase.publishableKey`,
-   `pushVapidPublicKey` (the public half from step 3), `quizSettings`
-   (`size`, `cumulativePrevCount`) if this course's exam structure differs
-   from the default (6 problems per quiz, 3 from the previous quiz in
-   cumulative mode), `pinnedMessageId` (the row id of this course's own
-   welcome post in its own `forum_messages` table, once you've posted one),
-   `changelogScope` (a unique numeric id — currently `2` is taken by
-   phys162 — for filtering `js/data/changelog.js`'s history to this
-   course, see "Per-course changelog filtering"), and `display`
-   (`courseCode`, `ogDescription`, `twitterDescription`, `siteUrl`) — the
-   source of truth for step 7 below.
-6. **Replace the contents of `course/`** with the new course's quizzes,
-   splashes, manual, offline-laws, preview image, and images.
-7. **Set `data-course` on `<head>`** in both `index.html` and `offline.html`
-   to the new course's key. This alone now fixes the page `<title>` and the
-   four eyebrow labels. It does NOT fix the static OG/Twitter `<meta>`
-   block in `index.html`'s `<head>` — hand-edit those 9 lines to match
-   step 5's `display` values too (see the `⚠ EDIT THESE 9 LINES BY HAND`
-   comment right there, and [Manual-swap
-   items](#manual-swap-items-cant-be-centralized) for why JS can't cover
-   it: link-preview crawlers never execute JavaScript).
-8. **Bump `sw.js`'s `CACHE_NAME`** to the new course's prefix by hand (see
-   [Manual-swap items](#manual-swap-items-cant-be-centralized) — this is the
-   one thing a service worker can't read from `data-course` itself).
-9. **Deploy to Netlify** as a new site pointed at the new repo, with its own
-   domain. Update `og:url` in `index.html` and `SITE_ORIGIN` in
-   `post-message.ts` to match once you know it.
+1. **The repository is duplicated** into a new one for the course (each course
+   is a fully separate repository/site, not a branch).
+2. **A new Supabase project is created**, Realtime is enabled, and every file
+   in `superbase/migrations/` is run **in order** (000 → 018), or `ALL.sql` alone.
+   `forum_messages` is added to the `supabase_realtime` publication.
+3. **The Edge Functions are deployed** from `superbase/edge-functions/` with the
+   auth settings above, and the project's secrets are set: `OPENAI_API_KEY`,
+   `GEMINI_API_KEY`, `PIN_PEPPER`, `DEVICE_SECRET_PEPPER`,
+   `DEVICE_TOKEN_SECRET`, `SOLUTIONS_KEY_PEPPER`, `SOLUTIONS_ADMIN_KEY`, and a
+   fresh `VAPID_PUBLIC_KEY`/`VAPID_PRIVATE_KEY`/`VAPID_SUBJECT` triple.
+4. **`post-message.ts` is edited** in the new project's copy: `SITE_ORIGIN` and
+   `GEMINI_SYSTEM_INSTRUCTIONS` (both marked
+   `⚠ COURSE-SPECIFIC — MANUAL EDIT AT RELEASE`).
+5. **`js/course-config.js` is filled in** for the course: `storagePrefix`,
+   `supabase.url`, `supabase.publishableKey`, `pushVapidPublicKey` (public half
+   from step 3), `quizSettings`, `pinnedMessageId` (once a welcome post exists
+   in the new forum), a unique `changelogScope`, and `display`.
+6. **The contents of `course/` are replaced** with the course's quizzes,
+   images, splashes, manual, offline laws and preview image. For
+   `course/figures/`, either the drawings in `tools/figures/quizN.py` are
+   replaced and `export.py` re-run, or each `quizN.js` is left registering an
+   empty map, so the original images are shown. The same goes for
+   `course/animations/`: new specs, or empty maps (an animation only plays
+   on its own drawing). The manual's *Figures & animations* page names one
+   of this course's images (P68's mug) in a `data-fig` placeholder; the
+   coupled-springs demo is course-neutral and can stay.
+7. **`data-course` is set** on `<head>` in `index.html`, `offline.html` and
+   `editor/index.html`. This fixes the title and eyebrow labels; the static
+   `<title>` and meta tags in `index.html` are edited by hand to match
+   `display` (see below).
+8. **`CACHE_NAME` in `sw.js` is changed** to the new course's prefix.
+9. **The site is built and deployed** with `python minify.py --deploy` to a
+   new Netlify site with its own domain (`netlify link` in the new folder
+   first; see [Building for deployment](#building-for-deployment-minifypy)); `og:url` in `index.html` and `SITE_ORIGIN` in
+   `post-message.ts` are updated once the domain is known.
+10. **Editor keys are created** with `create-editor` (see
+    [Managing editor keys](#managing-editor-keys)). Keys from another course's
+    project do not work.
 
 ---
 
-## Manual-swap items (can't be centralized)
+## Manual-swap items
 
-A few things are genuinely course-specific but structurally can't be driven
-by `js/course-config.js`, because they run somewhere that has no access to
-it (a separate Deno runtime, or a DOM-less service worker scope). These are
-called out with comments at each location so they're never a silent gap:
+Some course-specific values cannot be driven by `js/course-config.js`, because
+they live where it is not available. Each is marked with a comment at its
+location.
 
-| Item | File | Why it can't be centralized |
+| Item | File | Why it cannot be centralized |
 |---|---|---|
-| `CACHE_NAME` | `sw.js` | Service workers have no `document` — can't read the `data-course` attribute |
-| `SITE_ORIGIN`, `GEMINI_SYSTEM_INSTRUCTIONS` | `superbase/edge-functions/post-message.ts` | Edge Functions deploy into their own Supabase-project Deno runtime, not the browser — can't import `course-config.js` |
-| The 9 `<meta property="og:...">` / `<meta name="twitter:...">` tags (+ `<title>`) | `index.html`'s `<head>` | `course-config.js` DOES update these live in-browser (see `_setMetaContent`) — but link-preview crawlers (Telegram, Discord, WhatsApp, Slack, X, Facebook) fetch raw HTML and never execute JavaScript, so that update never reaches them. The static text has to already be correct, or shared links show the wrong course. |
+| `data-course` | `index.html`, `offline.html`, `editor/index.html` | It is the switch itself. |
+| `<title>`, `og:title`, `og:description`, `og:url`, `twitter:title`, `twitter:description` | `index.html` `<head>` | `course-config.js` updates them in the browser, but link-preview crawlers (Telegram, Discord, WhatsApp, Slack, X, Facebook) read raw HTML and never run JavaScript. The values are duplicated, not shared, with `display` in `course-config.js`. `og:image`/`twitter:image` (`course/preview.png`) need no change. |
+| `CACHE_NAME` | `sw.js` | A service worker has no `document` and cannot read `data-course`. |
+| `SITE_ORIGIN`, `GEMINI_SYSTEM_INSTRUCTIONS` | `superbase/edge-functions/post-message.ts` | Edge Functions run in the Supabase Deno runtime and cannot import browser files. |
 
 ---
 
 ## Versioning
 
-Bump the version in **three places** on every release: `js/data/changelog.js`
-(add an entry — indentation is derived automatically from major/minor/patch),
-`version.json`, and `CURRENT_VERSION` in `js/quiz-engine.js`. The running
-page polls `version.json` and shows the update banner (`banner-manager.js`)
-when it drifts from `CURRENT_VERSION`.
+`site-version.json` holds two numbers: `version` (the site) and `editor`
+(the editor), plus the optional [remote settings](#remote-settings-site-versionjson).
+(Never name it `version.json`: tabs still running code up to 12.4.4 poll that
+name, and up to 12.4.3 re-download the whole precache list on every mismatch;
+with no such file they get a 404 and never learn of an update, so they stay
+on old code until reloaded by hand.)
+
+On every release of the site the version is bumped in **three places**:
+
+1. `js/data/changelog.js` — a new entry at the top
+   (`{ version, note, scope }`; indentation is derived from the version).
+2. `version` in `site-version.json`.
+3. `CURRENT_VERSION` in `js/quiz-engine.js`.
+
+`minify.py` refuses to build when the three differ. A version bump is also
+what moves open tabs onto new code (banner, then a forced reload after 48 h
+or below `min_version`), so a release whose code must reach open tabs needs
+one even without a user-facing change.
+
+A release that changes only the editor bumps `editor` in `site-version.json`
+instead, and nothing else: the site ignores that number, so students are not
+asked to reload.
+
+**Deploy message.** `DEPLOY_MESSAGE` at the top of `js/data/changelog.js` is
+a one-time note for a deploy: when it isn't `''`, it replaces the main-menu
+splash once, the first time the main screen shows after a browser gets the
+deploy, and never again (`takeDeployMessage` in `js/splash.js`). Only
+browsers that used the site before see it: a first visit marks it as handled
+without showing it. "Before" means the browser already holds the device id
+every visit stores (`<prefix>_forum_device_id`), so cleared site data, a
+private window or a new browser count as first visits. It is remembered per
+version *and* text (`<prefix>_deploy_msg_seen`), so a redeploy without a
+version bump shows a changed message once too. Set or clear it on every
+deploy, so an old message doesn't go out again with the next one.
+
+The running site polls `site-version.json` and shows the update banner when
+`version` differs from `CURRENT_VERSION`; the editor's version label turns red
+when either number changes after the editor was loaded (the editor shares the
+site's code, so a site release outdates it too), and from then on that window
+refuses to save or rebuild until it is reloaded (drafts are kept), so a window
+left open across a deploy can't publish with old code. This relies on one of
+the two numbers being bumped with every release that changes the editor. When `PRECACHE_URLS` in
+`sw.js` changes, `CACHE_NAME` is bumped as well, and a change to Solve-All card
+markup or the render pipeline requires bumping `MATH_CACHE_SCHEMA` in
+`js/math-cache.js`. Changes to the TikZ packages, libraries or preamble, to
+`figNormalizeSvg` and its helpers, or to TikZJax's scripts change the editor's
+figure build stamp on their own; only a change to TikZJax's TeX data
+(`core.dump.gz`, `tex.wasm.gz`, `tex_files`) needs `FIG_BUILD_VERSION` bumped
+in `editor/editor.js`. Afterwards run *Check all → Rebuild* in the editor.
+
+---
+
+## License
+
+This is a free, non-commercial study project: no ads, no paid features, no
+fees. The repository holds four kinds of material under four different terms.
+
+**Code** (everything not listed below) — Copyright © 2026 Ansar Seitkali
+and contributors. Licensed under the
+[GNU Affero General Public License v3.0](LICENSE). You may use, modify and
+share it, including commercially, provided that modified versions are released
+under the same license with their source code, and that anyone using a
+modified version over a network (such as a hosted copy of this site) is offered
+its source code. Copyright and attribution notices must be kept.
+
+**Names and logos** (the names "Impulse" and "Flux", the site logos drawn by
+`js/logo-wordmark.js` and `js/logo-tumble.js`, and the app icons in `favicon/`)
+— © 2026 Ansar Seitkali. **Not licensed**: they are not covered by the AGPL or
+any other license here, as section 7(e) of the AGPL allows. Copies and modified
+versions of the code must use a different name and logo, and must not present
+themselves as this site or as connected to it.
+
+**Worked solutions** (the solution text and figures written in the solutions
+editor and shown on the Solution screen) — © their authors, credited under each
+solution, and published on the site with their permission. **All rights
+reserved**: no license is granted, so they may not be copied, republished,
+adapted or used commercially without permission (ask the corresponding
+author, through the link on their name in the Copyright screen's authors
+table). Each solution shows "All rights reserved" under its author line.
+The idea of adding worked solutions to the site, and of figures that build up
+step by step, came from [@abzalozhentay](https://t.me/abzalozhentay). Thank you!
+
+**Problems and figures** (problem statements, numerical data, answers and
+figures in `course/`, including `course/quizzes/` and `course/images/`) — are
+the intellectual property of Nazarbayev University, or of the original sources
+from which Nazarbayev University obtained them. They are not covered by either
+license above, and this project claims no rights to them. All legal inquiries
+concerning this material should be addressed directly to Nazarbayev University.
+
+**Third-party code** in `vendor/` keeps its own license: MathJax (Apache 2.0),
+DOMPurify (Apache 2.0 / MPL 2.0), SheetJS (Apache 2.0, `vendor/sheetjs/LICENSE`),
+jsPDF, jsPDF-AutoTable and svg2pdf.js (MIT, `vendor/jspdf/`), IBM Plex fonts
+(SIL Open Font License 1.1, `vendor/fonts/LICENSE.txt`) and TikZJax (see its
+upstream repository). The answer engine in `vendor/pt-answer/` (source in
+`vendor-src/pt-answer/`), in use since October 17, 2026, is adapted from
+[pt-nu-phys161](https://github.com/omgaXD/pt-nu-phys161), MIT License,
+© 2026 omga (`vendor/pt-answer/LICENSE`).
+
+Rights holders who believe material here is used without permission can
+contact [@Aoi_Kuro](https://t.me/Aoi_Kuro) on Telegram.
+
+On the site, the **Copyright** link next to the changelog button opens the Copyright
+screen (`js/license.js`, `css/license.css`): these statements, then the full
+text of the AGPL, read from `LICENSE` (the unmodified official text). Keep the
+statements in `index.html`'s `#licenseScreen` in sync with this section.

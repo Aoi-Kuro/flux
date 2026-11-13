@@ -1,38 +1,197 @@
 <!DOCTYPE html>
 <html lang="en">
 <head data-course="phys162">
-<!-- ⚠ EDIT THESE 9 LINES BY HAND AT RELEASE — see "Manual-swap items" in
-     README.md for why. Short version: link-preview crawlers (Telegram,
-     Discord, WhatsApp, Slack, X, Facebook) fetch this raw HTML and never
-     run JavaScript, so course-config.js's auto-apply (which DOES update
-     <title> and these same tags, for anyone who loads the page in an
-     actual browser) never reaches them. This block has to be correct as
-     static text or shared links show the wrong course/description. -->
+<!-- Manual Edit -->
+<script>
+  // Browsers restore the exact pre-reload scrollY by default
+  // (history.scrollRestoration === 'auto'). That's fine for a page you
+  // navigate *within* (quiz progress, forum position — those are already
+  // handled explicitly via captureScreenScroll/restoreScreenScroll in
+  // js/quiz-engine.js), but this app is a single index.html: every
+  // "reload" — a manual refresh, or the update banner's Reload button —
+  // reloads the SAME document, and the browser then quietly puts the
+  // scrollbar right back where it was, i.e. this always lands on
+  // whatever screen/scroll position was showing before, not necessarily
+  // the top of the landing page. That only becomes visible when the page
+  // is actually tall enough to have been scrolled in the first place
+  // (narrower windows and phones — see the mc-splash layout notes in
+  // css/style.css), so on a full-width window where it never scrolled,
+  // nothing looked wrong. Setting this to 'manual' as the very first
+  // thing on the page (before the browser gets a chance to act on
+  // 'auto') stops that automatic restore, so a reload always starts at
+  // the true top unless something in this app explicitly scrolls it
+  // elsewhere.
+  if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
+</script>
+<script>
+  // Anti-flicker: applies saved Display settings (Show avatar/splashes/
+  // manual/theme/daylight/forum-FAB — see SETTINGS_DEFAULTS.display in
+  // js/settings.js) to <html> before <body> even exists, so a user who's
+  // turned one of these off never sees it flash on-screen for a frame
+  // first. js/settings.js itself can't do this: it's loaded via the
+  // tier-2 sequential loader (see the bottom of <body>) specifically so
+  // its ~200KB+ chain (manual.js, the Supabase CDN script, forum.js,
+  // push-notifications.js) never competes with the landing screen's own
+  // critical-path bytes — by the time it finally runs, the landing screen
+  // has been sitting fully painted for a while, which is exactly the
+  // window this script exists to cover. Deliberately a standalone,
+  // minimal copy of just the display defaults/keys (not a shared call
+  // into settings.js) since nothing from that file is loaded yet at this
+  // point in the page — same "keep its own copy" convention already used
+  // for SETTINGS_HOSTS/MANUAL_HOSTS/FORUM_FAB_HOSTS elsewhere in this app.
+  // Every key here defaults to shown (true) if unset or on an older save
+  // missing it, matching SETTINGS_DEFAULTS.display's own defaults exactly
+  // — keep the two in sync if that list ever changes.
+  (function () {
+    try {
+      var raw = JSON.parse(localStorage.getItem('flux_settings') || 'null');
+      var d = (raw && raw.display) || {};
+      var hideClassByKey = {
+        showAvatar:      'settings-hide-avatar',
+        showSplashes:    'settings-hide-splashes',
+        showManualBtn:   'settings-hide-manual-btn',
+        showThemeBtn:    'settings-hide-theme-btn',
+        showDaylightBtn: 'settings-hide-daylight-btn',
+        showForumFab:    'settings-hide-forum-fab',
+        showCabinetBtn:  'settings-hide-cabinet-btn',
+      };
+      var toAdd = [];
+      for (var key in hideClassByKey) {
+        if (d[key] === false) toAdd.push(hideClassByKey[key]);
+      }
+      // followDeviceTheme (a Display sub-setting under showDaylightBtn —
+      // see js/settings.js) blocks the manual daylight switch from
+      // showing at all while it's on, regardless of showDaylightBtn's own
+      // value, so it needs the same early no-flash treatment here.
+      if (d.followDeviceTheme === true && toAdd.indexOf('settings-hide-daylight-btn') === -1) {
+        toAdd.push('settings-hide-daylight-btn');
+      }
+      // "Hide animation control buttons" — framed as hide, so true hides.
+      if (d.hideFigAnimControls === true) toAdd.push('settings-hide-fig-anim-controls');
+      if (toAdd.length) document.documentElement.classList.add.apply(document.documentElement.classList, toAdd);
+      // Colour correction (display.colorCorrection): the filters live in
+      // the hidden <svg> at the top of <body>; setting this now means the
+      // page never paints uncorrected first.
+      if (d.colorCorrection === 'protan' || d.colorCorrection === 'deutan' || d.colorCorrection === 'tritan') {
+        document.documentElement.setAttribute('data-color-correction', d.colorCorrection);
+      }
+      // Figure size slider (display.figureScale, percent) — same clamp as
+      // clampFigureScale() in js/settings.js, so figures never paint at the
+      // default size first and then jump.
+      var figPct = Number(d.figureScale);
+      if (isFinite(figPct) && d.figureScale != null) {
+        figPct = Math.min(200, Math.max(50, Math.round(figPct)));
+        document.documentElement.style.setProperty('--user-fig-scale', String(figPct / 100));
+      }
+    } catch (e) {
+      // Corrupted/foreign localStorage value — fail open (everything
+      // shown, today's default) rather than block page load.
+    }
+  })();
+</script>
+<script>
+  // Settings > Display > Font (display.uiFont, js/settings.js): one font
+  // for all UI text, headers, tabs and buttons included (it replaces the
+  // mono too), over whatever font the colour theme picks. Runs here, before
+  // <body>, so the page never paints in the theme's font first; settings.js
+  // calls applyUiFont() again whenever the setting changes or syncs in.
+  // Only the chosen font is fetched (plus all of them once the Settings
+  // dropdown opens, to draw each name in its own font: loadUiFontPreviews).
+  // Code, keyboard keys and the forum's
+  // LaTeX field stay monospace. The rule is injected from here rather than
+  // living in a stylesheet so a cached style.css can't lag behind it.
+  (function () {
+    // Outfit is the default. 'theme' is the old default: no override, the
+    // colour theme's own font (js/settings.js shows that font's real name).
+    // A save from before Outfit became the default holds 'default' (or
+    // nothing) — both mean Outfit now, same as migrateSettings().
+    var FONTS = [
+      { id: 'theme',    name: 'Theme font (previous)' },
+      { id: 'atkinson', name: 'Atkinson Hyperlegible', family: 'Atkinson Hyperlegible Next', weights: '300;400;600;700' },
+      { id: 'golos',    name: 'Golos Text',            family: 'Golos Text',                 weights: '400;600;700' },
+      { id: 'hanken',   name: 'Hanken Grotesk',        family: 'Hanken Grotesk',             weights: '300;400;600;700' },
+      { id: 'mona',     name: 'Mona Sans',             family: 'Mona Sans',                  weights: '300;400;600;700' },
+      { id: 'outfit',   name: 'Outfit (default)',      family: 'Outfit',                     weights: '300;400;600;700' },
+      { id: 'source',   name: 'Source Sans 3',         family: 'Source Sans 3',              weights: '300;400;600;700' }
+    ];
+    window.UI_FONT_OPTIONS = FONTS;
+    window.UI_FONT_DEFAULT = 'outfit';
+    var style = null, sheets = {};
+    // Stylesheets are only ever added, never swapped: a font picked earlier
+    // stays loaded, so its name in the dropdown keeps its own face.
+    function loadFont(f) {
+      var href = 'https://fonts.googleapis.com/css2?family=' + f.family.replace(/ /g, '+') + ':wght@' + f.weights + '&display=swap';
+      if (sheets[href]) return;
+      sheets[href] = true;
+      var link = document.createElement('link');
+      link.rel = 'stylesheet';
+      link.href = href;
+      document.head.appendChild(link);
+    }
+    window.loadUiFontPreviews = function () {
+      for (var i = 0; i < FONTS.length; i++) if (FONTS[i].family) loadFont(FONTS[i]);
+    };
+    window.applyUiFont = function (id) {
+      if (!id || id === 'default') id = window.UI_FONT_DEFAULT;
+      var f = null;
+      for (var i = 0; i < FONTS.length; i++) if (FONTS[i].id === id && FONTS[i].family) f = FONTS[i];
+      var root = document.documentElement;
+      if (!f) { root.removeAttribute('data-ui-font'); return; }
+      if (!style) {
+        style = document.createElement('style');
+        style.textContent =
+          'html[data-ui-font] body{--sans:var(--ui-font)!important;--mono:var(--ui-font)!important}' +
+          "html[data-ui-font] :is(code,pre,kbd,.forum-eq-input){font-family:'IBM Plex Mono',monospace}";
+        document.head.appendChild(style);
+      }
+      loadFont(f);
+      root.style.setProperty('--ui-font', "'" + f.family + "', sans-serif");
+      root.setAttribute('data-ui-font', f.id);
+    };
+    try {
+      var raw = JSON.parse(localStorage.getItem('flux_settings') || 'null');
+      window.applyUiFont(raw && raw.display && raw.display.uiFont);
+    } catch (e) {}
+  })();
+</script>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PHYS162 Practice Quiz</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 
 <!-- ── Open Graph / Telegram / Social preview ─────────────────────────────── -->
 <meta property="og:type"        content="website" />
-<meta property="og:title"       content="PHYS162 Practice Quiz" />
-<meta property="og:description" content="Interactive physics practice quiz — electric fields, Gauss's law, circuits & more. Instant feedback with scoring." />
+<meta property="og:title"       content="Flux Practice App" />
+<meta property="og:description" content="Interactive physics practice quiz: electric fields, Gauss's law, circuits &amp; more. Instant feedback with scoring." />
 <meta property="og:image"       content="course/preview.png" />
 <meta property="og:url"         content="https://your-domain.com/PHYS162_Practice_Quiz.html" />
 <meta name="twitter:card"       content="summary_large_image" />
-<meta name="twitter:title"      content="PHYS162 Practice Quiz" />
+<meta name="twitter:title"      content="Flux Practice App" />
 <meta name="twitter:description" content="Interactive physics practice quiz for PHYS 162 course at Nazarbayev University." />
 <meta name="twitter:image"      content="course/preview.png" />
 <!-- ── Keep these two lines' course-config.js values (display.ogDescription
      etc.) in sync with whatever you paste here — they're intentionally
      duplicated, not read from each other. ─────────────────────────────── -->
 
+<!-- ── Course identity — must load before ANY script that reads
+     STORAGE_PREFIX/SUPABASE_URL/SUPABASE_PUBLISHABLE_KEY (banner-manager.js
+     and the rest). Here in <head>, after the meta tags it updates and
+     before <title>, so the title below is replaced the moment it's parsed
+     and the tab never shows the placeholder. See its own header. ── -->
+<script src="js/course-config.js"></script>
+<!-- Sets html.lockdown before the page paints, so nothing flashes inside Safe
+     Exam Browser. See its own header. -->
+<script src="js/lockdown.js"></script>
+<!-- Placeholder for crawlers that don't run JS; the tab shows APP_NAME
+     ("Impulse" / "Flux") from course-config.js. -->
+<title>Flux</title>
+<script>document.title = APP_NAME;</script>
 
-<link rel="icon" type="image/png" href="/favicon/favicon-96x96.png?v=1.0.3" sizes="96x96" />
-<link rel="icon" type="image/svg+xml" href="/favicon/favicon.svg?v=1.0.3" />
-<link rel="shortcut icon" href="/favicon/favicon.ico?v=1.0.3" />
-<link rel="apple-touch-icon" sizes="180x180" href="/favicon/apple-touch-icon.png?v=1.0.3" />
+
+<link rel="icon" type="image/png" href="/favicon/favicon-96x96.png?v=1.0.5" sizes="96x96" />
+<link rel="icon" type="image/svg+xml" href="/favicon/favicon.svg?v=1.0.5" />
+<link rel="shortcut icon" href="/favicon/favicon.ico?v=1.0.5" />
+<link rel="apple-touch-icon" sizes="180x180" href="/favicon/apple-touch-icon.png?v=1.0.5" />
 <meta name="apple-mobile-web-app-title" content="Flux" />
-<link rel="manifest" href="/favicon/site.webmanifest?v=1.0.3" />
+<link rel="manifest" href="/favicon/site.webmanifest?v=1.0.5" />
 
 <!-- ── Google Sans Flex (official, free under SIL OFL via Google Fonts) —
      used only for the "Gemini" bot label/messages in the forum, so the
@@ -40,12 +199,53 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Google+Sans+Flex:wght@400..700&display=swap" rel="stylesheet">
+<!-- Was a `@import` at the top of css/style.css — that's only found by the
+     browser's preload scanner after style.css itself fully downloads and
+     parses, adding a full extra round-trip before quiz text renders in the
+     right font. As a real <link> here, the scanner finds it on the initial
+     HTML pass, same as the Google Sans Flex link above. -->
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600;700&family=IBM+Plex+Sans:wght@300;400;600&family=Bangers&family=STIX+Two+Text:ital,wght@0,400;1,400&family=Space+Grotesk:wght@400;500;700&family=Space+Mono:wght@400;700&family=Quicksand:wght@400;500;700&family=Kanit:ital,wght@1,900&display=swap" rel="stylesheet">
 
-<!-- ── Styles ── -->
+<!-- ── Styles ──
+     All five load as normal blocking stylesheets. stats.css/forum.css/
+     manual.css/settings.css style screens that are `display:none` until
+     the user opens Stats/Forum/Manual/Settings, but that display:none (and
+     the positioning/opacity for every modal backdrop across the app —
+     .stats-modal-backdrop, .forum-eq-modal-backdrop, .forum-fab-wrap) is
+     defined ONLY in these files, nowhere else. An earlier version of this
+     page deferred them to a tier-2 loader to save bandwidth for the
+     critical path, but that meant the browser rendered all of that
+     markup — the stats/forum/settings/manual screens and every one of the
+     nine .stats-modal-backdrop modals — as plain unstyled, unhidden
+     blocks for the brief window before those files loaded: a visible
+     flash of raw text and shapes on every visit. CSS is comparatively
+     cheap (~108KB total here, fetched in parallel over HTTP/2) next to
+     the JS payload that was the actual bottleneck (forum.js alone is
+     187KB, plus the Supabase CDN script) — those still defer via the
+     tier-2 loader near the end of <body>, since deferred *script*
+     execution has no equivalent flash-of-unstyled-content risk. -->
 <link rel="stylesheet" href="css/style.css">
+<link rel="stylesheet" href="css/answer-check.css">
 <link rel="stylesheet" href="css/stats.css">
 <link rel="stylesheet" href="css/forum.css">
 <link rel="stylesheet" href="css/manual.css">
+<link rel="stylesheet" href="css/license.css">
+<link rel="stylesheet" href="css/settings.css">
+<link rel="stylesheet" href="css/solve-all-nav.css">
+<!-- Solution figures (shared with the authoring tool) + the solution screen -->
+<link rel="stylesheet" href="css/figure.css">
+<link rel="stylesheet" href="css/solutions.css">
+<link rel="stylesheet" href="css/card-layouts.css">
+<!-- Flags on problem cards (js/problem-flags.js) -->
+<link rel="stylesheet" href="css/problem-flags.css">
+<!-- Exam handout button and window (js/handout.js); after problem-flags.css,
+     whose header rules it adjusts -->
+<link rel="stylesheet" href="css/handout.css">
+<!-- Lockdown mode (js/lockdown.js) -->
+<link rel="stylesheet" href="css/lockdown.css">
+<!-- TeX fonts: dvisvgm writes figure glyphs as private-use codepoints in
+     Computer Modern, so without this every label inside a figure is blank. -->
+<link rel="stylesheet" href="vendor/tikzjax/fonts.css">
 
 <!-- ── MathJax (math rendering, STIX Two font) ── -->
 <script>
@@ -68,10 +268,34 @@
     window.MathJax = {
       tex: {
         inlineMath: [['$', '$'], ['\\(', '\\)']],
-        displayMath: [['$$', '$$'], ['\\[', '\\]']]
+        displayMath: [['$$', '$$'], ['\\[', '\\]']],
+        // Site-wide LaTeX macros — keep identical in index.html, offline.html and editor/index.html (and the TikZ preamble in editor/editor.js).
+        macros: {
+          dd:   ['\\mathrm{d}#1', 1],                                        // \dd{x}
+          dv:   ['\\frac{\\mathrm{d}^{#1}#2}{\\mathrm{d}#3^{#1}}', 3, ''],  // \dv{x}{t}, \dv[2]{x}{t}
+          pdv:  ['\\frac{\\partial^{#1}#2}{\\partial #3^{#1}}', 3, ''],     // \pdv{f}{x}, \pdv[2]{f}{x}
+          vb:   ['\\mathbf{#1}', 1],                                        // bold vector
+          vu:   ['\\hat{\\mathbf{#1}}', 1],                                 // unit vector
+          abs:  ['\\left|#1\\right|', 1],
+          norm: ['\\left\\|#1\\right\\|', 1]
+        }
       },
       chtml: {
-        fontURL: 'vendor/mathjax/fonts/woff'
+        fontURL: 'vendor/mathjax/fonts/woff',
+        // Glyph ranges outside the bundle (accented Latin, Cyrillic,
+        // superscripts like ², most arrows and shapes...) are loaded on first
+        // use as <fontPath>/chtml/dynamic/<range>.js. The default fontPath
+        // is jsDelivr, which offline mode refuses: the load failed and took
+        // the whole typeset down with it. [mathjax] is the bundle's own
+        // folder, so this resolves the same from every page (editor/ too).
+        fontPath: '[mathjax]/stix2-font',
+        // A display equation wider than its box scrolls sideways — MathJax
+        // lays out the equation and its \tag as one scrollable unit. With the
+        // default ('overflow') a tagged equation spilled past the card and
+        // its tag ran off the screen. Keep in sync with editor/index.html
+        // and offline.html; changing it needs MATH_CACHE_SCHEMA bumped
+        // (js/math-cache.js), since cached problem text keeps the old layout.
+        displayOverflow: 'scroll'
       },
       options: {
         skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'],
@@ -92,6 +316,19 @@
         typeset: false,
         ready() {
           MathJax.startup.defaultReady();
+          // ONE failed typeset (a font file that can't load) used to fail
+          // every later one: the failed math stays in MathJax's document and
+          // is retried by each typeset, and the promise every call is chained
+          // onto stays rejected. All math after it stayed raw TeX until a
+          // reload. Now a failure drops that call's math and unblocks the
+          // chain; the call itself still rejects for its caller. Keep in sync
+          // with offline.html and editor/index.html.
+          const typeset = MathJax.typesetPromise;
+          MathJax.typesetPromise = (elements) => {
+            const p = typeset(elements);
+            MathJax.startup.promise = p.catch(() => { MathJax.typesetClear(elements); });
+            return p;
+          };
           resolve();
         }
       }
@@ -102,18 +339,76 @@
 </head>
 <body>
 
-<!-- ── Course identity — must load before ANY script that reads
-     STORAGE_PREFIX/SUPABASE_URL/SUPABASE_PUBLISHABLE_KEY, which in
-     practice means before banner-manager.js below. See its own header
-     comment for what it does. ── -->
-<script src="js/course-config.js"></script>
+<!-- Settings > Display > Colour correction. One colour matrix per type,
+     applied to <html> (css/settings.css), so every colour on the page goes
+     through it: text, the logo, figures, canvases, emoji. Each matrix is
+     daltonization in linear RGB: the Machado et al. (2009) full-severity
+     simulation S of that colour-vision deficiency, then the colour
+     information it loses, (I − S)·c, shifted into channels that type can
+     still see (Fidaner et al.), folded into one matrix D = I + Shift·(I − S).
+     Rows sum to 1, so white and greys stay as they are. -->
+<svg class="color-correction-filters" width="0" height="0" aria-hidden="true" focusable="false">
+  <filter id="cc-protan" color-interpolation-filters="linearRGB">
+    <feColorMatrix type="matrix" values="1 0 0 0 0  0.4789 0.4769 0.0442 0 0  0.5973 -0.6887 1.0914 0 0  0 0 0 1 0"/>
+  </filter>
+  <filter id="cc-deutan" color-interpolation-filters="linearRGB">
+    <feColorMatrix type="matrix" values="1 0 0 0 0  0.1628 0.725 0.1122 0 0  0.4547 -0.6454 1.1907 0 0  0 0 0 1 0"/>
+  </filter>
+  <filter id="cc-tritan" color-interpolation-filters="linearRGB">
+    <feColorMatrix type="matrix" values="0.7412 -0.4072 0.666 0 0  0.0751 0.5852 0.3397 0 0  0 0 1 0 0  0 0 0 1 0"/>
+  </filter>
+</svg>
+
+<!-- Settings > Display > Icons (Classic): first in <body> so it wraps every
+     emoji the parser adds before anything paints. See its header. -->
+<script src="js/icons.js"></script>
+
+<!-- Settings from site-version.json (poll intervals, kill switches); read by
+     the sync/forum/stats/solutions scripts below, so it loads first. -->
+<script src="js/site-config.js"></script>
+
+<!-- Tells a paused database from an unreachable one. Before anything that
+     talks to Supabase, as it watches their requests. -->
+<script src="js/db-status.js"></script>
 
 <!-- ── Version update notification banner ── -->
 <div id="update-banner" role="status" aria-live="polite">
   <span class="banner-icon">🔔</span>
-  <span class="banner-text">New version available — <strong id="banner-new-version"></strong></span>
-  <button class="banner-reload" onclick="location.reload(true)">Reload</button>
+  <span class="banner-text">New version available: <strong id="banner-new-version"></strong></span>
+  <button class="banner-reload" onclick="reloadForUpdate()">Reload</button>
   <button class="banner-dismiss" onclick="dismissUpdate()" title="Dismiss">✕</button>
+</div>
+
+<!-- ── Overdue update warning: 5-minute countdown to a forced reload ──
+     Filled in by _renderForcedUpdateBanner() (js/quiz-engine.js). Not
+     hidden by "Hide update reminder" or Go silent: it warns about a reload
+     that happens anyway. No ✕ for the same reason, except while it waits
+     for a timed quiz to end (.waiting): then ✕ hides it until that quiz is
+     over, and the countdown shows up once it is. -->
+<div id="update-forced-banner" role="status" aria-live="polite">
+  <svg class="forced-icon" viewBox="0 0 24 24" aria-hidden="true">
+    <circle cx="12" cy="12" r="9.5"></circle>
+    <line x1="12" y1="7" x2="12" y2="13.2"></line>
+    <circle class="forced-icon-dot" cx="12" cy="16.6" r="1.1"></circle>
+  </svg>
+  <span class="banner-text">
+    <strong id="update-forced-title"></strong>
+    <span id="update-forced-body"></span>
+  </span>
+  <button class="banner-reload" id="update-forced-btn" onclick="reloadForUpdate()">Reload now</button>
+  <button class="banner-dismiss" onclick="dismissForcedUpdateForQuiz()" title="Hide until the quiz ends">✕</button>
+</div>
+
+<!-- ── "Updated while you were away": 10 s after a forced reload nobody saw ──
+     The outline recedes over the 10 s (showUpdateDoneBanner, js/quiz-engine.js).
+     Tap to close early. -->
+<div id="update-done-banner" role="status" aria-live="polite" hidden onclick="closeUpdateDoneBanner()">
+  <svg class="banner-ring" aria-hidden="true"><rect pathLength="100"></rect></svg>
+  <svg class="forced-icon" viewBox="0 0 24 24" aria-hidden="true">
+    <circle cx="12" cy="12" r="9.5"></circle>
+    <polyline points="7.8,12.4 10.8,15.3 16.4,9.2"></polyline>
+  </svg>
+  <span class="banner-text" id="update-done-text"></span>
 </div>
 
 <!-- ── Bug report nudge banner ── -->
@@ -122,6 +417,15 @@
   <span class="banner-text">Found a bug or mistake? <strong><a href="https://t.me/Aoi_Kuro" target="_blank" rel="noopener" id="bug-report-link">Report on Telegram</a></strong></span>
   <button class="banner-dismiss" onclick="dismissBugBanner()" title="Dismiss">✕</button>
 </div>
+
+<!-- ── Random N full-screen reminder (auto-hides after 10 seconds) ── -->
+<button type="button" id="fullscreen-hint-banner" aria-live="polite" hidden
+        aria-label="Open Settings, Study section, for full-screen behaviour"
+        onclick="openFullscreenHintSettings()">
+  <svg class="fullscreen-hint-ring" viewBox="0 0 100 32" preserveAspectRatio="none" aria-hidden="true"><rect x="1.5" y="1.5" rx="7"></rect></svg>
+  <span class="banner-icon">⛶</span>
+  <span class="banner-text">You can turn off full-screen behaviour in <strong>Settings → Study</strong>.</span>
+</button>
 
 <!-- ── Theme nudge banner ── -->
 <div id="theme-nudge-banner" role="status" aria-live="polite">
@@ -174,20 +478,65 @@
   </div>
 </div>
 
+<!-- Top bar backdrop: a plain full-width strip sitting behind the site logo
+     and the settings/manual/palette/theme-toggle row (both still separate
+     fixed elements positioned independently, unchanged below) so scrolled
+     page content disappears behind the whole top edge instead of just the
+     icons' own small boxes — same idea as YouTube's/Chrome's opaque top bar.
+     Purely decorative backing, so it's aria-hidden and never intercepts
+     clicks (pointer-events: none — the logo/icons above it, at a higher
+     z-index, still get every click). -->
+<div class="top-bar-backdrop" aria-hidden="true"></div>
+
 <!-- Site logo -->
 <a id="siteLogoLink" class="site-logo-link" href="#" onclick="goToMainMenu();return false;" title="Main menu">
   <img src="favicon/favicon.svg" alt="Logo" class="site-logo-img">
+  <!-- Course name (IMPULSE / FLUX) from js/course-config.js. Filled right
+       here rather than on DOMContentLoaded so it never pops in after the
+       top bar has painted. -->
+  <span class="site-logo-wordmark"></span>
+  <script>document.currentScript.previousElementSibling.textContent = BRAND_NAME;</script>
 </a>
+
+<!-- Top bar tips: rotating one-liners in the empty space between the logo
+     and the settings/theme icons. Text comes from js/data/tips.js, timing
+     and show/hide logic from js/top-bar-tips.js. Decorative + ephemeral,
+     so hidden from assistive tech like .top-bar-backdrop above. -->
+<div class="top-bar-tip" id="topBarTip" aria-hidden="true">
+  <span class="top-bar-tip-text" id="topBarTipText"></span>
+</div>
+
+<!-- Top bar quiz status: live clock + battery, shown in the same top-bar
+     gap as the tip above, only during a Random N attempt taken in
+     fullscreen (see js/top-bar-quiz-status.js). Yields to the tip
+     the instant one wants to show (that file listens for the
+     'topbartip:show'/'topbartip:hide' events top-bar-tips.js dispatches)
+     rather than the two ever overlapping. Decorative + ephemeral, so
+     hidden from assistive tech like .top-bar-tip above. -->
+<div class="top-bar-quiz-status" id="topBarQuizStatus" aria-hidden="true">
+  <span class="tbqs-time" id="tbqsTime"><span id="tbqsH">12</span><span class="tbqs-colon" id="tbqsColon">:</span><span id="tbqsM">00</span></span>
+  <span class="tbqs-sep">|</span>
+  <span class="tbqs-battery" id="tbqsBattery">
+    <span class="tbqs-batt-icon" id="tbqsBattIcon"><span class="tbqs-batt-fill" id="tbqsBattFill"></span></span>
+    <span class="tbqs-batt-pct" id="tbqsBattPct"></span>
+    <!-- Shown only while charging. js/icons.js draws it as the Classic
+         bolt or leaves the ⚡ emoji (Modern), per Settings > Icon style. -->
+    <span class="tbqs-batt-charging" id="tbqsBattCharging" role="img" aria-label="Charging" title="Charging">⚡</span>
+  </span>
+</div>
 
 <!-- Theme toggle -->
 <div class="theme-toggle-wrap">
-  <button class="palette-icon-btn" id="manualBtn" onclick="toggleManualScreen()" title="User manual">📖</button>
+  <button class="palette-icon-btn" id="calcToggleBtn" onclick="window.toggleCalculator&&toggleCalculator()" title="Calculator" aria-label="Calculator">🧮</button>
+  <button class="palette-icon-btn" id="settingsBtn" onclick="window.toggleSettingsScreen&&toggleSettingsScreen()" title="Settings">⚙️</button>
+  <button class="palette-icon-btn" id="manualBtn" onclick="window.toggleManualScreen&&toggleManualScreen()" title="User Manual">📖</button>
   <button class="palette-icon-btn" id="paletteBtn" onclick="toggleThemePanel(event)" title="Color themes">🎨</button>
-  <span class="theme-icon">🌙</span>
+  <button type="button" class="theme-icon" onclick="setThemeMode(false)" title="Night mode">🌙</button>
   <div class="toggle-track" id="themeTrack" onclick="toggleTheme()">
     <div class="toggle-knob"></div>
   </div>
-  <span class="theme-icon">☀️</span>
+  <button type="button" class="theme-icon" onclick="setThemeMode(true)" title="Day mode">☀️</button>
+  <button class="palette-icon-btn" id="lockdownExitBtn" onclick="requestExitLockdown()" title="Exit lockdown" aria-label="Exit lockdown">🚪</button>
 </div>
 
 <!-- Theme picker panel -->
@@ -200,8 +549,11 @@
 <!-- ── Landing screen ── -->
 <div id="landingScreen">
   <div class="landing-box">
-    <div class="landing-eyebrow" id="eyebrowLandingPractice">PHYS162 · Practice Mode</div>
-    <h1 class="landing-title" id="landingTitle">Electricity &amp; Fields <span>Quiz</span></h1>
+    <div class="landing-eyebrow" id="eyebrowLandingPractice"></div>
+    <!-- Filled here, not on DOMContentLoaded, so the course code never
+         paints late. -->
+    <script>document.currentScript.previousElementSibling.textContent = COURSE_CODE_DISPLAY;</script>
+    <h1 class="landing-title" id="landingTitle">Electricity &amp; Fields <span>Set</span></h1>
     <div class="mc-splash-wrap"><span class="mc-splash" id="splashText" role="button" tabindex="0" title="Tap for another" onclick="showNewSplash()" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();showNewSplash();}"></span></div>
 
     <!-- Signed-in identity avatar — mirrors the splash badge: same height,
@@ -214,7 +566,7 @@
       </button>
     </div>
 
-    <p class="landing-sub">Choose a quiz set, pick a mode, and hit start</p>
+    <p class="landing-sub">Choose a set, pick a mode, and hit start</p>
 
     <div class="quiz-select-grid" id="quizSelectGrid">
       <!-- Buttons are rendered dynamically by renderQuizButtons() -->
@@ -227,20 +579,23 @@
         <div class="mode-toggle-track" id="modeToggle" onclick="toggleMode()">
           <div class="mode-toggle-knob"></div>
         </div>
-        <span class="mode-option" id="modeLabelSolveAll">⚡ Solve them all</span>
+        <span class="mode-option" id="modeLabelSolveAll">⚡ Entire Set</span>
       </div>
       <div class="cumulative-switch-wrap" id="cumulativeSwitchWrap">
         <div class="mode-switch-row">
-          <span class="mode-option active" id="cumLabelSingle">📝 Single quiz</span>
+          <span class="mode-option active" id="cumLabelSingle">📝 Single Set</span>
           <div class="mode-toggle-track" id="cumulativeToggle" onclick="toggleCumulativeMode()">
             <div class="mode-toggle-knob"></div>
           </div>
-          <span class="mode-option" id="cumLabelCumulative">📚 Cumulative</span>
+          <span class="mode-option" id="cumLabelCumulative">📚 Sets 1–2</span>
         </div>
       </div>
     </div>
 
-    <button class="landing-start-btn" onclick="startSelected()">Start →</button>
+    <!-- Inside Safe Exam Browser only: no database, no lockdown. -->
+    <div class="lockdown-only"><div class="db-offline-box"></div></div>
+    <button class="landing-start-btn" onclick="startSelected()">Start</button>
+    <button class="stats-launch-btn lockdown-only" onclick="exitLockdown()">Exit lockdown</button>
     <button class="stats-launch-btn" onclick="openStatsScreen()">📊 Stats</button>
     <div class="forum-launch-wrap">
       <button class="forum-launch-btn" onclick="openForumScreen()">💬 Forum</button>
@@ -248,7 +603,7 @@
       <span class="forum-at-badge" id="forumUnreadAtBadge" title="Someone tagged you">@</span>
     </div>
     <p style="margin-top:1.4rem;font-family:var(--mono);font-size:0.75rem;color:var(--muted);letter-spacing:0.05em;">
-      made by Ansar Seitkali · <a href="https://t.me/Aoi_Kuro" target="_blank" style="color:var(--accent);text-decoration:none;">@Aoi_Kuro</a> · Summer 2026
+      made by <a href="https://t.me/Aoi_Kuro" target="_blank" style="color:var(--accent);text-decoration:none;">@Aoi_Kuro</a> · Summer–Fall 2026
     </p>
 
     <!-- ── Changelog trigger button (electromagnetic charge UI) ── -->
@@ -256,7 +611,7 @@
       <button class="changelog-btn" id="changelogBtn" onclick="toggleChangelog()" title="Changelog">
         <canvas id="chargeCanvas" width="32" height="32"></canvas>
       </button>
-      <span class="changelog-btn-label" id="changelogBtnLabel">v<span id="changelogBtnVersion">—</span> · changelog</span>
+      <span class="changelog-btn-label" id="changelogBtnLabel">v<span id="changelogBtnVersion">—</span> · changelog · <a class="changelog-license-link" href="https://github.com/Aoi-Kuro/impulse/blob/main/LICENSE" target="_blank" rel="noopener license" title="Copyright and licenses" onclick="if (typeof openLicenseScreen === 'function') { openLicenseScreen(); return false; }">copyright</a></span>
     </div>
 
     <!-- ── Changelog panel ── -->
@@ -265,7 +620,7 @@
         <span class="changelog-title">Changelog</span>
         <div class="changelog-header-actions">
           <button class="field-lines-toggle" id="fieldLinesToggle" onclick="toggleFieldLines()" title="Hide field lines">⚡ field lines</button>
-          <a class="changelog-github-link" href="https://github.com/Aoi-Kuro/flux" target="_blank" rel="noopener" title="View source on GitHub">GitHub ↗</a>
+          <a class="changelog-github-link" href="https://github.com/Aoi-Kuro/impulse" target="_blank" rel="noopener" title="View source on GitHub">GitHub ↗</a>
           <button class="changelog-close" onclick="toggleChangelog()" title="Close">✕</button>
         </div>
       </div>
@@ -276,18 +631,53 @@
   </div>
 </div>
 
-<!-- ── Solve-all choice page ── -->
-<div id="choicePage" class="hidden">
-  <div class="landing-box">
-    <div class="landing-eyebrow" id="eyebrowLandingSolveAll">PHYS162 · Solve them all</div>
-    <h2 class="landing-title" style="margin-bottom:0.5rem;">Choose order</h2>
-    <p class="landing-sub" id="solveAllModalDesc" style="margin-bottom:1.2rem;"></p>
-    <div id="solveAllResumeRow" style="display:none;margin-bottom:0.9rem;">
-      <button class="modal-choice-btn" style="background:var(--accent);color:var(--chrome-light);width:100%;padding:1rem 0.5rem;" onclick="startSolveAll('resume')">▶ Resume<br><span style="font-size:0.68rem;opacity:0.85;">restore saved progress &amp; order</span></button>
+<!-- ── Choice page: one screen, three views picked by data-view ──
+     order    — Entire Set: the order of the problems
+     start    — Random N: ordinary, or lockdown in Safe Exam Browser
+     lockdown — Safe Exam Browser opening, with help if it doesn't
+     See setChoiceView() in js/lockdown.js. -->
+<div id="choicePage" class="hidden" data-view="order">
+  <div class="landing-box choice-view-start">
+    <h2 class="landing-title" style="margin-bottom:1.4rem;">How do you want to take it?</h2>
+    <div class="modal-choices" style="margin-bottom:0.9rem;">
+      <button class="modal-choice-btn" onclick="chooseQuizStart('ordinary')">Ordinary<br><span class="order-choice-sub">In this browser, no locking</span></button>
+      <button class="modal-choice-btn" onclick="chooseQuizStart('lockdown')">🔒 Lockdown browser<br><span class="order-choice-sub">All functions are blocked</span></button>
     </div>
+    <label class="quiz-start-remember"><input type="checkbox" id="quizStartRemember"> Remember and don't ask again</label>
+    <button class="choice-back-btn" onclick="closeSolveAllModal()">← Back</button>
+  </div>
+  <div class="landing-box choice-view-lockdown">
+    <div class="lockdown-card" id="lockdownCard">
+      <div class="lockdown-card-head">
+        <span class="lockdown-spinner" aria-hidden="true"></span>
+        <h2 class="lockdown-card-title" id="lockdownStatus">Opening Safe Exam Browser…</h2>
+        <button class="stats-close-btn" onclick="backFromLockdown()" title="Close" aria-label="Close">✕</button>
+      </div>
+      <div class="lockdown-db-block">
+        <div class="db-offline-box"></div>
+        <div class="db-offline-box lockdown-pending-box">Your account was made while the database was offline and isn't registered yet, so a lockdown attempt would have nowhere to go. Lockdown opens once it's registered.</div>
+        <div class="lockdown-actions">
+          <button class="btn btn-primary" onclick="takeOrdinaryQuizInstead()">Take it as an ordinary quiz</button>
+        </div>
+      </div>
+      <div class="lockdown-skip-wrap"><div>
+        <button type="button" class="lockdown-skip" onclick="showLockdownHelp()">I don't have it installed</button>
+      </div></div>
+      <div class="lockdown-help" id="lockdownHelp"><div class="lockdown-help-inner">
+        <p class="lockdown-help-text">It may need installing first. Safe Exam Browser is a free, open-source browser made by ETH Zurich for exams, so it's safe to install.</p>
+        <p class="lockdown-help-text">Once it's installed, you can start right away.</p>
+        <div class="lockdown-actions">
+          <a class="btn btn-secondary" href="https://safeexambrowser.org/download_en.html" target="_blank" rel="noopener">Install</a>
+          <button class="btn btn-primary" onclick="openLockdownView()">Enter lockdown</button>
+        </div>
+      </div></div>
+    </div>
+  </div>
+  <div class="landing-box choice-view-order">
+    <h2 class="landing-title" style="margin-bottom:1.4rem;">Choose the order</h2>
     <div class="modal-choices" style="margin-bottom:1.5rem;">
-      <button class="modal-choice-btn" onclick="startSolveAll('ordered')"><span id="solveAllOrderedLabel">1 → N</span><br><span id="solveAllOrderedSub" style="font-size:0.68rem;color:var(--muted);">ordered</span></button>
-      <button class="modal-choice-btn" onclick="startSolveAll('unordered')">⇄ Shuffled<br><span id="solveAllShuffledSub" style="font-size:0.68rem;color:var(--muted);">random order</span></button>
+      <button class="modal-choice-btn" onclick="startSolveAll('ordered')">In order<br><span class="order-choice-sub">(1, 2, 3...)</span></button>
+      <button class="modal-choice-btn" onclick="startSolveAll('unordered')">Random order<br><span class="order-choice-sub" id="randomOrderSample">(32, 6, 102...)</span></button>
     </div>
     <button onclick="closeSolveAllModal()" style="background:none;border:1px solid var(--border);color:var(--muted);font-family:var(--mono);font-size:0.78rem;padding:0.5rem 1.2rem;border-radius:4px;cursor:pointer;transition:color 0.15s,border-color 0.15s;" onmouseover="this.style.color='var(--text)';this.style.borderColor='var(--text)'" onmouseout="this.style.color='var(--muted)';this.style.borderColor='var(--border)'">← Back</button>
   </div>
@@ -296,76 +686,10 @@
 <!-- ── App page (quiz content) ── -->
 <div id="appPage">
 
-<div class="guide is-collapsed" id="guideMain">
-  <div class="guide-header">
-    <div class="guide-header-title"><span class="icon">✎</span><span>How to enter your answer</span></div>
-    <button class="guide-close" onclick="hideGuideManual()" title="Hide hint" aria-label="Hide hint">✕</button>
-  </div>
-
-  <div class="guide-section">
-    <div class="guide-section-title">Numbers</div>
-    <div class="guide-chip-row">
-      <div class="guide-chip"><code>1.56E4</code><span class="desc">= 15600</span></div>
-      <div class="guide-chip"><code>5E-2</code><span class="desc">= 0.05</span></div>
-      <div class="guide-chip"><code>1.56*10^4</code><span class="desc">× power-of-ten</span></div>
-      <div class="guide-chip"><code>10^-3</code><span class="desc">pure power of ten</span></div>
-      <div class="guide-chip"><code>-3.2E7</code><span class="desc">negative value</span></div>
-    </div>
-    <div class="guide-invalid-row">
-      <div class="guide-invalid-item"><span class="x">✕</span><code>1.6x10^5</code><span class="why">use E or *10^, not x</span></div>
-      <div class="guide-invalid-item"><span class="x">✕</span><code>1E(-3)</code><span class="why">no parens around exponent</span></div>
-      <div class="guide-invalid-item"><span class="x">✕</span><code>4.1 E 5</code><span class="why">no spaces around E</span></div>
-    </div>
-  </div>
-
-  <div class="guide-section">
-    <div class="guide-section-title">Units</div>
-    <div class="guide-chip-row">
-      <div class="guide-chip"><code>N/C</code><span class="desc">slash = division</span></div>
-      <div class="guide-chip"><code>m s^(-1)</code><span class="desc">space = multiply</span></div>
-      <div class="guide-chip"><code>m/s</code><span class="desc">same as m s^(-1)</span></div>
-      <div class="guide-chip"><code>N m</code><span class="desc">space = multiply</span></div>
-      <div class="guide-chip"><code>m^2</code><span class="desc">exponent with ^</span></div>
-      <div class="guide-chip"><code>kN m^(-2)</code><span class="desc">neg exp needs ( )</span></div>
-      <div class="guide-chip"><code>kg m s^(-2)</code><span class="desc">= kg m/s² = N</span></div>
-      <div class="guide-chip"><code>N m^2 C^(-1)</code><span class="desc">permutations OK</span></div>
-    </div>
-    <div class="guide-invalid-row">
-      <div class="guide-invalid-item"><span class="x">✕</span><code>N*m</code><span class="why">* not supported — use space</span></div>
-      <div class="guide-invalid-item"><span class="x">✕</span><code>m/s^(-2)</code><span class="why">( ) only on negative exponents</span></div>
-      <div class="guide-invalid-item"><span class="x">✕</span><code>kn or KN</code><span class="why">units are case-sensitive</span></div>
-    </div>
-  </div>
-
-  <div class="guide-section">
-    <div class="guide-section-title">SI prefixes</div>
-    <div class="guide-chip-row">
-      <div class="guide-chip"><code>p n µ/u m c</code><span class="desc">10⁻¹² → 10⁻²</span></div>
-      <div class="guide-chip"><code>k M G T</code><span class="desc">10³ → 10¹²</span></div>
-      <div class="guide-chip"><code>mm km ns</code><span class="desc">prefix + unit, no space</span></div>
-      <div class="guide-chip"><code>kOhm MHz GPa</code><span class="desc">works on most SI units</span></div>
-    </div>
-    <div class="guide-note-inline">write prefix directly before the unit — e.g. <code>mm</code>, <code>km</code>, <code>ns</code>, <code>µF</code> or <code>uF</code> — not on <code>kg</code> (already prefixed)</div>
-  </div>
-
-  <div class="guide-footer">
-    <span><b>Score:</b> value✓+unit✓ = 1.0 · value✓+unit✗ = 0.9 · value✗ = 0 · ±1% tolerance</span>
-  </div>
-</div>
-
-<!-- Top row: recall button (left) shown while guide is collapsed, main menu (right, hidden while hint is open) -->
-<div class="quiz-top-row">
-  <div class="hint-recall-wrap visible" id="hintRecallWrap">
-    <button class="btn-recall-hint" onclick="showGuide()">
-      <span>📋</span> Show hint (units &amp; numbers)
-    </button>
-  </div>
-  <button class="btn-exit-solve quiz-top-row-menu" onclick="goToMainMenu()">☰ Main menu</button>
-</div>
-
-<header>
-  <div class="eyebrow" id="eyebrowQuizHeader">PHYS162 · Practice Mode</div>
-  <h1>Electricity &amp; Fields <span>Quiz</span></h1>
+<header id="quizHeader" class="quiz-title-header">
+  <h1>Electricity &amp; Fields <span>Set</span></h1>
+  <button class="stats-close-btn quiz-close-btn" onclick="goToMainMenu()" title="Main menu" aria-label="Close and go to the main menu">✕</button>
+  <div class="solve-all-tag">Exam Try</div>
   <div class="filter-active-note" id="filterActiveNote" style="display:none;">Filter is active: this draw is pulling from a narrowed problem pool</div>
 </header>
 
@@ -373,128 +697,82 @@
 
 <div class="actions">
   <button class="btn btn-primary" id="checkBtn" onclick="checkAll()">Check answers</button>
-  <button class="btn btn-secondary" onclick="newQuiz()">New quiz ↺</button>
+  <button class="btn btn-secondary" onclick="requestNewQuiz()">New quiz ↺</button>
 </div>
 
 <div class="result-panel" id="resultPanel">
   <div class="result-big" id="resultScore"></div>
-  <div class="result-label" id="resultMaxScore">final score / 6</div>
-  <div class="result-breakdown" id="resultBreakdown"></div>
+  <div class="result-label" id="resultMaxScore">Final Score</div>
+  <div class="result-breakdown pq-row" id="resultBreakdown"></div>
+  <p class="lockdown-only lockdown-result-note" id="lockdownSaveNote"></p>
+  <button class="btn btn-secondary lockdown-only" onclick="exitLockdown()">Exit lockdown</button>
 </div>
 
-<div class="filter-reset-row" id="filterResetRow">
-  <button class="btn btn-secondary filter-reset-btn" onclick="resetFilterPreferences()">↺ Reset filter preferences</button>
+<div class="recent-attempts-panel" id="recentAttemptsPanel">
+  <div class="recent-attempts-header">Last attempts</div>
+  <div class="recent-attempts-list" id="recentAttemptsList"></div>
+  <button class="btn btn-secondary see-full-stats-btn" onclick="openFullStatsFromQuiz()">See full stats →</button>
 </div>
-<div class="topic-selector" id="topicSelector">
-  <div class="topic-selector-header">Problem Pool Filter</div>
+
+<!-- Topics of the attempt just checked, with the Stats screen's topic rows
+     (renderAttemptTopicsMini in js/quiz-engine.js). -->
+<div class="recent-attempts-panel attempt-topics-panel" id="attemptTopicsPanel">
+  <div class="attempt-topics-head">
+    <div class="recent-attempts-header">Topics in this attempt</div>
+    <span id="attemptTopicsLegend"></span>
+  </div>
+  <div id="attemptTopicsList"></div>
+</div>
+
+<!-- Wrapper holds the reset button OUTSIDE #topicSelector: initTopics() does
+     `topicSelector.innerHTML = ''` on every rebuild (topic/number toggle,
+     quiz switch, etc.), which was wiping out the reset button since it used
+     to live inside that same element. Living here instead, it now survives
+     every rebuild. -->
+<div class="topic-selector-wrap" id="topicSelectorWrap">
+  <button class="filter-reset-btn" id="filterResetBtn" onclick="handleResetClick()" title="Reset all filter preferences">
+    <svg class="reset-confirm-ring" viewBox="0 0 100 32" preserveAspectRatio="none"><rect x="1.5" y="1.5" rx="7"></rect></svg>
+    <span class="filter-reset-label">↺ Reset</span>
+  </button>
+  <div class="topic-selector" id="topicSelector">
+    <div class="topic-selector-header">Problem Pool Filter</div>
+  </div>
 </div>
 
 <!-- ── Solve-all mode ── -->
 <div id="solveAllMode">
-  <div class="guide is-collapsed" id="guideSolve">
-    <div class="guide-header">
-      <div class="guide-header-title"><span class="icon">✎</span><span>How to enter your answer</span></div>
-      <button class="guide-close" onclick="hideGuideManualSolve()" title="Hide hint" aria-label="Hide hint">✕</button>
-    </div>
-
-    <div class="guide-section">
-      <div class="guide-section-title">Numbers</div>
-      <div class="guide-chip-row">
-        <div class="guide-chip"><code>1.56E4</code><span class="desc">= 15600</span></div>
-        <div class="guide-chip"><code>5E-2</code><span class="desc">= 0.05</span></div>
-        <div class="guide-chip"><code>1.56*10^4</code><span class="desc">× power-of-ten</span></div>
-        <div class="guide-chip"><code>10^-3</code><span class="desc">pure power of ten</span></div>
-        <div class="guide-chip"><code>-3.2E7</code><span class="desc">negative value</span></div>
-      </div>
-      <div class="guide-invalid-row">
-        <div class="guide-invalid-item"><span class="x">✕</span><code>1.6x10^5</code><span class="why">use E or *10^, not x</span></div>
-        <div class="guide-invalid-item"><span class="x">✕</span><code>1E(-3)</code><span class="why">no parens around exponent</span></div>
-        <div class="guide-invalid-item"><span class="x">✕</span><code>4.1 E 5</code><span class="why">no spaces around E</span></div>
-      </div>
-    </div>
-
-    <div class="guide-section">
-      <div class="guide-section-title">Units</div>
-      <div class="guide-chip-row">
-        <div class="guide-chip"><code>N/C</code><span class="desc">slash = division</span></div>
-        <div class="guide-chip"><code>m s^(-1)</code><span class="desc">space = multiply</span></div>
-        <div class="guide-chip"><code>m/s</code><span class="desc">same as m s^(-1)</span></div>
-        <div class="guide-chip"><code>N m</code><span class="desc">space = multiply</span></div>
-        <div class="guide-chip"><code>m^2</code><span class="desc">exponent with ^</span></div>
-        <div class="guide-chip"><code>kN m^(-2)</code><span class="desc">neg exp needs ( )</span></div>
-        <div class="guide-chip"><code>kg m s^(-2)</code><span class="desc">= kg m/s² = N</span></div>
-        <div class="guide-chip"><code>N m^2 C^(-1)</code><span class="desc">permutations OK</span></div>
-      </div>
-      <div class="guide-invalid-row">
-        <div class="guide-invalid-item"><span class="x">✕</span><code>N*m</code><span class="why">* not supported — use space</span></div>
-        <div class="guide-invalid-item"><span class="x">✕</span><code>m/s^(-2)</code><span class="why">( ) only on negative exponents</span></div>
-        <div class="guide-invalid-item"><span class="x">✕</span><code>kn or KN</code><span class="why">units are case-sensitive</span></div>
-      </div>
-    </div>
-
-    <div class="guide-section">
-      <div class="guide-section-title">SI prefixes</div>
-      <div class="guide-chip-row">
-        <div class="guide-chip"><code>p n µ/u m c</code><span class="desc">10⁻¹² → 10⁻²</span></div>
-        <div class="guide-chip"><code>k M G T</code><span class="desc">10³ → 10¹²</span></div>
-        <div class="guide-chip"><code>mm km ns</code><span class="desc">prefix + unit, no space</span></div>
-        <div class="guide-chip"><code>kOhm MHz GPa</code><span class="desc">works on most SI units</span></div>
-      </div>
-      <div class="guide-note-inline">write prefix directly before the unit — e.g. <code>mm</code>, <code>km</code>, <code>ns</code>, <code>µF</code> or <code>uF</code> — not on <code>kg</code> (already prefixed)</div>
-    </div>
-
-    <div class="guide-footer">
-      <span><b>Score:</b> value✓+unit✓ = 1.0 · value✓+unit✗ = 0.9 · value✗ = 0 · ±1% tolerance</span>
-    </div>
-  </div>
-
-  <!-- Top row: recall button (left) shown while guide is collapsed, main menu (right, hidden while hint is open) -->
-  <div class="solve-top-row">
-    <div class="hint-recall-wrap visible" id="hintRecallWrapSolve">
-      <button class="btn-recall-hint" onclick="showGuideSolve()">
-        <span>📋</span> Hint
-      </button>
-    </div>
-    <button class="btn-exit-solve solve-top-row-menu" onclick="goToMainMenu()">☰ Main menu</button>
-  </div>
-
-  <header class="solve-all-quiz-header">
-    <div class="eyebrow" id="eyebrowSolveHeader">PHYS162 · Solve Mode</div>
-    <h1>Electricity &amp; Fields <span>Quiz</span></h1>
+  <header class="solve-all-quiz-header quiz-title-header" id="solveAllHeader">
+    <h1>Electricity &amp; Fields <span>Set</span></h1>
+    <button class="stats-close-btn quiz-close-btn" onclick="goToMainMenu()" title="Main menu" aria-label="Close and go to the main menu">✕</button>
     <div class="solve-all-tag">All Problems</div>
   </header>
 
   <div class="solve-all-actions-row">
+    <!-- Every problem of this set, the ones with a solution clickable
+         (openSolutionBrowser in js/solutions.js). -->
+    <button class="btn-solution-list" onclick="openSolutionBrowser(selectedQuizNum)" title="Solutions for this set">📘 Solution list</button>
     <button class="btn-reset-progress" onclick="resetSolveAll()">🗑 Reset Progress</button>
-    <button class="btn-rerender-eqs" onclick="rerenderSolveAllEquations()">🔁 Rerender Equations</button>
   </div>
   <div id="solveAllContainer"></div>
 </div>
 
-<!-- ── Mistakes quiz mode ── -->
-<div id="mistakesMode">
-  <div class="mistakes-header">
-    <div class="mistakes-title">📋 Wrong Problems — Retry Quiz</div>
-    <button class="btn-exit-solve" onclick="exitMistakes()">← Back to Solve All</button>
-  </div>
-  <div id="mistakesContainer"></div>
-</div>
+</div><!-- /#appPage -->
 
-<!-- ── Mistakes order modal ── -->
-<div class="modal-backdrop" id="mistakesModal">
-  <div class="modal-box">
-    <button class="modal-close" onclick="closeMistakesModal()">✕</button>
-    <div class="modal-title">Quiz: wrong problems</div>
-    <div class="modal-desc" id="mistakesModalDesc">Practice only the problems you got wrong or had revealed. Choose order.</div>
+<!-- ── "Leave this attempt?" (confirmLeaveRandomQuiz in js/quiz-engine.js).
+     Outside #appPage: #appPage's fadeInPage/fadeOutPage keyframes apply a
+     `transform`, which would make this modal's `position: fixed` center on
+     #appPage's own (huge, scrolled) box instead of the viewport. Same as
+     #stickyScore below. ── -->
+<div class="modal-backdrop" id="leaveQuizModal" onclick="if (event.target === this) resolveLeaveQuiz(false)">
+  <div class="modal-box" role="alertdialog" aria-labelledby="leaveQuizTitle">
+    <div class="modal-title" id="leaveQuizTitle">Leave this attempt?</div>
+    <div class="modal-desc">Your answers and time on this quiz will be lost.</div>
     <div class="modal-choices">
-      <button class="modal-choice-btn" onclick="startMistakes('ordered')">1 → N<br><span style="font-size:0.68rem;color:var(--muted);">ordered</span></button>
-      <button class="modal-choice-btn" onclick="startMistakes('unordered')">⇄ Shuffled<br><span style="font-size:0.68rem;color:var(--muted);">random order</span></button>
+      <button class="modal-choice-btn" onclick="resolveLeaveQuiz(false)">Stay</button>
+      <button class="modal-choice-btn modal-choice-btn-danger" onclick="resolveLeaveQuiz(true)">Leave</button>
     </div>
   </div>
 </div>
-
-
-</div><!-- /#appPage -->
 
 <!-- ── Sticky score badge (outside #appPage to avoid transform containing-block issue) ── -->
 <div id="stickyScore">
@@ -520,7 +798,24 @@
       <span class="sticky-stat-lbl">✗</span>
     </div>
   </div>
-  <button class="sticky-retry-btn" id="stickyRetryBtn" onclick="openMistakesModal()">📋 Quiz: wrong problems</button>
+  <!-- Flagged only (js/problem-flags.js): shown while a problem of this set
+       is flagged, with how many are. -->
+  <button class="sticky-flag-filter-btn" id="stickyFlagFilterBtn" type="button" hidden aria-pressed="false"
+    title="Show only flagged problems" onclick="toggleSolveAllFlagFilter()">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 4.5h17l-6.5 8v6l-4 2v-8Z"/></svg>
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path class="problem-flag-cloth" d="M5.5 3.5 19 8.75 5.5 14Z"/><path d="M5.5 21.5V3.5"/></svg>
+    <span id="stickyFlagCount">0</span>
+  </button>
+</div>
+
+<!-- ── Live quiz timer (outside #appPage for the same transform containing-
+     block reason as #stickyScore above; never visible at the same time as
+     it — this one's shown during a plain Random 6/cumulative attempt,
+     #stickyScore during Solve-All — so they safely share the same corner).
+     Turned on/off via startLiveQuizTimer()/stopLiveQuizTimer() (js/quiz-
+     engine.js) and the Study tab's "Show live timer" setting (js/settings.js). ── -->
+<div id="liveQuizTimer">
+  <span class="live-timer-min" id="liveQuizTimerMin">00</span><span class="live-timer-colon">:</span><span class="live-timer-sec" id="liveQuizTimerSec">00</span>
 </div>
 
 <!-- ── Stats Screen ── -->
@@ -532,8 +827,9 @@
           <div class="stats-title">📊 Stats</div>
         </div>
       </div>
-      <button class="stats-close-btn" onclick="closeStatsScreen()">✕ Close</button>
+      <button class="stats-close-btn" onclick="closeStatsScreen()" title="Close" aria-label="Close stats">✕</button>
     </div>
+    <div class="db-offline-box"></div>
     <div class="stats-forum-panel" id="statsForumPanel">
       <div class="sfp-title">👥 Forum &amp; Site <span class="sfp-live-dot" id="sfpLiveDot" title="Live" style="display:none;"></span></div>
       <div class="sfp-identity-row" id="sfpIdentityRow">
@@ -586,6 +882,16 @@
     </div>
     <div class="stats-filters" id="statsFilters"></div>
     <div id="statsTableWrap"></div>
+    <!-- ── Topic performance: every topic of every available quiz, each with
+         an average bar (all answers) and a best bar (each problem's best).
+         Rendered by renderTopicPerformance() in js/stats.js. -->
+    <div id="statsTopicsWrap"></div>
+    <!-- ── All-problems overview: every problem in the pool as a score-box
+         pill (same component as the result breakdown / "Last attempts"
+         panel / review screen), colored by that problem's LATEST recorded
+         score across all attempt history. Rendered by
+         renderProblemsOverview() in js/stats.js. -->
+    <div id="statsProblemsOverviewWrap"></div>
   </div>
 </div>
 
@@ -599,8 +905,12 @@
 <div id="reviewScreen">
   <div class="review-wrap">
     <div class="review-header">
-      <button class="stats-close-btn" onclick="closeAttemptReview()">✕ Close</button>
+      <button class="stats-close-btn" onclick="closeAttemptReview()" title="Close" aria-label="Close attempt review">✕</button>
       <div class="review-meta" id="reviewMeta"><!-- Rendered by renderAttemptReview() --></div>
+      <!-- Same score-box pill row used for the live quiz's result breakdown
+           and the "Last attempts" mini-panel — click a box to jump straight
+           to that problem's full card below. -->
+      <div class="review-score-boxes" id="reviewScoreBoxes"><!-- Rendered by renderAttemptReview() --></div>
     </div>
     <div class="review-problems" id="reviewProblems"><!-- Rendered by renderAttemptReview() --></div>
   </div>
@@ -618,7 +928,7 @@
       <div class="forum-header-right">
         <button type="button" class="forum-search-toggle-btn" id="forumSearchToggleBtn" onclick="toggleForumSearch()" title="Search all messages">🔍</button>
         <button type="button" class="forum-push-toggle-btn" id="forumPushToggleBtn" title="Get notified when someone tags you, even with the site closed">🔕</button>
-        <button class="forum-close-btn" onclick="closeForumScreen()">✕ Close</button>
+        <button class="forum-close-btn" onclick="closeForumScreen()" title="Close" aria-label="Close forum">✕</button>
       </div>
     </div>
     <!-- Hidden until the 🔍 button is tapped. Searches every message in every
@@ -632,6 +942,7 @@
          forum button (openForumForProblem, js/forum.js) — a collapsed-by-
          default readout of that problem's own text, so you don't have to
          leave the thread to re-read what's being discussed. -->
+    <div class="db-offline-box"></div>
     <div class="forum-problem-context" id="forumProblemContext" style="display:none;">
       <button type="button" class="forum-problem-context-toggle" id="forumProblemContextToggle" onclick="toggleForumProblemContext()">▸ Show problem</button>
       <div class="forum-problem-context-body" id="forumProblemContextBody" style="display:none;"></div>
@@ -717,6 +1028,35 @@
   </div>
 </div>
 
+<!-- ── Settings screen ──
+     Phase 0: infra only — storage/migration layer + panel shell + one
+     dummy "wiring test" toggle proving the full loop (click -> save ->
+     reload -> persists) works. Real toggles land in later phases; see
+     SETTINGS_DEFAULTS in js/settings.js for the registry they get added
+     to. Structurally mirrors #manualScreen (same open/close animation,
+     same header layout) — see openSettingsScreen/closeSettingsScreen in
+     js/settings.js. -->
+<div id="settingsScreen">
+  <div class="settings-wrap">
+    <div class="settings-header">
+      <div class="settings-header-left">
+        <div class="settings-title">⚙️ Settings</div>
+      </div>
+      <div class="settings-header-right">
+        <!-- Shortcut to the Search tab (js/settings-search.js) -->
+        <button class="stats-close-btn settings-header-icon-btn" onclick="openSettingsSearch()" title="Search settings" aria-label="Search settings">🔍</button>
+        <button class="stats-close-btn" onclick="closeSettingsScreen()" title="Close" aria-label="Close settings">✕</button>
+      </div>
+    </div>
+    <nav class="settings-tabs" id="settingsTabs">
+      <!-- Rendered by renderSettingsTabs() in js/settings.js -->
+    </nav>
+    <div class="settings-body" id="settingsBody">
+      <!-- Rendered by renderSettingsBody() in js/settings.js -->
+    </div>
+  </div>
+</div>
+
 <!-- ── User manual screen ──
      Structurally mirrors #forumScreen/#statsScreen (same open/close
      animation, same header layout — see openManualScreen/closeManualScreen
@@ -730,8 +1070,9 @@
   <div class="manual-wrap">
     <div class="manual-header">
       <div class="manual-header-left">
-        <div class="manual-title">📖 User manual</div>
+        <div class="manual-title">📖 User Manual</div>
       </div>
+      <button class="stats-close-btn" onclick="closeManualScreen()" title="Close" aria-label="Close manual">✕</button>
     </div>
     <div class="manual-body">
       <nav class="manual-sidebar" id="manualSidebar">
@@ -743,6 +1084,78 @@
           <div>Pick a topic on the left to read about it here.</div>
         </div>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── License screen (js/license.js, css/license.css) ──
+     Opened from the "Copyright" link under the changelog button. Statements
+     first, then the two full license texts behind tabs. Keep the wording in
+     sync with the License section of README.md. -->
+<div id="licenseScreen">
+  <div class="license-wrap">
+    <div class="license-header">
+      <div class="license-title">⚖️ Copyright</div>
+      <button class="stats-close-btn" onclick="closeLicenseScreen()" title="Close" aria-label="Close license">✕</button>
+    </div>
+
+    <div class="license-statements">
+      <section class="license-card">
+        <h2>Non-Commercial Project</h2>
+        <p>This site is a free, non-commercial study project. It has no ads, no paid features and no fees, and nobody earns money from it.</p>
+      </section>
+
+      <section class="license-card">
+        <h2>Problems and Figures</h2>
+        <p>The problem statements, numerical data, answers and figures used on this site are the intellectual property of Nazarbayev University, or of the original sources from which Nazarbayev University obtained them. They are not covered by the licenses below, and this project claims no rights to them.</p>
+        <p>All legal inquiries concerning this material should be addressed directly to Nazarbayev University.</p>
+      </section>
+
+      <section class="license-card">
+        <h2>Worked Solutions <span class="license-badge">All rights reserved</span></h2>
+        <p>Solutions written for this site, including their figures, are © their authors, who are credited under each solution, and are published here with their permission. All rights reserved.</p>
+        <p>They may not be copied, republished, adapted or used commercially without permission. To ask for permission, contact the corresponding author using the link below.</p>
+        <!-- Filled by renderLicenseSolutionAuthors() in js/license.js. -->
+        <div class="license-authors" id="licenseSolutionAuthors" hidden></div>
+        <p>The idea of adding worked solutions to the site, and of figures that build up step by step, came from <a href="https://t.me/abzalozhentay" target="_blank" rel="noopener">@abzalozhentay</a>. Thank you!</p>
+      </section>
+
+      <section class="license-card">
+        <h2>Site Code <span class="license-badge">AGPL-3.0</span></h2>
+        <p>The source code of this site is © 2026 Ansar Seitkali and contributors, licensed under the <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener license">GNU Affero General Public License v3.0</a>.</p>
+        <p>You may use, modify and share it, as long as modified versions stay under the same license and keep their source code available, including to people who use a modified version over a network, such as a hosted copy of this site. Copyright and attribution notices must be kept. The source code is on <a href="https://github.com/Aoi-Kuro/impulse" target="_blank" rel="noopener">GitHub</a>.</p>
+      </section>
+
+      <section class="license-card">
+        <h2>Names and Logos <span class="license-badge">Not licensed</span></h2>
+        <p>The names “Impulse” and “Flux”, the site logos and the app icons are © 2026 Ansar Seitkali. They are not covered by the AGPL or any other license here, as section 7(e) of the AGPL allows.</p>
+        <p>Copies and modified versions of the code must use a different name and logo, and must not present themselves as this site or as connected to it.</p>
+      </section>
+
+      <section class="license-card">
+        <h2>Third-Party Components</h2>
+        <p>Bundled libraries and fonts keep their own licenses: MathJax, DOMPurify and SheetJS (Apache 2.0), jsPDF and html-to-image (MIT), IBM Plex fonts (SIL Open Font License 1.1) and TikZJax. Their license files are kept with them in <code>vendor/</code>.</p>
+        <p>The site name next to the logo is set in Kanit, © 2020 The Kanit Project Authors (<a href="https://github.com/cadsondemak/kanit" target="_blank" rel="noopener">github.com/cadsondemak/kanit</a>), loaded from Google Fonts under the <a href="https://openfontlicense.org" target="_blank" rel="noopener license">SIL Open Font License 1.1</a>. So are the fonts offered in Settings → Display → Font (Atkinson Hyperlegible Next, Golos Text, Hanken Grotesk, Mona Sans, Outfit and Source Sans 3), each © its authors.</p>
+      </section>
+
+      <section class="license-card">
+        <h2>Answer Engine <span class="license-badge">MIT</span></h2>
+        <p>Since October 17, 2026, the engine behind the answer field is adapted from <a href="https://github.com/omgaXD/pt-nu-phys161" target="_blank" rel="noopener">pt-nu-phys161</a> by <a href="https://t.me/omgaxd" target="_blank" rel="noopener">@omgaxd</a>, © 2026, released under the MIT License. Thank you!</p>
+        <p>For this site its expression parser and unit table were rewritten. Its license file is kept with it in <code>vendor/pt-answer/</code>.</p>
+      </section>
+
+      <section class="license-card license-card-contact">
+        <h2>Copyright Holders</h2>
+        <p>If you hold the rights to any material on this site and believe it is used without permission, or want it removed, please contact <a href="https://t.me/Aoi_Kuro" target="_blank" rel="noopener">@Aoi_Kuro</a> on Telegram.</p>
+      </section>
+    </div>
+
+    <div class="license-texts-heading">Full License Text: GNU AGPL v3.0</div>
+    <nav class="settings-tabs" id="licenseTabs">
+      <!-- Rendered by renderLicenseTabs() in js/license.js -->
+    </nav>
+    <div class="license-text-box">
+      <pre class="license-text" id="licenseText"></pre>
     </div>
   </div>
 </div>
@@ -784,15 +1197,18 @@
      js/forum.js for openGettingStartedModal()/toggleGsFaq(). -->
 <div class="stats-modal-backdrop" id="gettingStartedModalBackdrop" onclick="if(event.target===this) closeGettingStartedModal()">
   <div class="stats-modal-box gs-modal-box">
-    <div class="stats-modal-title">Getting Started!</div>
-    <div class="stats-modal-desc gs-modal-desc">
-      To get started, choose a <strong>nickname</strong>. It’s used to label your quiz attempts and forum posts and sync your stats across devices. <strong>Your stats are private </strong>, and your nickname is only visible when you make a forum post.
-    </div>
+    <div class="stats-modal-title">Getting Started</div>
+    <!-- Shown only while the database is offline (js/offline-account.js). -->
+    <div class="gs-offline-note" id="gsOfflineNote" style="display:none;">The database is offline right now. You can still start: your account is made on this device and registered once the database is back.</div>
     <div class="stats-modal-actions gs-start-row">
-      <button type="button" class="stats-modal-btn primary gs-start-btn" onclick="proceedFromGettingStarted()">Start</button>
+      <button type="button" class="stats-modal-btn primary gs-start-btn" onclick="chooseGettingStarted('create')">I'm new</button>
+      <button type="button" class="stats-modal-btn gs-start-btn" onclick="chooseGettingStarted('restore')">I have an account</button>
     </div>
-    <div class="gs-faq">
-      <div class="gs-faq-heading">FAQ</div>
+    <div class="gs-faq" id="gsFaq">
+      <button type="button" class="gs-faq-toggle" id="gsFaqToggle" aria-expanded="false" onclick="toggleGsFaqList()">
+        <span>FAQ</span><span class="gs-faq-caret">›</span>
+      </button>
+      <div class="gs-faq-list">
       <div class="gs-faq-item">
         <button type="button" class="gs-faq-q" onclick="toggleGsFaq(this)">
           <span>What is a nickname?</span><span class="gs-faq-caret">›</span>
@@ -803,7 +1219,7 @@
         <button type="button" class="gs-faq-q" onclick="toggleGsFaq(this)">
           <span>Is my data being tracked?</span><span class="gs-faq-caret">›</span>
         </button>
-        <div class="gs-faq-a">The database of the platform only stores your forum posts linked to your nickname (seen by anybody) and your quiz attempts and progress (for sync across devices). Nothing else is stored by the platform. Some other data is collected by service providers, and you can read more about it in the manual (📖): go “📊 Stats and Synchronization”, then “What Gets Tracked”.</div>
+        <div class="gs-faq-a">The database of the platform only stores your forum posts linked to your nickname (seen by anybody), a random ID for your browser (saved with the posts you make), and your quiz attempts, progress and settings (for sync across devices). Nothing else is stored by the platform. Some other data is collected by service providers, and you can read more about it in the manual (📖): go to “📊 Stats &amp; Synchronization”, then “What gets tracked”.</div>
       </div>
       <div class="gs-faq-item">
         <button type="button" class="gs-faq-q" onclick="toggleGsFaq(this)">
@@ -829,14 +1245,16 @@
         </button>
         <div class="gs-faq-a">Enter your existing nickname and PIN there to restore it: your stats and forum identity will carry over instead of starting fresh. You can use the platform simultaneously on both devices, though.</div>
       </div>
+      </div>
     </div>
   </div>
 </div>
 
 <!-- ── Forum: claim / restore nickname modal ──
-     Two modes, set by openForumClaimModal(mode):
-       'restore' — person clicks "Already claimed a nickname on another
-                   device?" — both fields editable.
+     Modes, set by openForumClaimModal(mode):
+       'create'  — "I'm new": just a name, the server hands back a PIN.
+       'restore' — "I have an account", or "Already claimed a nickname on
+                   another device?" — both fields editable.
        'verify'  — auto-claim on Send found the typed name already taken;
                    nickname is prefilled/locked, only the PIN is needed,
                    and on success the pending message is sent automatically. -->
@@ -846,15 +1264,16 @@
     <div class="stats-modal-desc" id="forumClaimModalDesc">
       Enter the nickname and the 5-digit PIN you saved when you first claimed it.
     </div>
-    <input type="text" id="forumClaimNicknameInput" class="forum-name-input" placeholder="Nickname" maxlength="40" style="margin-bottom:0.5rem;" oninput="this.value = this.value.replace(/\s+/g, '')" onkeydown="if(event.key==='Enter'){event.preventDefault();submitForumClaimModal();}">
+    <input type="text" id="forumClaimNicknameInput" class="forum-name-input" placeholder="Nickname" maxlength="40" style="margin-bottom:0.5rem;" oninput="this.value = this.value.replace(/\s+/g, '')" onkeydown="if(event.key==='Enter'){event.preventDefault();forumClaimNicknameEnter();}">
     <div id="forumClaimPinRow">
       <input type="text" id="forumClaimPinInput" class="forum-name-input forum-pin-input" placeholder="5-digit PIN" maxlength="5" inputmode="numeric" pattern="[0-9]*" onkeydown="if(event.key==='Enter'){event.preventDefault();submitForumClaimModal();}">
     </div>
+    <div class="forum-claim-hint" id="forumClaimPinHint">Your PIN is on any device you're logged in on: Stats → ⚙︎ next to your name → Your PIN.</div>
     <div class="forum-composer-status" id="forumClaimModalStatus"></div>
     <button type="button" class="forum-identity-link-btn" id="forumClaimModalRestoreLink" style="display:none;" onclick="openForumClaimModal('restore', document.getElementById('forumClaimNicknameInput').value.trim(), forumClaimModalOnSuccess)">Already claimed a name on another device?</button>
     <div class="stats-modal-actions">
-      <button class="stats-modal-btn" onclick="closeForumClaimModal()">Cancel</button>
-      <button class="stats-modal-btn primary" onclick="submitForumClaimModal()">Claim</button>
+      <button class="stats-modal-btn" id="forumClaimModalCancel" onclick="cancelForumClaimModal()">Cancel</button>
+      <button class="stats-modal-btn primary" id="forumClaimModalSubmit" onclick="submitForumClaimModal()">Claim</button>
     </div>
   </div>
 </div>
@@ -867,8 +1286,46 @@
       Keep this secret. Anyone who has it can claim your nickname on another device or drop it entirely.
     </div>
     <div class="forum-pin-display" id="forumPinModalDisplay">—</div>
+    <div class="acct-note" id="forumPinModalPendingNote" style="display:none;">Your account registers once the database is back. Until then it lives only in this browser, so don't clear this site's data.</div>
     <div class="stats-modal-actions">
       <button class="stats-modal-btn" onclick="closeForumPinModal()">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Account made offline: new name needed (js/offline-account.js) ──
+     After a failed sync it stands in front of Quizzes and Solve them all:
+     no backdrop close, and Back only goes back to where you were. Also the
+     rename for an account that hasn't synced yet (Stats → Change nickname). -->
+<div class="stats-modal-backdrop" id="offlineRenameModalBackdrop">
+  <div class="stats-modal-box acct-modal">
+    <div class="stats-modal-title" id="offlineRenameTitle">Choose a new nickname</div>
+    <p class="acct-text" id="offlineRenameDesc"></p>
+    <div class="acct-field" id="offlineRenameField">
+      <input type="text" id="offlineRenameInput" class="forum-name-input" placeholder="New nickname" maxlength="40" autocomplete="off" oninput="this.value = this.value.replace(/\s+/g, '')" onkeydown="if(event.key==='Enter'){event.preventDefault();submitOfflineRename();}">
+      <div class="forum-composer-status" id="offlineRenameStatus"></div>
+    </div>
+    <div class="stats-modal-actions acct-actions">
+      <button type="button" class="forum-identity-link-btn acct-aside" id="offlineRenameMineBtn" style="display:none;" onclick="offlineRenameLogIn()">It's mine: log in</button>
+      <button class="stats-modal-btn" onclick="closeOfflineRenameModal()">Back</button>
+      <button class="stats-modal-btn primary" id="offlineRenameSave" onclick="submitOfflineRename()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Account made offline, a week on (js/offline-account.js) ── -->
+<div class="stats-modal-backdrop" id="offlineExpiredModalBackdrop">
+  <div class="stats-modal-box acct-modal">
+    <div class="stats-modal-title">Your account is still offline</div>
+    <p class="acct-text" id="offlineExpiredDesc"></p>
+    <p class="acct-text acct-text-quiet">Quizzes and Solve them all are paused until it's back. Your attempts are safe on this device.</p>
+    <div class="acct-label">Send this to the admin</div>
+    <div class="offline-message-box" id="offlineExpiredMessage"></div>
+    <div class="forum-composer-status" id="offlineExpiredStatus"></div>
+    <div class="stats-modal-actions acct-actions">
+      <button class="stats-modal-btn acct-aside" onclick="closeOfflineExpiredModal()">Back</button>
+      <button class="stats-modal-btn" onclick="copyOfflineAdminMessage()">Copy message</button>
+      <a class="stats-modal-btn primary" id="offlineExpiredTelegram" href="https://t.me/Aoi_Kuro" target="_blank" rel="noopener">Open Telegram</a>
     </div>
   </div>
 </div>
@@ -1028,13 +1485,28 @@
 <script src="course/quizzes/quiz1.js"></script>
 <script src="course/quizzes/quiz2.js"></script>
 <script src="course/quizzes/quiz3.js"></script>
+<script src="course/quizzes/quiz1-mistakes.js"></script>
+<script src="course/quizzes/quiz2-mistakes.js"></script>
+<script src="course/quizzes/quiz3-mistakes.js"></script>
 <script src="course/quizzes/quiz4.js"></script>
+<script src="course/quizzes/quiz4-mistakes.js"></script>
+<script src="course/quizzes/handouts.js"></script>
 
 <!-- ── Changelog data ── -->
 <script src="js/data/changelog.js"></script>
 
+<!-- ── Top bar tips data ── -->
+<script src="js/data/tips.js"></script>
+
 <!-- ── Quiz registry: maps quiz slots to problem arrays ── -->
 <script src="course/quizzes/quizzes.js"></script>
+
+<!-- ── Answer checking: the pt-answer engine (vendor-src/pt-answer) and the
+     course's rules on it. Before stats + quiz-engine, which grade with it. ── -->
+<script src="vendor/pt-answer/pt-answer.min.js"></script>
+<script src="js/answer-check.js"></script>
+<script src="js/common-mistakes.js"></script>
+<script src="js/card-layout.js"></script>
 
 <!-- ── Stats module (must load before quiz-engine) ── -->
 <script src="js/stats.js"></script>
@@ -1047,30 +1519,116 @@
 <script src="js/math-render.js"></script>
 
 <!-- ── Quiz engine: all app logic ── -->
+<!-- Worked solutions: figure.js + solution-render.js are shared with the
+     solutions authoring tool, so both render a solution identically.
+     DOMPurify sanitizes every figure SVG before it is inlined. -->
+<script src="vendor/dompurify/purify.min.js"></script>
+<script src="js/figure.js"></script>
+<script src="js/solution-render.js"></script>
+<script src="js/solutions.js"></script>
+<!-- Flag button at the top right of every problem card. -->
+<script src="js/problem-flags.js"></script>
+<!-- Exam handout button after the number of a problem whose quiz has one. -->
+<script src="js/handout.js"></script>
+<!-- Long-press affordance on the site logo for the solutions authors (see
+     the file's own header). Nothing is rendered until the hold completes. -->
+<!-- Personal cabinet (👤 → Stats) beside the logo; placed before
+     editor-access.js so the Editorial link lines up after it. -->
+<script src="js/cabinet-link.js"></script>
+<script src="js/editor-access.js"></script>
 <script src="js/quiz-engine.js"></script>
-<script src="js/fig-attribution.js"></script>
+<!-- Logo cube tumble whenever the main menu appears, and once everything
+     (tier 2 below included) has loaded. -->
+<script src="js/logo-tumble.js"></script>
+<!-- Course name soaked into the cube during a Random N attempt. -->
+<script src="js/logo-wordmark.js"></script>
+<script src="js/logo-offline.js"></script>
 
-<!-- ── Changelog + electromagnetic cursor ── -->
-<script src="js/changelog.js"></script>
+<!-- ── Tier 2: everything below is cosmetic/non-critical once the landing
+     screen is up (fig-attr tooltips, top-bar scroll/tips, the changelog
+     cursor effect) or belongs to a screen that's `display:none` until
+     opened (Stats/Forum/Manual/Settings — their CSS is NOT deferred, see
+     the comment on the <link> tags in <head> for why). None of this JS is
+     needed for the landing screen to display and work correctly, so
+     instead of static tags that the browser would start downloading in
+     parallel with the tier-1 scripts above (competing for bandwidth on
+     the very connections tier 1 needs), this small loader builds
+     <script> tags at runtime — which the preload scanner can't see in
+     advance — so they only start fetching once every tier-1 script has
+     actually finished. This still runs immediately, right here, with no
+     wait for user interaction or a load event; it just means tier 2's
+     bytes never race tier 1's. Dependency order is preserved: each item
+     still waits for the previous one, and manual.js/settings.js — which
+     don't touch the forum/Supabase stack — load before the heavier
+     Supabase-client → site-visits.js → forum.js → push-notifications.js
+     chain (same relative order that chain always needed), so the two
+     other always-visible top-bar buttons (Manual, Settings) become usable
+     sooner instead of queueing behind forum.js's 187KB. -->
+<script>
+  (function () {
+    // Loads scripts one at a time, in the given order, each starting only
+    // after the previous one has finished — same guarantee plain
+    // <script src> tags gave, but not discoverable by the preload scanner
+    // until this function actually runs (i.e. after tier 1 is done).
+    function loadSequentially(srcs, i) {
+      i = i || 0;
+      if (i >= srcs.length) {
+        // js/logo-tumble.js waits for this before its "site is ready" tumble.
+        window.tier2Loaded = true;
+        window.dispatchEvent(new Event('tier2-loaded'));
+        return;
+      }
+      const s = document.createElement('script');
+      s.src = srcs[i];
+      s.async = false;
+      s.onload = s.onerror = function () { loadSequentially(srcs, i + 1); };
+      document.body.appendChild(s);
+    }
 
-<!-- ── Forum (Step 1: read-only feed) ── -->
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="js/site-visits.js"></script>
-<script src="js/forum.js"></script>
+    loadSequentially([
+      'js/fig-attribution.js',
+      'course/figures/quiz1.js',
+      'course/figures/quiz2.js',
+      'course/figures/quiz3.js',
+      'course/figures/quiz4.js',
+      'course/figures/manual.js',
+      'course/figures/inertia.js',
+      'course/animations/quiz1.js',
+      'course/animations/quiz2.js',
+      'course/animations/quiz3.js',
+      'course/animations/quiz4.js',
+      'course/animations/manual.js',
+      'js/figure-anim.js',
+      'js/figure-style.js',
+      'js/scrollbars.js',
+      'js/top-bar-scroll.js',
+      'js/top-bar-tips.js',
+      'js/top-bar-quiz-status.js',
+      'js/solve-all-nav.js',
+      'js/changelog.js',
+      'js/manual.js',
+      'js/license.js',
+      'js/settings.js',
+      'js/settings-search.js',
+      'js/offline-mode.js',
+      'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2',
+      'js/site-visits.js',
+      'js/forum.js',
+      'js/nickname-rules.js',
+      'js/offline-account.js',
+      'js/push-notifications.js',
+      'js/settings-sync.js',
+    ]);
+  })();
+</script>
 
-<!-- Forum @mention push notifications: permission prompt, subscribe/
-     unsubscribe, and reacting to a tapped notification. Loaded after
-     forum.js (uses getForumDeviceId/openForumForProblem/openForumScreen/
-     setForumStatus) and supabase-config.js (SUPABASE_URL/KEY). -->
-<script src="js/push-notifications.js"></script>
-
-<!-- ── User manual (sidebar section/subsection tree + LaTeX content) ── -->
-<script src="js/manual.js"></script>
-
-<!-- Registers sw.js (offline.html fallback only — see that file's header
-     comment for exactly what it does and doesn't cache). Only takes effect
-     from the NEXT navigation onward, since the very first visit has nothing
-     installed yet to intercept it. -->
+<!-- Registers sw.js. Originally just the offline.html fallback (see that
+     file's own header comment); now also enforces Settings > Offline &
+     Sync's 24h full-offline window once js/offline-mode.js's "Go offline"
+     has been used — same file, two jobs layered together rather than a
+     second service worker (only one is allowed per scope anyway). Only
+     takes effect from the NEXT navigation onward, since the very first
+     visit has nothing installed yet to intercept it. -->
 <script>
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
@@ -1080,6 +1638,99 @@
     });
   }
 </script>
+
+
+<!-- ── Solution Screen (js/solutions.js) — a full screen like the forum,
+     not an overlay: problem on top, then the figure, then the solution. ── -->
+<div id="solutionScreen">
+  <div class="solution-wrap">
+    <div class="solution-header">
+      <div class="solution-header-left">
+        <div class="solution-title" id="solutionTitle">📘 Solution</div>
+      </div>
+      <div class="solution-header-right">
+        <button class="solution-close-btn" id="solutionShareBtn" onclick="shareSolutionLink()" title="Copy a link to this solution">🔗 Share</button>
+        <button class="solution-close-btn" id="solutionCloseBtn" onclick="closeSolutionScreen()" title="Close" aria-label="Close solution">✕</button>
+      </div>
+    </div>
+
+    <div class="solution-problem" id="solutionProblem">
+      <div class="solution-problem-head">
+        <span class="solution-section-label">Problem</span>
+        <span class="solution-problem-num" id="solutionProblemNum"></span>
+        <span class="solution-problem-topic" id="solutionProblemTopic"></span>
+      </div>
+      <div class="problem-text" id="solutionProblemText"></div>
+    </div>
+
+    <!-- "Default | By @name | …" when a problem has more than one published
+         solution (renderSolutionTabs in js/solutions.js). -->
+    <div class="solution-versions" id="solutionTabs" hidden>
+      <div class="solution-list-title">Versions</div>
+      <div class="solution-tabs" id="solutionTabList" role="tablist" aria-label="Versions"></div>
+    </div>
+
+    <!-- Under the problem, so the problem doesn't move when it goes. -->
+    <div class="solution-loading" id="solutionLoading" hidden>Loading…</div>
+
+    <div class="solution-stale" id="solutionStale" hidden>
+      This problem has been edited since the solution was written, so some numbers may no longer match.
+    </div>
+
+    <div class="solution-figwrap" id="solutionFigureWrap" hidden>
+      <div class="solution-section-label">Figure</div>
+      <!-- The figure and the magnifier lens over it — js/solutions.js,
+           "Figure zoom & magnifier". -->
+      <div class="solution-figstage" id="solutionFigStage">
+        <div class="fig" id="solutionFigure"></div>
+        <div class="fig fig-lens" id="solutionFigLens" aria-hidden="true" hidden></div>
+      </div>
+      <!-- One row: step navigation centred, zoom tools on the right (the
+           tools stay when a one-step figure hides the navigation). Icons
+           are drawn, not text glyphs, so they sit dead centre. -->
+      <div class="solution-figbar">
+        <div class="solution-nav" id="solutionNav">
+          <button type="button" class="solution-navbtn" id="solutionPrev" aria-label="Previous step" onclick="solutionStep(-1)"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path d="M10 3.5 5.5 8l4.5 4.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          <div class="solution-nav-mid">
+            <div class="solution-dots" id="solutionDots"></div>
+            <div class="solution-stepno" id="solutionStepNo"></div>
+          </div>
+          <button type="button" class="solution-navbtn" id="solutionNext" aria-label="Next step" onclick="solutionStep(1)"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path d="M6 3.5 10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </div>
+        <div class="fig-tools" id="solutionFigTools" role="toolbar" aria-label="Figure zoom">
+          <button type="button" class="solution-navbtn fig-toolbtn" id="solutionZoomOut" aria-label="Zoom out" title="Zoom out"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path d="M3.5 8h9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          <button type="button" class="solution-navbtn fig-toolbtn" id="solutionZoomIn" aria-label="Zoom in" title="Zoom in"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path d="M3.5 8h9M8 3.5v9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          <button type="button" class="solution-navbtn fig-toolbtn" id="solutionLensBtn" aria-pressed="false" aria-label="Magnifier" title="Magnifier"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path d="M7 2.75a4.25 4.25 0 1 0 0 8.5 4.25 4.25 0 1 0 0-8.5M10.2 10.2 13.5 13.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </div>
+      </div>
+      <div class="solution-caption sol-text" id="solutionCaption"></div>
+    </div>
+
+    <div class="solution-main" id="solutionMain">
+      <div class="solution-section-label">Solution</div>
+      <div class="sol-text" id="solutionBody"></div>
+      <div class="solution-credit" id="solutionCredit" hidden></div>
+    </div>
+
+    <!-- Previous / next problem with a published solution in this quiz, and
+         the Solution list between them (renderSolutionPager in
+         js/solutions.js). The list takes the pager's place while open. -->
+    <div class="solution-pager" id="solutionPager" hidden>
+      <button type="button" class="solution-close-btn solution-pager-btn" id="solutionPrevProblem"></button>
+      <button type="button" class="solution-close-btn solution-pager-btn" id="solutionListBtn" onclick="openSolutionList()" title="Every problem of this quiz">Solution list</button>
+      <button type="button" class="solution-close-btn solution-pager-btn" id="solutionNextProblem"></button>
+    </div>
+
+    <div class="solution-list" id="solutionList" hidden>
+      <div class="solution-list-head">
+        <div class="solution-list-title">Solution list <span class="solution-list-count" id="solutionListCount"></span></div>
+        <div class="solution-list-sets" id="solutionListSets" role="group" aria-label="Set"></div>
+        <button type="button" class="solution-close-btn solution-list-close" onclick="closeSolutionList()" title="Close the list" aria-label="Close the solution list">✕</button>
+      </div>
+      <div class="solution-list-grid" id="solutionListGrid"></div>
+    </div>
+  </div>
+</div>
 
 </body>
 </html>

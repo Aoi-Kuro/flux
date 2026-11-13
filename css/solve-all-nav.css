@@ -1,0 +1,296 @@
+/* ── Solve-All side navigator ──────────────────────────────────────────────
+   Progress rail, built/shown by js/solve-all-nav.js. Desktop only:
+   #solveAllContainer is centered at max-width 760px (see css/style.css), so
+   this needs a viewport wide enough to have real gutter beside it without
+   crowding the content — hence display:none below the breakpoint rather
+   than just hiding visually, so it never reserves layout space or receives
+   clicks on narrower/mobile screens.
+
+   That breakpoint (1024px below) is NOT arbitrary. #saNavRail's
+   inset-inline-end is min(240px, 50% - 380px - gap - width), so on
+   narrower screens the rail rides along 30px (gap) left of the 760px
+   container instead of sitting at a fixed screen-edge offset; on wide
+   screens the 240px cap keeps it where it always was (content-facing edge
+   at 330px). The breakpoint is where that computed left offset would drop
+   below a 12px screen margin:
+     breakpoint = 760 + 2 * (12 + gap + width) = 760 + 2 * (12 + 30 + 90) = 1024px
+   The 90px width fits the line (24px in) plus "P150"-style labels (38px
+   in, ~30px long). If you change the gap, width, or the container's
+   max-width, recompute both this number and the calc() below.
+
+   Side: always the left edge of the viewport now (there used to be a
+   Settings > Study > Solve Them All > "Line progress" > Position toggle for
+   this; it's been removed, and the rail is left-only going forward). Every
+   offset below is still written with the *logical* inset-inline-start/end
+   properties rather than physical left/right, and #saNavRail's own
+   `direction: rtl` is what makes inline-end resolve to the physical left —
+   so the whole rail (outer position, line, ticks, labels, pointer, arrow)
+   moves as one unit from that single property, and nothing here needs a
+   separate "left version" of each rule. Latin letters/digits (the "P20"
+   labels) always display left-to-right regardless of direction, so text
+   itself never mirrors — only positioning does.
+
+   Distance from the problems to the line: this rail is position:fixed
+   against the *viewport*, not measured against #solveAllContainer's
+   actual edge, so there's no single "gap" variable — it's the combination
+   of two offsets below. To bring the line closer to the problems, start
+   with .sa-nav-track::after's `inset-inline-start` (currently 24px) —
+   that's the line's own offset from the rail's content-facing edge, the
+   most direct lever. If you want it closer still once that hits 0, shrink
+   the 30px gap in #saNavRail's `inset-inline-end` calc() (and the
+   breakpoint with it), which moves the rail's content-facing edge itself
+   closer to center. Ticks/marks/labels/pointer are all offset relative to
+   the same edge, so they'll follow the line automatically — no need to
+   touch them individually. */
+
+#saNavRail {
+  display: none;
+}
+
+@media (min-width: 1024px) {
+  #saNavRail {
+    display: block;
+    position: fixed;
+    top: 14vh;
+    bottom: 12vh;
+    /* 240px from the screen edge on wide screens; on narrower ones it
+       follows the problems instead, staying 30px clear of their left edge
+       (50% - 380px). See the breakpoint comment above. */
+    inset-inline-end: min(240px, calc(50% - 380px - 30px - 90px));
+    width: 90px;
+    z-index: 750; /* below #stickyScore/modals (800+), above ordinary page content */
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.35s ease;
+    direction: rtl; /* makes inset-inline-end below resolve to the left edge — see header comment */
+  }
+  #saNavRail.is-ready {
+    opacity: 1;
+  }
+
+  .sa-nav-track {
+    position: relative;
+    width: 100%;
+    height: 100%;
+  }
+
+  /* The line itself — deliberately not fully opaque; it's a faint spine for
+     the tick marks to hang off, not something meant to draw the eye on its
+     own (the highlight segment below is what draws the eye). */
+  .sa-nav-track::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    inset-inline-start: 24px; /* <-- see "distance" comment above: the main lever */
+    width: 2px;
+    background: var(--muted);
+    opacity: 0.32;
+    border-radius: calc(2px * var(--radius-mult));
+    pointer-events: none;
+  }
+
+  /* Wide invisible strip over the line + tick marks so clicking near (not
+     just exactly on) the 2px line still registers — the visual line stays
+     thin, the hitbox doesn't. */
+  .sa-nav-hitzone {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    inset-inline-start: 8px;
+    width: 36px;
+    cursor: pointer;
+    pointer-events: auto;
+  }
+
+  /* "You are here" — the track segment between the two tick marks bracketing
+     the current scroll position. Repositioned (not re-created) as the user
+     scrolls, so moving into a new interval reads as a smooth slide-and-fade
+     rather than a jump cut. */
+  .sa-nav-highlight {
+    position: absolute;
+    inset-inline-start: 23.5px;
+    width: 3px;
+    background: var(--accent);
+    opacity: 0.85;
+    border-radius: calc(2px * var(--radius-mult));
+    box-shadow: 0 0 7px rgba(var(--accent-rgb), 0.55);
+    pointer-events: none;
+    transition: top 0.3s ease, height 0.3s ease, opacity 0.3s ease;
+  }
+
+  .sa-nav-ticks {
+    position: absolute;
+    inset: 0;
+  }
+
+  .sa-nav-tick {
+    position: absolute;
+    inset-inline: 0;
+    height: 28px; /* generous click/tap hitbox around each tick, well past the visible 2px mark */
+    transform: translateY(-50%);
+    cursor: pointer;
+    pointer-events: auto;
+  }
+
+  .sa-nav-tick-mark {
+    position: absolute;
+    top: 50%;
+    inset-inline-start: 18px;
+    width: 12px;
+    height: 2px;
+    transform: translateY(-50%);
+    background: var(--muted);
+    opacity: 0.42;
+    border-radius: calc(2px * var(--radius-mult));
+    transition: background-color 0.28s ease, opacity 0.28s ease, width 0.28s ease;
+  }
+
+  /* Font bumped up a notch from the original 0.62rem — the P-number labels
+     were reading a little too small next to the tick marks. */
+  .sa-nav-tick-label {
+    position: absolute;
+    top: 50%;
+    inset-inline-start: 38px;
+    transform: translateY(-50%);
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.03em;
+    color: var(--muted);
+    opacity: 0.42;
+    white-space: nowrap;
+    transition: color 0.28s ease, opacity 0.28s ease, inset-inline-start 0.28s ease;
+  }
+
+  .sa-nav-tick:hover .sa-nav-tick-mark,
+  .sa-nav-tick:hover .sa-nav-tick-label {
+    opacity: 0.75;
+  }
+
+  /* The two ticks bracketing the current position — fades smoothly up from
+     the dim resting state (above) as the highlighted interval changes.
+     The label nudges 2px further from the mark (was a transform: translateX,
+     switched to an inset-inline-start bump so it mirrors correctly with the
+     rest of the rail under this rail's `direction: rtl` — transforms don't
+     know about logical direction, this does). */
+  .sa-nav-tick.is-active .sa-nav-tick-mark {
+    opacity: 1;
+    width: 16px;
+    background: var(--accent);
+    box-shadow: 0 0 6px rgba(var(--accent-rgb), 0.6);
+  }
+  .sa-nav-tick.is-active .sa-nav-tick-label {
+    opacity: 1;
+    color: var(--accent);
+    inset-inline-start: 40px;
+  }
+
+  /* Flagged problems (js/problem-flags.js): a dot on the line in the
+     flag's colour, ringed in the page background so it stands clear of the
+     line and the highlight. Not clickable itself: js/solve-all-nav.js
+     takes any tap within FLAG_MAGNET_PX of a dot (onRailClick). */
+  .sa-nav-flags {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+  }
+  .sa-nav-flag {
+    position: absolute;
+    inset-inline-start: 21px;            /* centred on the line (24px + 1px) */
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    transform: translateY(-50%);
+    background: var(--accent2);
+    color: var(--accent2);
+    box-shadow: 0 0 0 2px var(--bg), 0 0 6px 1px color-mix(in srgb, currentColor 55%, transparent);
+    transition: transform 0.15s ease, background-color 0.25s ease, color 0.25s ease;
+  }
+  /* Flagging and unflagging a card (renderFlags(true)): the dot pops in
+     with a small overshoot, and shrinks away. */
+  .sa-nav-flag.is-entering { animation: sa-nav-flag-in 0.34s cubic-bezier(.3, .7, .4, 1) both; }
+  .sa-nav-flag.is-leaving  { animation: sa-nav-flag-out 0.22s ease-in both; }
+  @keyframes sa-nav-flag-in {
+    from { transform: translateY(-50%) scale(0); opacity: 0; }
+    60%  { transform: translateY(-50%) scale(1.35); opacity: 1; }
+    to   { transform: translateY(-50%) scale(1); opacity: 1; }
+  }
+  @keyframes sa-nav-flag-out {
+    from { transform: translateY(-50%) scale(1); opacity: 1; }
+    to   { transform: translateY(-50%) scale(0); opacity: 0; }
+  }
+  .sa-nav-flag[data-flag="1"] { background: var(--accent); color: var(--accent); }
+  #saNavRail.flag-near .sa-nav-hitzone,
+  #saNavRail.flag-near .sa-nav-tick { cursor: pointer; }
+  .sa-nav-flag.is-near { transform: translateY(-50%) scale(1.4); }
+  /* The problem's number, on the problems' side of the line (the labels'
+     side is taken by the tick labels). */
+  .sa-nav-flag.is-near::after {
+    content: attr(data-label);
+    position: absolute;
+    top: 50%;
+    inset-inline-end: calc(100% + 6px);
+    transform: translateY(-50%) scale(0.715);  /* undoes the dot's 1.4× */
+    transform-origin: center;
+    padding: 1px 5px;
+    border-radius: calc(4px * var(--radius-mult));
+    background: var(--surface);
+    border: 1px solid currentColor;
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    line-height: 1.3;
+    white-space: nowrap;
+    direction: ltr;
+  }
+
+  /* Small arrow riding just inside the line, pointing at it, tracking
+     scroll position continuously (not snapped to ticks) via its own `top`. */
+  .sa-nav-pointer {
+    position: absolute;
+    inset-inline-start: 3px;
+    top: 0%;
+    transform: translateY(-50%);
+    pointer-events: none;
+    transition: top 0.1s linear;
+  }
+  .sa-nav-pointer-arrow {
+    display: block;
+    width: 0;
+    height: 0;
+    border-top: 5px solid transparent;
+    border-bottom: 5px solid transparent;
+    border-inline-start: 7px solid var(--accent2);
+    filter: drop-shadow(0 0 4px rgba(var(--accent2-rgb), 0.65));
+  }
+}
+
+@media (min-width: 1024px) and (prefers-reduced-motion: reduce) {
+  #saNavRail,
+  .sa-nav-highlight,
+  .sa-nav-tick-mark,
+  .sa-nav-tick-label,
+  .sa-nav-flag,
+  .sa-nav-pointer {
+    transition: none;
+  }
+  .sa-nav-flag.is-entering,
+  .sa-nav-flag.is-leaving { animation: none; }
+}
+
+
+/* ── Hide the rail while the forum is open ──────────────────────────────────
+   #forumScreen opens over #appPage without ever clearing #solveAllMode's
+   "active" class, and the rail lives on <body> (not inside #appPage), so
+   nothing else hides it — it was staying visible beside the forum. Pure CSS
+   so it works for every way of opening/closing the forum, and it comes back
+   by itself once #forumScreen loses .visible/.fading-out. #appPage.fading-out
+   is included so the rail leaves together with the page it belongs to when
+   the forum opens over it. visibility:hidden (not just opacity) because the
+   rail's hit zone can still take clicks at opacity:0. */
+body:has(#forumScreen.visible) #saNavRail,
+body:has(#forumScreen.fading-out) #saNavRail,
+body:has(#appPage.fading-out) #saNavRail {
+  opacity: 0 !important;
+  visibility: hidden !important;
+  pointer-events: none !important;
+}

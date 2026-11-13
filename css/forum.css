@@ -72,7 +72,7 @@
   align-items: center;
   gap: 0.5rem;
 }
-/* All three buttons here have different text (emoji vs "✕ Close") with
+/* All three buttons here have different text (emoji vs "✕") with
    different natural line-heights, so without this they'd render at
    slightly different heights despite matching padding. Pin height+
    box-sizing explicitly instead of trying to fudge padding until they
@@ -104,7 +104,7 @@
   color: var(--muted);
   font-family: var(--mono);
   font-size: 0.82rem;
-  padding: 0.38rem 0.75rem;
+  padding: 0.38rem 0.6rem;
   border-radius: calc(6px * var(--radius-mult));
   cursor: pointer;
   transition: color 0.15s, border-color 0.15s;
@@ -373,7 +373,7 @@
 .stats-modal-btn.danger { border-color: var(--wrong); color: var(--wrong); }
 .stats-modal-btn.danger:hover { background: var(--wrong); color: var(--chrome-light); }
 
-/* ── "Getting Started!" screen (index.html #gettingStartedModalBackdrop,
+/* ── Getting Started screen (index.html #gettingStartedModalBackdrop,
    js/forum.js openGettingStartedModal/toggleGsFaq) ──
    Reuses .stats-modal-box's card skin but widens/heightens it — the FAQ
    list needs more room than a plain confirm dialog — and caps its own
@@ -386,23 +386,31 @@
   text-align: left;
 }
 .gs-modal-box .stats-modal-title { text-align: center; }
-.gs-modal-desc {
-  text-align: center;
-  margin-bottom: 1.2rem;
-}
-.gs-modal-desc strong { color: var(--text); }
-.gs-start-row { margin-bottom: 1.5rem; }
-.gs-start-btn { flex: 1; padding: 0.7rem 1.1rem; font-size: 0.85rem; }
+.gs-start-row { flex-wrap: wrap; margin-bottom: 1rem; }
+.gs-start-btn { flex: 1 1 8rem; padding: 0.7rem 1.1rem; font-size: 0.85rem; }
 
-.gs-faq-heading {
+.gs-faq-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  background: none;
+  border: none;
+  color: var(--muted);
   font-family: var(--mono);
   font-size: 0.72rem;
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--muted);
-  margin-bottom: 0.5rem;
+  padding: 0.4rem;
+  cursor: pointer;
 }
+.gs-faq-toggle:hover { color: var(--accent); }
+.gs-faq.open .gs-faq-toggle { margin-bottom: 0.5rem; }
+.gs-faq.open .gs-faq-toggle .gs-faq-caret { transform: rotate(90deg); color: var(--accent); }
+.gs-faq-list { display: none; }
+.gs-faq.open .gs-faq-list { display: block; }
 .gs-faq-item {
   border-top: 1px solid var(--border);
 }
@@ -443,6 +451,14 @@
   padding: 0 0.1rem 0.8rem;
 }
 
+.forum-claim-hint {
+  margin-top: 0.5rem;
+  color: var(--muted);
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
+#forumClaimModalDesc:empty { display: none; }
+
 .forum-composer-scope-row {
   display: flex;
   gap: 0.5rem;
@@ -450,6 +466,13 @@
 }
 .forum-scope-select {
   flex: 1 1 160px;
+  /* Flex items default to min-width:auto, which for a <select> means the
+     browser won't shrink it below the width needed to display its widest
+     *option* (e.g. a long quiz name), even while a short one like
+     "🌐 Global" is selected. On narrow screens that pushed the box past
+     the edge of the composer instead of wrapping/shrinking with it. */
+  min-width: 0;
+  max-width: 100%;
   font-family: var(--mono);
   cursor: pointer;
 }
@@ -605,7 +628,7 @@
 .forum-eq-modal-backdrop {
   position: fixed;
   inset: 0;
-  background: color-mix(in srgb, var(--shadow) calc(0.6 * 100%), transparent);
+  background: color-mix(in srgb, var(--backdrop, var(--shadow)) calc(0.6 * 100%), transparent);
   z-index: 3000;
   display: flex;
   align-items: center;
@@ -743,11 +766,14 @@
 }
 .forum-eq-modal-btn.primary:hover { opacity: 0.85; }
 
+/* min-height matches one line exactly, so "Sent." appearing (or being
+   cleared on the next send) doesn't nudge the whole list by a few px. */
 .forum-composer-status {
   font-family: var(--mono);
   font-size: 0.72rem;
+  line-height: 1.35;
   color: var(--muted);
-  min-height: 1em;
+  min-height: 1.35em;
 }
 .forum-composer-status-error { color: var(--wrong); }
 
@@ -810,12 +836,16 @@
    something anchored to *that ancestor's* box instead of the real browser
    viewport — sticky isn't affected by that, so it's the correct tool here,
    not just a stylistic choice. */
+/* Takes no room in the flow (the negative bottom margin equals its own
+   height), so showing or hiding it never shifts the list under the reader;
+   it floats over the first row instead. */
 .forum-new-msgs-pill {
   position: sticky;
   top: 0.6rem;
   z-index: 10;
   width: fit-content;
-  margin: 0 auto 0.6rem;
+  line-height: 1.4;
+  margin: 0 auto calc(-1 * (0.72rem * 1.4 + 0.64rem));
   background: var(--accent);
   color: var(--bg);
   font-family: var(--mono);
@@ -897,6 +927,85 @@
 }
 .forum-message-enter {
   animation: forumMessageEnter 0.3s ease;
+}
+
+/* "Gemini is thinking" row (forumBuildGeminiThinkingRow in forum.js): the
+   same shape as Gemini's answer will have, so the answer can take its place
+   with only the text and the height changing. One line of status words that
+   swap every few seconds, a soft shimmer over them, three bouncing dots, and
+   the seconds so far where the time goes. */
+.forum-gemini-thinking .forum-message-time { font-variant-numeric: tabular-nums; }
+.forum-gemini-thinking-line {
+  display: flex;
+  align-items: flex-end;
+}
+.forum-gemini-phrase { min-width: 0; }
+.forum-gemini-phrase {
+  color: var(--muted);
+  background: linear-gradient(90deg, var(--muted) 0%, var(--muted) 35%, var(--text) 50%, var(--muted) 65%, var(--muted) 100%);
+  background-size: 250% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: forumGeminiShimmer 2.4s linear infinite;
+  transition: opacity 0.22s ease, transform 0.22s ease;
+}
+.forum-gemini-phrase.is-swapping { opacity: 0; transform: translateY(3px); }
+@keyframes forumGeminiShimmer {
+  from { background-position: 100% 0; }
+  to   { background-position: 0% 0; }
+}
+/* Clear of the text (its last letter, the shimmer, the swap's slide). */
+.forum-gemini-dots {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 3px;
+  margin: 0 0 0.42em 0.55rem;
+}
+/* Answer text streamed in so far (forumGeminiRenderStream): lines are built
+   out of flow (absolute) while MathJax works on them. */
+.forum-gemini-stream { position: relative; margin-bottom: 0.25rem; }
+/* Where streamed lines wait, already typeset, for their turn to show
+   (forumGeminiPrepare): full width, so MathJax measures them as they will
+   be shown, but out of the flow and invisible. */
+.forum-gemini-stage {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+.forum-gemini-dots i {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--muted);
+  animation: forumGeminiDot 1.2s ease-in-out infinite;
+}
+.forum-gemini-dots i:nth-child(2) { animation-delay: 0.15s; }
+.forum-gemini-dots i:nth-child(3) { animation-delay: 0.3s; }
+@keyframes forumGeminiDot {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.35; }
+  30%           { transform: translateY(-3px); opacity: 1; }
+}
+.forum-gemini-thinking .gemini-mark { animation: forumGeminiPulse 1.8s ease-in-out infinite; }
+@keyframes forumGeminiPulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50%      { transform: scale(0.86); opacity: 0.75; }
+}
+/* No answer coming: the note stays still and plain until the row folds. */
+.forum-gemini-thinking.is-ended .forum-gemini-phrase {
+  animation: none;
+  -webkit-text-fill-color: var(--muted);
+  font-style: italic;
+}
+.forum-gemini-thinking.is-ended .forum-gemini-dots,
+.forum-gemini-thinking.is-ended .gemini-mark { animation: none; }
+.forum-gemini-thinking.is-ended .forum-gemini-dots { display: none; }
+@media (prefers-reduced-motion: reduce) {
+  .forum-gemini-phrase, .forum-gemini-dots i, .forum-gemini-thinking .gemini-mark { animation: none; }
+  .forum-gemini-phrase { -webkit-text-fill-color: var(--muted); }
 }
 
 /* Official Gemini bot avatar — only ever attached to rows whose device_id
@@ -1108,6 +1217,19 @@
   opacity: 0.55;
   line-height: 1.45;
 }
+/* Stand-in for an &...&/&&...&& LaTeX-shorthand span while a just-sent
+   message is still waiting on the server's conversion pass — see
+   FORUM_LATEX_ASSIST_RE in forum.js and applyLatexAssist in
+   post-message.ts, which this mirrors client-side. Same muted/italic
+   treatment as .forum-message-deleted-notice above (the ban-reason-style
+   grey the person asked for), but inline rather than block-level since it
+   only replaces the matched span, not the whole message. */
+.forum-latex-pending {
+  font-style: italic;
+  color: var(--muted);
+  opacity: 0.6;
+  cursor: default;
+}
 .forum-message-body {
   font-family: var(--sans);
   font-size: 0.86rem;
@@ -1151,6 +1273,7 @@
   overflow-x: auto;
   overflow-y: hidden;
   max-width: 100%;
+  min-width: initial !important;   /* see the \tag note in css/figure.css */
   padding: 0.15rem 0;
   margin: 0.15rem -0.15rem;
 }
@@ -1414,7 +1537,7 @@
   }
   .forum-header { margin-bottom: 0.8rem; }
   .forum-title { font-size: 1rem; }
-  .forum-close-btn { padding: 0.32rem 0.6rem; font-size: 0.76rem; }
+  .forum-close-btn { padding: 0.32rem 0.5rem; font-size: 0.76rem; }
 
   .forum-composer { padding: 0.65rem 0.7rem; gap: 0.45rem; }
 
@@ -1444,4 +1567,97 @@
   .forum-message-avatar-spacer { width: 22px; height: 22px; }
   .forum-message-avatar img.gemini-mark { width: 15px; height: 15px; }
   .forum-message-body { font-size: 0.84rem; }
+}
+
+
+/* The database is off (js/db-status.js): the box says so, and what needs it
+   goes. Messages this tab already loaded stay readable. */
+html.db-offline #forumComposer,
+html.db-offline #forumFilters,
+html.db-offline #forumSearchBar,
+html.db-offline #forumSearchToggleBtn,
+html.db-offline #forumPushToggleBtn,
+html.db-offline #forumLoadMoreBtn,
+html.db-offline #forumMessageList:has(> .forum-status) { display: none !important; }
+
+/* ── Accounts made while the database is offline (js/offline-account.js) ──
+   .acct-modal: the layout of the windows for those accounts (rename, a week
+   offline, and the claim window in its two offline modes). Left-aligned
+   text reads better than centered once it runs past a line or two; the field
+   and its status sit together, the status takes no room until it has
+   something to say, and the buttons line up on the right, with a quieter
+   action (a link, or Back) pushed to the left. On a phone the buttons stack,
+   primary first. */
+.gs-offline-note,
+.acct-note {
+  padding: 0.65rem 0.85rem;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 0.8rem;
+  line-height: 1.5;
+  text-align: left;
+}
+.gs-offline-note { margin: 0 0 1rem; background: var(--surface); }
+.acct-note { margin: -0.4rem 0 1.2rem; color: var(--muted); }
+
+.stats-modal-box.acct-modal {
+  max-width: 400px;
+  padding: 1.6rem 1.7rem 1.5rem;
+  text-align: left;
+}
+.acct-modal .stats-modal-title { font-size: 0.95rem; margin-bottom: 0.7rem; text-align: center; }
+.acct-modal .stats-modal-desc,
+.acct-text {
+  margin: 0 0 0.8rem;
+  font-size: 0.84rem;
+  line-height: 1.55;
+  color: var(--text);
+  text-align: left;
+}
+.acct-text-quiet { color: var(--muted); font-size: 0.8rem; }
+.acct-name { font-weight: 600; color: var(--accent); }
+.acct-field { display: flex; flex-direction: column; gap: 0.4rem; margin-top: 1.1rem; }
+.acct-modal .forum-name-input,
+.acct-modal #forumClaimNicknameInput { text-align: left; padding: 0.6rem 0.75rem; font-size: 0.9rem; }
+.acct-modal .forum-composer-status:empty { display: none; }
+.acct-label {
+  margin: 1.1rem 0 0.4rem;
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.offline-message-box {
+  padding: 0.75rem 0.9rem;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 0.84rem;
+  line-height: 1.55;
+  user-select: text;
+}
+.offline-message-box + .forum-composer-status { margin-top: 0.45rem; }
+.acct-modal .acct-actions {
+  justify-content: flex-end;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 1.4rem;
+}
+.acct-modal .acct-aside { margin-right: auto; }
+.acct-modal .forum-identity-link-btn { font-size: 0.75rem; align-self: center; }
+/* The claim window keeps its own link out of the way in the offline modes. */
+.acct-modal #forumClaimModalRestoreLink { display: none !important; }
+a.stats-modal-btn { display: inline-flex; align-items: center; justify-content: center; text-decoration: none; }
+
+@media (max-width: 480px) {
+  .stats-modal-box.acct-modal { padding: 1.4rem 1.25rem 1.25rem; }
+  .acct-modal .acct-actions { flex-direction: column-reverse; align-items: stretch; }
+  .acct-modal .acct-actions > * { width: 100%; box-sizing: border-box; padding-top: 0.7rem; padding-bottom: 0.7rem; }
+  .acct-modal .acct-aside { margin-right: 0; }
+  .acct-modal .forum-identity-link-btn { padding: 0.35rem 0; }
 }

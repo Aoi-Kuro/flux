@@ -5,21 +5,14 @@
 // file never calls .insert() directly.
 
 const FORUM_PAGE_SIZE       = 25;
-// Kept equal to FORUM_PROBLEM_COUNTS_POLL_MS (defined further down, next to
-// the per-problem buttons it refreshes) on purpose: the corner FAB shows the
-// same badge as the main-screen launch button, and both are visible at the
-// same time as the per-problem "sa-forum-badge-i"/"rq-forum-badge-i" buttons
-// during solve-all/Random 6, so they need to visibly tick over together
-// rather than one looking stuck.
-const FORUM_POLL_INTERVAL_MS = 5000;
 const FORUM_LAST_SEEN_KEY   = STORAGE_PREFIX + '_forum_last_seen_id';
 
-// How often to check for brand-new messages while the forum screen itself is
-// open and being read. Separate from FORUM_POLL_INTERVAL_MS above, which is
-// the much slower "unread badge on the main screen" poll and is paused the
-// whole time this one is running (see startForumLivePolling/stopForumPolling
-// call sites in openForumScreen/closeForumScreen).
-const FORUM_LIVE_POLL_MS = 3000;
+// The unread badge, the forum-screen live tick, and the per-problem counts
+// (solve-all/Random 6) used to be three independent setInterval polls
+// (5s/5s/3s). They now all share ONE Realtime subscription instead — see
+// _ensureForumRealtime/_forumRealtimeWake below getForumClient() — so they
+// naturally tick over together (and instantly, on an actual change, rather
+// than up to an interval late) with no separate constants needed here.
 
 // Sentinel device_id the Gemini bot's own inserts use (post-message.ts,
 // GEMINI_BOT_DEVICE_ID) — kept in sync manually with that file. This is what
@@ -29,6 +22,24 @@ const FORUM_LIVE_POLL_MS = 3000;
 // a human-submitted post use this exact device_id, which is what actually
 // makes that distinction trustworthy rather than cosmetic.
 const FORUM_GEMINI_BOT_DEVICE_ID = '00000000-0000-4000-8000-000000000001';
+
+// Mirrors post-message.ts's LATEX_ASSIST_RE exactly (kept in sync manually,
+// same relationship as FORUM_GEMINI_BOT_DEVICE_ID above) — used purely to
+// detect &content&/&&content&& shorthand client-side so an optimistically-
+// rendered message (see submitForumMessage) can grey those spans out as
+// "pending LaTeX conversion" instead of showing the raw shorthand while the
+// real conversion happens server-side. &&...&& (display) is matched before
+// lone &...& (inline) so a display block can't be misread as two inlines.
+const FORUM_LATEX_ASSIST_RE = /&&([\s\S]+?)&&|&([^&\n]+?)&/g;
+// Same pattern without the /g flag, used only for the cheap "does this text
+// contain any shorthand at all" boolean check — a global regex's .test()
+// mutates lastIndex across calls, which would be a footgun for a boolean
+// helper other code calls freely.
+const FORUM_LATEX_ASSIST_TEST_RE = /&&([\s\S]+?)&&|&([^&\n]+?)&/;
+
+function forumHasLatexShorthand(text) {
+  return FORUM_LATEX_ASSIST_TEST_RE.test(text || '');
+}
 
 // ── Posting bans (escalating from red-flagged/deleted messages) ────────────
 // See superbase/edge-functions/flag-message.ts (issues the ban) and
@@ -135,8 +146,6 @@ let forumFilterProblemId = '';
 let forumOldestLoadedId = null; // cursor: fetch rows with id < this to go older
 let forumNoMoreOlder    = false;
 let forumLoadingMore    = false;
-let forumPollTimer      = null;
-let forumLiveTimer      = null; // separate interval that runs only while the forum screen is open (see FORUM_LIVE_POLL_MS)
 // ── Search (forumSearchActive true means the message list below the search
 // bar shows fetchForumSearchResults() output instead of the current
 // forumFilter's normal feed — see toggleForumSearch()/runForumSearch() ──
@@ -198,6 +207,165 @@ function getForumClient() {
   forumClient = supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
   return forumClient;
 }
+
+// ── Shared Realtime channel driving unread badge / live tick / problem counts ──
+// Previously these were three independent setInterval loops (5s/3s/5s), each
+// polling forum_messages_public on its own clock even when nothing had
+// changed — most of that traffic was wasted. forum_messages is already
+// public-readable via the anon key (that's how the polling above works), so
+// instead we open ONE Realtime subscription on the underlying table and let
+// its change events wake up whichever of the three is currently "active"
+// (same start/stop functions and gating as before — see startForumPolling,
+// startForumLivePolling, startForumProblemCountsPolling below). A slow
+// fallback timer covers the rare case of a dropped/missed socket event, so
+// nothing ever goes silently stale. Its interval is site-version.json's
+// "poll.forum" (js/site-config.js), 90 s by default.
+// Quiet mode: when nobody has posted for 24h, the fallback above slows to
+// "poll.forum_quiet" (15 minutes by default), since Realtime still delivers
+// a new message the moment it is posted and the fallback is only a safety
+// net. A new message seen through a Realtime insert, the forum screen's
+// refresh or the quiet check switches straight back to "poll.forum". Never
+// applies while the forum screen itself is open.
+const FORUM_QUIET_AFTER_MS       = 24 * 60 * 60 * 1000;
+let _forumRealtimeChannel      = null;
+let _forumRealtimeFallbackTimer = null;
+let _forumLastFallbackAt       = 0;
+let _forumNewestMessageAt      = null; // ms; null until known, which counts as active
+let _forumUnreadActive         = false;
+let _forumLiveActive           = false;
+let _forumProblemCountsActive  = false;
+
+function _forumNoteMessageAt(iso) {
+  const t = Date.parse(iso);
+  if (Number.isFinite(t) && (_forumNewestMessageAt === null || t > _forumNewestMessageAt)) _forumNewestMessageAt = t;
+}
+
+function _forumIsQuiet() {
+  return !forumScreenOpen
+    && _forumNewestMessageAt !== null
+    && Date.now() - _forumNewestMessageAt > FORUM_QUIET_AFTER_MS;
+}
+
+// One row, one column: when the newest visible message was posted.
+async function _forumRefreshNewestMessageAt() {
+  const client = getForumClient();
+  if (!client) return;
+  const { data, error } = await client
+    .from('forum_messages_public')
+    .select('created_at')
+    .order('id', { ascending: false })
+    .limit(1);
+  if (!error && data && data[0]) _forumNoteMessageAt(data[0].created_at);
+}
+
+function _forumRealtimeWake() {
+  // Each callee has its own internal guard (forumScreenOpen, etc.) so it's
+  // always safe to just ask all three "are you active?" — no double logic.
+  if (_forumUnreadActive) pollForumUnread();
+  if (_forumLiveActive) forumLiveTick();
+  if (_forumProblemCountsActive) forumCountsByProblemKey().then(applyForumProblemCounts);
+  // js/stats.js's panel dials (total_participants, my_total_messages) are
+  // driven by RPCs, not a table Realtime can subscribe to directly — this
+  // lets that panel piggyback on this already-open channel instead of
+  // needing one of its own. No-op if stats.js never loaded/no listener.
+  document.dispatchEvent(new Event('forum-data-changed'));
+}
+
+// Tracks whether this channel has ever reached SUBSCRIBED before, so we can
+// tell "first connect" (already covered by each start*Polling's own
+// immediate check) apart from "RECONNECTED after actually dropping" (laptop
+// slept, wifi hiccup, tab backgrounded and throttled...) — in the second
+// case something could genuinely have happened while we were gone, so we
+// don't want to just sit there waiting for the next push or the 90s
+// fallback; catch up immediately instead.
+let _forumRealtimeEverConnected = false;
+// The channel is SUBSCRIBED right now: the fallback check then only covers
+// a missed push, so it waits "poll.forum_live" (5 min by default) instead
+// of "poll.forum" (same reasoning as js/attempts-sync.js's fallback poll).
+let _forumRealtimeLive = false;
+
+// One fallback check, if its interval is up: 90s, 5 min while the Realtime
+// channel is connected, or 15 min when quiet (whichever is longest).
+// Runs from the timer and when the tab comes back into view; a hidden tab
+// skips it. The few seconds of slack keep a timer tick that fires a little
+// early from being skipped for a whole extra interval.
+function _forumFallbackTick() {
+  if (document.hidden) return;
+  const quiet = _forumIsQuiet();
+  const every = Math.max(sitePollMs(quiet ? 'forum_quiet' : 'forum'), _forumRealtimeLive ? sitePollMs('forum_live') : 0);
+  if (Date.now() - _forumLastFallbackAt < every - 5000) return;
+  // Catches a message whose Realtime event was missed even when no poll
+  // below is active to notice it, so quiet mode can end.
+  if (quiet) _forumRefreshNewestMessageAt();
+  _forumLastFallbackAt = Date.now();
+  _forumRealtimeWake();
+}
+
+// Switching back to the tab checks only if the tab was away longer than the
+// fallback interval. The channel stays subscribed while hidden, so anything
+// posted meanwhile already arrived through Realtime; checking on every
+// switch was one request per tab switch (HAR, 2026-10-22).
+document.addEventListener('visibilitychange', () => {
+  if (_forumRealtimeFallbackTimer) _forumFallbackTick();
+});
+
+function _ensureForumRealtime() {
+  if (!_forumRealtimeFallbackTimer) {
+    _forumLastFallbackAt = Date.now(); // each start*Polling already checks once right away
+    if (_forumNewestMessageAt === null) _forumRefreshNewestMessageAt();
+    _forumRealtimeFallbackTimer = startSitePoll('forum', _forumFallbackTick);
+  }
+  if (_forumRealtimeChannel || siteOff('realtime')) return; // "off" in site-version.json: the fallback tick carries it alone
+  const client = getForumClient();
+  if (!client) return;
+  const channel = client
+    .channel('forum-messages-changes')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'forum_messages' }, (payload) => {
+      if (payload && payload.eventType === 'INSERT' && payload.new) _forumNoteMessageAt(payload.new.created_at || new Date().toISOString());
+      _forumRealtimeWake();
+    })
+    // post-message.ts says when Gemini is done with a question, answered or
+    // not, so a "thinking" row with no answer coming can end right away.
+    .on('broadcast', { event: 'gemini-done' }, (msg) => forumGeminiServerDone(msg && msg.payload))
+    .on('broadcast', { event: 'gemini-stream' }, (msg) => forumGeminiStream(msg && msg.payload));
+  _forumRealtimeChannel = channel;
+  channel.subscribe((status) => {
+    // A channel already dropped by _forumDropRealtimeChannel reports its
+    // own CLOSED late; it must not mark the current one as down.
+    if (channel !== _forumRealtimeChannel) return;
+    _forumRealtimeLive = status === 'SUBSCRIBED';
+    if (status !== 'SUBSCRIBED') return;
+    if (_forumRealtimeEverConnected) _forumRealtimeWake(); // reconnect, not first connect — catch up now
+    _forumRealtimeEverConnected = true;
+  });
+}
+
+// Tears the socket down once nothing needs it — no point holding a
+// connection open (or paying any of its keep-alive traffic) when the badge
+// isn't showing, the forum isn't open, and solve-all isn't open.
+function _maybeTeardownForumRealtime() {
+  if (_forumUnreadActive || _forumLiveActive || _forumProblemCountsActive) return;
+  _forumRealtimeFallbackTimer = stopSitePoll(_forumRealtimeFallbackTimer);
+  _forumDropRealtimeChannel();
+}
+
+function _forumDropRealtimeChannel() {
+  if (_forumRealtimeChannel) {
+    const client = getForumClient();
+    if (client) client.removeChannel(_forumRealtimeChannel);
+    _forumRealtimeChannel = null;
+    _forumRealtimeLive = false;
+    _forumRealtimeEverConnected = false; // next _ensureForumRealtime() starts a fresh channel/first-connect
+  }
+}
+
+// Realtime switched off in site-version.json (js/site-config.js): keep the
+// fallback tick, drop only the socket. Switched back on: reopen it if
+// anything still uses it.
+document.addEventListener('site-config-changed', (e) => {
+  if (e.detail.after.off.includes('realtime')) _forumDropRealtimeChannel();
+  else if (_forumUnreadActive || _forumLiveActive || _forumProblemCountsActive) _ensureForumRealtime();
+});
 
 // ── Local "last seen" tracking (drives the unread badge) ────────────────────
 function getForumLastSeenId() {
@@ -330,7 +498,11 @@ function forumTagInfo(scope, problemKey) {
   const m = /^q(\d+)_(.+)$/i.exec(problemKey);
   if (!m) return { label: problemKey, color: null };
   const quizNum = m[1];
-  const probId  = m[2].toUpperCase();
+  // "general" threads keep their GENERAL tag; real problems show their
+  // CURRENT number ("P12") or "DEL" if retired — never the stored id.
+  const probId  = m[2].toLowerCase() === 'general' || typeof problemLabel !== 'function'
+    ? m[2].toUpperCase()
+    : problemLabel(parseInt(quizNum, 10), m[2]);
   return { label: `Q${quizNum}—${probId}`, color: `var(--q${quizNum})` };
 }
 
@@ -343,6 +515,127 @@ function getForumDeviceId() {
   }
   return id;
 }
+
+// device_id is shown to every reader of the forum (it rides along on every
+// message via forum_messages_public), so it can never be trusted as proof
+// of "this is my device" on its own — see migration
+// 001_device_secrets.sql. This secret is the actual proof: generated once,
+// right alongside device_id, and never sent anywhere except in this
+// device's own requests. The server registers whatever secret it sees the
+// very first time a device_id shows up (trust-on-first-use) and checks
+// against that same value on every later request for that device_id — so
+// this only needs to be generated once, exactly like device_id itself, not
+// re-issued or rotated by any explicit "register" call.
+const FORUM_DEVICE_SECRET_KEY = STORAGE_PREFIX + '_forum_device_secret';
+function getForumDeviceSecret() {
+  let secret = localStorage.getItem(FORUM_DEVICE_SECRET_KEY);
+  if (!secret) {
+    // 32 random bytes as hex (64 chars) — comfortably within the
+    // server-side 16-200 char bound and unguessable regardless of how
+    // public device_id itself is.
+    const bytes = new Uint8Array(32);
+    crypto.getRandomValues(bytes);
+    secret = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+    localStorage.setItem(FORUM_DEVICE_SECRET_KEY, secret);
+  }
+  return secret;
+}
+
+// Short-lived device-verification token cache. device_secret above still
+// gets sent on every write-path call (it's the real credential and the
+// server always accepts it as a fallback) — this just lets the server skip
+// its device_secrets DB lookup when a still-valid token from a previous
+// call is present, which was the single biggest source of Supabase Log
+// Ingestion/Query volume (device_secrets + identity_devices checks were
+// 55% of all request logs in a 2026-09-25 sample). Every write-path
+// response includes a fresh { device_token, device_token_expires_at } pair
+// on success — callers should pass the result of applyDeviceToken(json) on
+// every response they receive, so the cache stays current automatically.
+const FORUM_DEVICE_TOKEN_KEY = STORAGE_PREFIX + '_forum_device_token';
+function getDeviceToken() {
+  let cached;
+  try {
+    cached = JSON.parse(localStorage.getItem(FORUM_DEVICE_TOKEN_KEY) || 'null');
+  } catch {
+    return null;
+  }
+  if (!cached || typeof cached.t !== 'string' || typeof cached.exp !== 'number') return null;
+  // 30s safety margin so a token doesn't expire mid-flight to the server.
+  if (Date.now() / 1000 > cached.exp - 30) return null;
+  return cached.t;
+}
+function setDeviceToken(token, expiresAt) {
+  if (typeof token !== 'string' || typeof expiresAt !== 'number') return;
+  localStorage.setItem(FORUM_DEVICE_TOKEN_KEY, JSON.stringify({ t: token, exp: expiresAt }));
+}
+// Call with the parsed JSON body of any write-path response (post-message,
+// edit-message, sync-quiz-attempts, sync-solve-all, claim/drop-nickname,
+// flag-message, save-push-subscription). No-ops if the fields aren't
+// present, so it's always safe to call unconditionally.
+// Same idea as the device token above, but for device_id -> identity_id
+// resolution (identity_devices), and deliberately much shorter-lived: an
+// identity can be reassigned to a different device mid-session (exit, then
+// claim a new nickname), so a stale cache here risks attributing a post/
+// edit/sync to the WRONG identity, not just extra log volume. Two things
+// bound that risk: the short TTL matching the server's own
+// IDENTITY_TOKEN_TTL_SECONDS, and drop-nickname's exit sending
+// clear_identity_token so this tab (and, via the storage listener below,
+// every other open tab) drops the cached value immediately rather than
+// waiting out the TTL.
+const FORUM_IDENTITY_TOKEN_KEY = STORAGE_PREFIX + '_forum_identity_token';
+function getIdentityToken() {
+  let cached;
+  try {
+    cached = JSON.parse(localStorage.getItem(FORUM_IDENTITY_TOKEN_KEY) || 'null');
+  } catch {
+    return null;
+  }
+  if (!cached || typeof cached.t !== 'string' || typeof cached.exp !== 'number') return null;
+  if (Date.now() / 1000 > cached.exp - 10) return null; // smaller margin — TTL itself is only ~5min
+  return cached.t;
+}
+function setIdentityToken(token, expiresAt) {
+  if (typeof token !== 'string' || typeof expiresAt !== 'number') return;
+  localStorage.setItem(FORUM_IDENTITY_TOKEN_KEY, JSON.stringify({ t: token, exp: expiresAt }));
+}
+function clearIdentityToken() {
+  localStorage.removeItem(FORUM_IDENTITY_TOKEN_KEY);
+}
+
+// Call with the parsed JSON body of any write-path response (post-message,
+// edit-message, sync-quiz-attempts, sync-solve-all, claim/drop-nickname,
+// flag-message, save-push-subscription). No-ops if the fields aren't
+// present, so it's always safe to call unconditionally.
+function applyDeviceToken(responseJson) {
+  if (responseJson && responseJson.device_token && responseJson.device_token_expires_at) {
+    setDeviceToken(responseJson.device_token, responseJson.device_token_expires_at);
+  }
+  if (responseJson && responseJson.identity_token && responseJson.identity_token_expires_at) {
+    setIdentityToken(responseJson.identity_token, responseJson.identity_token_expires_at);
+  } else if (responseJson && responseJson.clear_identity_token) {
+    clearIdentityToken();
+  }
+  return responseJson;
+}
+
+// Cross-tab half of the exit-clears-the-cache guarantee above. localStorage
+// is one shared store per origin, so the moment ANY tab's exit clears
+// FORUM_IDENTITY_TOKEN_KEY, every OTHER already-open tab gets a native
+// 'storage' event for it (the tab that made the change does not — that's
+// standard browser behavior, not something this code has to arrange). The
+// underlying auth is already correct at that point (every call reads the
+// key fresh from localStorage, never a cached JS variable) — this reload is
+// purely so a reopened/background tab's displayed nickname/avatar/forum
+// state doesn't keep showing an identity that already exited elsewhere.
+// Deferred, not skipped, if a quiz timer is live in this tab — same
+// courtesy js/quiz-engine.js's own update-reload logic already uses.
+window.addEventListener('storage', (event) => {
+  if (event.key !== FORUM_IDENTITY_TOKEN_KEY || event.newValue !== null) return;
+  const timerActive = (typeof isQuizTimerActive === 'function') && isQuizTimerActive();
+  if (timerActive) return; // this tab will just re-resolve identity fresh on its next call instead
+  location.reload();
+});
+
 function getForumSavedName() {
   return localStorage.getItem(FORUM_NAME_KEY) || '';
 }
@@ -362,8 +655,14 @@ function getForumPin() {
   return localStorage.getItem(FORUM_PIN_KEY) || '';
 }
 function saveForumIdentity(nickname, pin) {
+  const before = getForumNickname();
   localStorage.setItem(FORUM_NICKNAME_KEY, nickname);
   if (pin) localStorage.setItem(FORUM_PIN_KEY, pin);
+  // A real account replaces one made offline (js/offline-account.js).
+  if (typeof clearPendingAccount === 'function') clearPendingAccount();
+  // A newly claimed or restored nickname: fetch its settings now rather
+  // than on the next fallback check (js/settings-sync.js).
+  if (nickname !== before && typeof syncSettingsNow === 'function') setTimeout(syncSettingsNow, 0);
 }
 function clearForumIdentity() {
   localStorage.removeItem(FORUM_NICKNAME_KEY);
@@ -386,9 +685,17 @@ async function callForumClaimNickname(nickname, pin) {
       'apikey': SUPABASE_PUBLISHABLE_KEY,
       'Authorization': `Bearer ${SUPABASE_PUBLISHABLE_KEY}`,
     },
-    body: JSON.stringify({ device_id: getForumDeviceId(), nickname, pin: pin || undefined }),
+    body: JSON.stringify({
+      device_id: getForumDeviceId(),
+      device_secret: getForumDeviceSecret(),
+      device_token: getDeviceToken() || undefined,
+      identity_token: getIdentityToken() || undefined,
+      nickname,
+      pin: pin || undefined,
+    }),
   });
   const data = await res.json().catch(() => null);
+  applyDeviceToken(data);
   return { ok: res.ok, status: res.status, data };
 }
 
@@ -441,6 +748,8 @@ function renderLandingIdentity(nickname) {
   // state itself the moment demon mode actually ends (tap, or the next
   // splash change).
   if (typeof isLandingDemonActive === 'function' && isLandingDemonActive()) return;
+  // An account made offline shows too, before it is registered.
+  if (!nickname && typeof pendingAccountName === 'function') nickname = pendingAccountName();
 
   if (!nickname) {
     btn.style.display = 'none';
@@ -474,6 +783,20 @@ function populateForumComposerQuizSelect(selectId = 'forumScopeQuizSelect') {
 // (no specific problem) — see buildForumScopePayload() for how that's
 // encoded. selectId defaults to the composer's own select, same reasoning
 // as populateForumComposerQuizSelect above.
+// A retired problem isn't offered as a place to post (it's not in
+// quiz.problems), but if the thread the user is already IN belongs to one —
+// opened from review, replying to / editing a message in it — its option must
+// still exist, or the select would silently snap to "General" and the post/edit
+// would land in the wrong thread. Value stays the stored id; text is "DEL".
+function _forumAppendRetiredOption(sel, quizNum, problemId) {
+  if (!sel || !problemId || problemId === 'general') return;
+  if (typeof isProblemRetired !== 'function' || !isProblemRetired(parseInt(quizNum, 10), problemId)) return;
+  const opt = document.createElement('option');
+  opt.value = problemId;
+  opt.textContent = 'DEL';
+  sel.appendChild(opt);
+}
+
 function populateForumComposerProblemSelect(quizValue, selectId = 'forumScopeProblemSelect') {
   const sel = document.getElementById(selectId);
   if (!sel) return;
@@ -487,13 +810,16 @@ function populateForumComposerProblemSelect(quizValue, selectId = 'forumScopePro
   sel.appendChild(generalOpt);
 
   if (quiz && Array.isArray(quiz.problems)) {
-    quiz.problems.forEach(p => {
+    quiz.problems.forEach((p) => {
       const opt = document.createElement('option');
-      opt.value = p.id;
-      opt.textContent = p.id;
+      opt.value = p.id;                                              // stored key — stable
+      opt.textContent = problemLabel(parseInt(quizNum, 10), p.id);   // what the user sees — current number
       sel.appendChild(opt);
     });
   }
+  // The edit modal's select tracks forumEditProblemId; the composer's tracks
+  // forumComposerProblemId — both are set before this runs (see callers).
+  _forumAppendRetiredOption(sel, quizNum, selectId === 'forumEditProblemSelect' ? forumEditProblemId : forumComposerProblemId);
 }
 
 function onForumScopeQuizChange() {
@@ -669,6 +995,817 @@ async function jumpForumToMessage(id) {
   if (row) highlightForumRow(row);
 }
 
+// ── Composer: optimistic send ────────────────────────────────────────────
+// submitForumMessage() below renders the message into the feed the instant
+// Send is tapped — before the claim check, moderation, or LaTeX-assist
+// conversion have even run — so it reads as "already posted", not
+// "sending". forumRevertOptimisticSend() tears the placeholder back out
+// and puts the typed text back in the composer if the server ultimately
+// rejects it (moderation, a ban, a network hiccup, a LaTeX-assist
+// failure) — same end state as if Send had never been tapped.
+// forumResolveOptimisticSend() swaps the placeholder for the real row once
+// the server confirms it, in place, so nothing else in the list re-renders
+// or flashes.
+let forumOptimisticSeq = 0;
+function forumNextOptimisticId() {
+  return `pending-${Date.now()}-${++forumOptimisticSeq}`;
+}
+
+// Only fills in the fields renderForumMessage() actually reads — everything
+// left unset (flag_status, edited_at, ...) reads the same as "not
+// flagged"/"not edited" everywhere those are checked.
+function forumBuildOptimisticMessage(tempId, { name, body, scope, problem_key, replySnapshot }) {
+  return {
+    id: tempId,
+    created_at: new Date().toISOString(),
+    author_name: name,
+    device_id: getForumDeviceId(),
+    body,
+    scope,
+    problem_key,
+    avatar_svg: getCachedAvatarSvg(name) || '',
+    reply_to_id: replySnapshot ? replySnapshot.id : null,
+    reply_to_author_name: replySnapshot ? replySnapshot.author : null,
+    reply_to_body: replySnapshot ? replySnapshot.snippet : null,
+    reply_to_flag_status: null,
+  };
+}
+
+// Drops in a status placeholder ('Loading…'/'Nothing's there…', see
+// setForumStatus) instead of real rows — clear it out first so the
+// optimistic row has an actual list to land in.
+function forumInsertOptimisticRow(row) {
+  const list = document.getElementById('forumMessageList');
+  if (!list) return;
+  if (list.querySelector('.forum-status')) list.innerHTML = '';
+  list.insertBefore(row, forumListTopAnchor(list));
+  forumRevealRow(row);
+}
+
+// ── Smooth row motion ───────────────────────────────────────────────────────
+// Every change at the top of the list used to land in a single frame: a new
+// row pushed everything below it down by its full height at once, and a row
+// whose body changed (LaTeX shorthand converted, math typeset) snapped to its
+// new height. These helpers make the list move instead: a new row unfolds
+// from zero height, a row that changes height stretches to it. Each waits
+// for the row's MathJax pass first (row._typeset, set by renderForumMessage),
+// so the height it animates to is the final one, and raw "$...$" is never
+// shown on the way.
+const FORUM_ROW_MOTION_MS = 280;
+
+function forumReduceMotion() {
+  return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+}
+
+// Resolves once the row's math is typeset (capped, so a stuck MathJax never
+// holds a row back), plus two frames: one for MathJax's stylesheet to apply,
+// one so the layout work that causes is done before an animation starts
+// (started any earlier, its first painted frame lands half way through).
+function forumRowTypeset(row, capMs = 500) {
+  const done = row && row._typeset ? row._typeset : Promise.resolve();
+  const frame = () => new Promise((r) => requestAnimationFrame(() => r()));
+  return Promise.race([done, new Promise((r) => setTimeout(r, capMs))]).then(frame).then(frame);
+}
+
+// Typesets and measures a row off screen at the list's width, so the row it
+// replaces can stay on screen meanwhile. Resolves with the row's height.
+function forumStageRow(row, list) {
+  const sizer = document.createElement('div');
+  sizer.className = list.className;
+  sizer.setAttribute('aria-hidden', 'true');
+  sizer.style.cssText = `position:fixed;left:-10000px;top:0;visibility:hidden;pointer-events:none;width:${list.getBoundingClientRect().width}px`;
+  sizer.append(row, document.createElement('div')); // so the row isn't :last-child
+  document.body.appendChild(sizer);
+  // A long cap: the row being replaced stays on screen meanwhile, so waiting
+  // for a long answer's math costs nothing, and swapping early would let the
+  // height jump once MathJax finishes.
+  return forumRowTypeset(row, 8000).then(() => {
+    const h = row.offsetHeight;
+    row.remove();
+    sizer.remove();
+    return h;
+  });
+}
+
+// The first child of the list that new rows go in front of: Gemini's
+// "thinking" rows always stay above everything, because the answer they
+// stand in for will be the newest message once it lands.
+function forumListTopAnchor(list) {
+  let el = list.firstChild;
+  while (el && el.dataset && el.dataset.geminiWait) el = el.nextSibling;
+  return el;
+}
+
+// Whether the top of the list, where new rows land, is on screen. Changes
+// there animate; above the reader's view they happen at once, with the scroll
+// position adjusted so what they are reading stays put.
+function forumListNearTop() {
+  const list = document.getElementById('forumMessageList');
+  if (!list) return window.scrollY < 40;
+  return list.getBoundingClientRect().top >= 0;
+}
+
+// Height changes step once per painted frame instead of following the clock.
+// While the page is busy (MathJax typesetting a long thread blocks the main
+// thread for 100-500 ms at a time, mostly right after the forum opens), a
+// clock-driven animation skips to its end during the stall and the row jumps
+// anyway; this one just pauses there and carries on, so no frame moves more
+// than a small step. ~17 frames for FORUM_ROW_MOTION_MS on a 60 Hz screen.
+// A newer tween on the same element supersedes an older one (resolves false).
+function forumTweenHeight(el, fromH, toH, ms, onStep) {
+  const frames = Math.max(2, Math.round(ms / 16.7));
+  const token = (el._tween = (el._tween || 0) + 1);
+  el._tweening = true;
+  el.style.overflow = 'hidden';
+  el.style.height = fromH + 'px';
+  return new Promise((resolve) => {
+    let i = 0;
+    const step = () => {
+      if (el._tween !== token) { resolve(false); return; }
+      i += 1;
+      const t = Math.min(1, i / frames);
+      const k = 1 - Math.pow(1 - t, 3); // ease-out
+      el.style.height = (fromH + (toH - fromH) * k) + 'px';
+      if (onStep) onStep(k);
+      if (t < 1) { requestAnimationFrame(step); return; }
+      el.style.height = '';
+      el.style.overflow = '';
+      el._tweening = false;
+      resolve(true);
+    };
+    requestAnimationFrame(step);
+  });
+}
+
+function forumStopTween(el) {
+  el._tween = (el._tween || 0) + 1;
+  el._tweening = false;
+}
+
+function forumMotionMs(dh) {
+  return Math.min(700, FORUM_ROW_MOTION_MS + Math.abs(dh) * 0.6);
+}
+
+// A row just put into the list unfolds from nothing to its natural height.
+// A confirmation that lands mid-unfold (forumUpgradePendingRow) waits for it.
+function forumRevealRow(row) {
+  row.classList.remove('forum-message-enter');
+  if (forumReduceMotion()) return Promise.resolve();
+  const s = row.style;
+  const fold = () => { s.overflow = 'hidden'; s.height = '0px'; s.paddingTop = '0px'; s.paddingBottom = '0px'; s.borderBottomWidth = '0px'; s.opacity = '0'; };
+  const unfold = () => { s.height = ''; s.paddingTop = ''; s.paddingBottom = ''; s.borderBottomWidth = ''; s.opacity = ''; s.overflow = ''; };
+  fold();
+  row._revealing = true;
+  const finish = (done) => {
+    row._revealing = false;
+    if (row._pendingUpgrade) {
+      const msg = row._pendingUpgrade;
+      row._pendingUpgrade = null;
+      if (row.isConnected) { forumUpgradePendingRow(row, msg); return; }
+    }
+    if (done) forumSettleLate(row);
+  };
+  return forumRowTypeset(row).then(() => {
+    unfold();
+    if (!row.isConnected) { finish(false); return; }
+    const cs = getComputedStyle(row);
+    const pt = parseFloat(cs.paddingTop) || 0, pb = parseFloat(cs.paddingBottom) || 0, bw = parseFloat(cs.borderBottomWidth) || 0;
+    const h = row.offsetHeight;
+    fold(); // back to nothing before the next paint; the tween takes it from here
+    return forumTweenHeight(row, 0, h, FORUM_ROW_MOTION_MS, (k) => {
+      s.paddingTop = pt * k + 'px'; s.paddingBottom = pb * k + 'px'; s.borderBottomWidth = bw * k + 'px';
+      s.opacity = String(Math.min(1, k * 1.5));
+    }).then((done) => {
+      if (done) unfold();
+      finish(done);
+    });
+  });
+}
+
+// For a row shown before its math finished typesetting (the wait is capped):
+// hold its height, and once MathJax is done, ease to the real one instead of
+// letting the row snap.
+function forumSettleLate(row) {
+  if (!row._typeset || row._typesetDone || !row.isConnected || forumReduceMotion()) return;
+  const lockH = row.offsetHeight;
+  const token = (row._tween = (row._tween || 0) + 1);
+  row.style.height = lockH + 'px';
+  row.style.overflow = 'hidden';
+  row._typeset
+    .then(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))))
+    .then(() => {
+      if (row._tween !== token) return; // something else took over this row
+      row.style.height = '';
+      if (!row.isConnected) { row.style.overflow = ''; return; }
+      const toH = row.offsetHeight;
+      if (Math.abs(toH - lockH) <= 0.5) { row.style.overflow = ''; return; }
+      forumTweenHeight(row, lockH, toH, forumMotionMs(toH - lockH));
+    });
+}
+
+// A row on its way out folds to nothing, then is removed.
+function forumCollapseRow(row) {
+  if (!row.isConnected) return Promise.resolve();
+  if (forumReduceMotion() || !forumListNearTop()) { forumRemoveKeepingView(row); return Promise.resolve(); }
+  const cs = getComputedStyle(row);
+  const pt = parseFloat(cs.paddingTop) || 0, pb = parseFloat(cs.paddingBottom) || 0, bw = parseFloat(cs.borderBottomWidth) || 0;
+  const s = row.style;
+  return forumTweenHeight(row, row.offsetHeight, 0, FORUM_ROW_MOTION_MS + 60, (k) => {
+    s.paddingTop = pt * (1 - k) + 'px'; s.paddingBottom = pb * (1 - k) + 'px'; s.borderBottomWidth = bw * (1 - k) + 'px';
+    s.opacity = String(1 - k);
+  }).then((done) => { if (done) row.remove(); });
+}
+
+// Removing a row above the reader's view would pull the page up under them.
+function forumRemoveKeepingView(row) {
+  const keep = !forumListNearTop();
+  const before = document.documentElement.scrollHeight;
+  row.remove();
+  if (keep) window.scrollBy(0, document.documentElement.scrollHeight - before);
+}
+
+// Puts `next` in place of `prev` and stretches it from prev's height to its
+// own, with the body fading in. Used when a pending row is confirmed with a
+// different body (LaTeX shorthand converted) and when Gemini's answer takes
+// the place of its "thinking" row: the author line stays put, and only the
+// text and the height change.
+function forumMorphRow(prev, next, { fadeBody = true, fromH = null, stage = fadeBody, stagedH = null } = {}) {
+  next.classList.remove('forum-message-enter');
+  if (!prev.isConnected) return Promise.resolve();
+  if (forumReduceMotion() || !forumListNearTop()) {
+    // Off screen (or no motion): no animation, but still typeset first, so
+    // raw "$...$" never shows if the reader scrolls back up mid-way.
+    const go = () => {
+      if (!prev.isConnected) return;
+      const before = document.documentElement.scrollHeight;
+      const off = !forumListNearTop();
+      forumStopTween(prev);
+      prev.replaceWith(next);
+      if (off) window.scrollBy(0, document.documentElement.scrollHeight - before);
+    };
+    if (stagedH === null && stage) return forumStageRow(next, prev.parentNode).then(go);
+    go();
+    return Promise.resolve();
+  }
+  const body = next.querySelector('.forum-message-body');
+  // New text: typeset it off screen first, with the old row still showing,
+  // then swap at the old height. Same text (already typeset): swap now, in
+  // this same task, so code right after this call finds the new row.
+  const swap = (stagedH) => {
+    if (!prev.isConnected) return Promise.resolve();
+    if (fromH === null) fromH = prev.offsetHeight;
+    forumStopTween(prev);
+    if (fadeBody && body) body.style.opacity = '0';
+    prev.replaceWith(next);
+    const toH = stagedH !== null ? stagedH : next.offsetHeight;
+    const waits = [];
+    if (Math.abs(toH - fromH) > 0.5) waits.push(forumTweenHeight(next, fromH, toH, forumMotionMs(toH - fromH)));
+    if (fadeBody && body) {
+      body.style.opacity = '';
+      waits.push(body.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 260, easing: 'ease-out' }).finished.catch(() => {}));
+    }
+    return Promise.all(waits).then(() => forumSettleLate(next));
+  };
+  if (stagedH !== null) return swap(stagedH);
+  return stage ? forumStageRow(next, prev.parentNode).then(swap) : swap(null);
+}
+
+// ── "Gemini is thinking" rows ───────────────────────────────────────────────
+// post-message.ts answers an @gemini message in the background, often 20-50 s
+// later. Until the answer lands, a placeholder row from Gemini sits at the
+// top of the list (where the answer will appear), cycling short status words
+// and counting seconds, so the question doesn't look ignored. Everyone whose
+// feed shows the question sees it, not only the asker. It ends one of three
+// ways: the answer arrives and the row turns into it (forumLiveTick); the
+// server says it is done without posting (moderation, or Gemini chose not to
+// reply: the "gemini-done" broadcast, see post-message.ts); or nothing comes
+// for FORUM_GEMINI_WAIT_MAX_MS. In the last two it says so briefly and folds.
+const FORUM_GEMINI_WAIT_MAX_MS = 120000;
+const FORUM_GEMINI_MENTION_RE = /(?:^|\s)@gemini\b/i;
+const forumGeminiWaits = new Map();   // question id -> { el, startedAt, timer, ending }
+const forumGeminiEnded = new Set();   // question ids whose wait is over, never shown again
+const forumGeminiLocalStart = new Map(); // own questions: id -> Date.now() when the send was confirmed
+
+const FORUM_GEMINI_PHRASES = [
+  [0, ['Thinking', 'Reading your message', 'Looking at the thread']],
+  [8, ['Processing', 'Working through the physics', 'Fungulating', 'Crunching the numbers', 'Checking the units', 'Sketching it out']],
+  [30, ['Hard one, still on it', 'Double-checking the answer', 'Writing it up', 'Almost there']],
+];
+
+function forumGeminiPhrase(elapsedS, step) {
+  let pool = FORUM_GEMINI_PHRASES[0][1];
+  for (const [from, list] of FORUM_GEMINI_PHRASES) if (elapsedS >= from) pool = list;
+  return pool[step % pool.length];
+}
+
+// Whether post-message.ts will (probably) answer this message: an explicit
+// @gemini, or a question asked in reply to one of Gemini's own messages
+// (a "thanks!" in reply to Gemini usually gets no answer by design, so only
+// replies with a "?" count).
+function forumTriggersGemini(msg, known) {
+  if (!msg || msg.device_id === FORUM_GEMINI_BOT_DEVICE_ID || msg.flag_status === 'deleted') return false;
+  if (FORUM_GEMINI_MENTION_RE.test(msg.body || '')) return true;
+  if (!msg.reply_to_id) return false;
+  const parent = known.find((m) => m.id === msg.reply_to_id);
+  const parentIsGemini = parent ? parent.device_id === FORUM_GEMINI_BOT_DEVICE_ID : msg.reply_to_author_name === 'Gemini';
+  return parentIsGemini && (msg.body || '').includes('?');
+}
+
+function forumGeminiStartedAt(msg) {
+  const w = forumGeminiWaits.get(msg.id);
+  if (w) return w.startedAt;
+  if (forumGeminiLocalStart.has(msg.id)) return forumGeminiLocalStart.get(msg.id);
+  const t = Date.parse(msg.created_at);
+  return Number.isFinite(t) ? Math.min(t, Date.now()) : Date.now();
+}
+
+function forumBuildGeminiThinkingRow(question) {
+  const row = renderForumMessage({
+    id: 'gemini-wait-' + question.id,
+    created_at: new Date().toISOString(),
+    author_name: 'Gemini',
+    device_id: FORUM_GEMINI_BOT_DEVICE_ID,
+    body: '',
+    scope: question.scope,
+    problem_key: question.problem_key,
+    reply_to_id: question.id,
+    reply_to_author_name: question.author_name,
+    reply_to_body: question.body,
+    reply_to_flag_status: null,
+  }, { pending: true, noEnter: true });
+  delete row.dataset.msgId;
+  row.dataset.geminiWait = String(question.id);
+  row.classList.add('forum-gemini-thinking');
+  row.setAttribute('aria-live', 'polite');
+  const body = row.querySelector('.forum-message-body');
+  body.textContent = '';
+  const line = document.createElement('div');
+  line.className = 'forum-message-line forum-gemini-thinking-line';
+  const phrase = document.createElement('span');
+  phrase.className = 'forum-gemini-phrase';
+  const dots = document.createElement('span');
+  dots.className = 'forum-gemini-dots';
+  dots.setAttribute('aria-hidden', 'true');
+  dots.append(document.createElement('i'), document.createElement('i'), document.createElement('i'));
+  line.append(phrase, dots);
+  body.appendChild(line);
+  return row;
+}
+
+// The status words under the streamed text: the model's own thought headline
+// when post-message.ts sends one, "Writing" once answer text is showing, the
+// generic rotating words otherwise.
+function forumGeminiSetPhrase(w, text) {
+  const phraseEl = w.el.querySelector('.forum-gemini-phrase');
+  if (!phraseEl || phraseEl.textContent === text || phraseEl.dataset.next === text) return;
+  if (!phraseEl.textContent || forumReduceMotion()) { phraseEl.textContent = text; return; }
+  phraseEl.dataset.next = text;
+  phraseEl.classList.add('is-swapping');
+  setTimeout(() => {
+    // A long notice can wrap onto a second line: ease the row's height.
+    const row = w.el;
+    const fromH = row.offsetHeight;
+    phraseEl.textContent = phraseEl.dataset.next || text;
+    delete phraseEl.dataset.next;
+    phraseEl.classList.remove('is-swapping');
+    const toH = row.offsetHeight;
+    if (Math.abs(toH - fromH) > 0.5 && row.isConnected && forumListNearTop() && !forumReduceMotion() && !row._tweening && !row._revealing) {
+      forumTweenHeight(row, fromH, toH, 260);
+    }
+  }, 220);
+}
+
+// What the status line says now: a model-switch notice for a few seconds,
+// then "Writing" once answer text shows, else the model's thought headline,
+// else the generic words.
+function forumGeminiStatusText(w, elapsedS) {
+  if (w.notice && Date.now() < w.noticeUntil) return w.notice;
+  if (w.text) return 'Writing';
+  return w.thought || forumGeminiPhrase(elapsedS, Math.floor(elapsedS / 3));
+}
+
+function forumGeminiTick(id) {
+  const w = forumGeminiWaits.get(id);
+  if (!w || w.ending) return;
+  const elapsedS = Math.floor((Date.now() - w.startedAt) / 1000);
+  if (Date.now() - w.startedAt >= FORUM_GEMINI_WAIT_MAX_MS) {
+    forumEndGeminiWait(id, "Gemini couldn't answer this time.");
+    return;
+  }
+  const time = w.el.querySelector('.forum-message-time');
+  if (time) time.textContent = elapsedS + 's';
+  forumGeminiSetPhrase(w, forumGeminiStatusText(w, elapsedS));
+}
+
+// ── Streamed answer text ────────────────────────────────────────────────────
+// post-message.ts broadcasts "gemini-stream" while Gemini writes: the answer
+// so far (whole lines/sentences only, never half an equation) and the latest
+// thought headline. The text grows above the status line of the thinking row.
+// Updates are applied one at a time (w.chain), always rendering the newest
+// text; lines already shown stay as they are, a line that grew is swapped for
+// its longer version once typeset, and new lines fade in while the row
+// stretches to fit.
+function forumGeminiStream(payload) {
+  const id = payload && Number(payload.message_id);
+  const w = id && forumGeminiWaits.get(id);
+  if (!w || w.ending) return;
+  if (payload.seq && w.seq && payload.seq <= w.seq) return;
+  w.seq = payload.seq || 0;
+  if (payload.thought && payload.thought !== w.thought) w.thought = payload.thought;
+  if (payload.attempt !== w.attempt) w.attempt = payload.attempt; // a retry starts its text afresh
+  // "Gemini 3.6 Flash is busy, switching to Gemini 3.5 Flash Lite…"
+  if (payload.notice) { w.notice = payload.notice; w.noticeUntil = Date.now() + 6000; w.thought = ''; }
+  const text = stripMarkdownArtifacts(payload.text || '');
+  if (text !== w.text) {
+    w.text = text;
+    forumGeminiPrepare(w);
+  }
+  forumGeminiSetPhrase(w, forumGeminiStatusText(w, Math.floor((Date.now() - w.startedAt) / 1000)));
+}
+
+// Gemini writes a whole answer in a second or two, so it arrives in a few big
+// pieces; shown as they come, that is one small block, then dozens of lines
+// at once. Instead each piece is typeset in one go, hidden inside the row
+// (every MathJax call costs ~100+ ms, and right after the forum opens it
+// queues behind the whole thread), and the typeset lines are then shown one
+// every FORUM_GEMINI_LINE_MS: faster than anyone reads, but it flows in, and
+// raw "$...$" never shows.
+const FORUM_GEMINI_LINE_MS = 100;
+
+function forumGeminiSplit(text) {
+  return text ? text.split(/\r\n|\r|\n/) : [];
+}
+
+// The row's visible streamed lines (box) and its hidden staging area, where
+// lines wait typeset until their turn. The body is position:relative, so the
+// stage takes no room.
+function forumGeminiBoxes(w) {
+  const body = w.el.querySelector('.forum-message-body');
+  let box = body.querySelector(':scope > .forum-gemini-stream');
+  let stage = body.querySelector(':scope > .forum-gemini-stage');
+  if (!box) {
+    box = document.createElement('div');
+    box.className = 'forum-gemini-stream';
+    body.insertBefore(box, body.firstChild);
+  }
+  if (!stage) {
+    stage = document.createElement('div');
+    stage.className = 'forum-gemini-stage';
+    stage.setAttribute('aria-hidden', 'true');
+    body.appendChild(stage);
+  }
+  return { box, stage };
+}
+
+// Builds and typesets (one MathJax call) the lines of w.text not prepared yet.
+function forumGeminiPrepare(w) {
+  w.prepChain = (w.prepChain || Promise.resolve()).then(async () => {
+    if (!w.el.isConnected || w.ending) return;
+    const { stage } = forumGeminiBoxes(w);
+    const target = forumGeminiSplit(w.text || '');
+    const have = w.lines || [];
+    let keep = 0;
+    while (keep < have.length && keep < target.length && have[keep].text === target[keep]) keep++;
+    if (keep === have.length && keep === target.length) return;
+    const ownName = getForumIdentityName().trim().toLowerCase();
+    const fresh = target.slice(keep).map((text) => {
+      const el = document.createElement('div');
+      el.className = 'forum-message-line';
+      renderForumLineWithMentions(el, text, ownName);
+      stage.appendChild(el);
+      return { text, el };
+    });
+    if (fresh.length) {
+      await Promise.race([renderMathIn(stage), new Promise((r) => setTimeout(r, 6000))]);
+      await new Promise((r) => requestAnimationFrame(() => r()));
+    }
+    // Lines that were dropped or replaced (grew, or a retry) leave the stage.
+    have.slice(keep).forEach((l) => { if (l.el.parentNode === stage) l.el.remove(); });
+    w.lines = have.slice(0, keep).concat(fresh);
+    forumGeminiPump(w);
+  }).catch(() => {});
+  return w.prepChain;
+}
+
+// Brings the visible lines in step with the prepared ones, one change at a
+// time: a new line every FORUM_GEMINI_LINE_MS (fading in, the row
+// stretching), a line that grew is swapped for its longer self at once, and
+// lines a retry made obsolete are dropped.
+function forumGeminiPump(w) {
+  if (w.pumping) return w.pumping;
+  w.pumping = (async () => {
+    for (;;) {
+      const row = w.el;
+      if (!row.isConnected || w.ending) break;
+      const { box } = forumGeminiBoxes(w);
+      const lines = w.lines || [];
+      const vis = [...box.children];
+      let i = 0;
+      while (i < vis.length && i < lines.length && vis[i] === lines[i].el) i++;
+      if (i === vis.length && i === lines.length) break;
+
+      const animate = forumListNearTop() && !forumReduceMotion();
+      const beforeDoc = document.documentElement.scrollHeight;
+      const fromH = row.offsetHeight; // mid-tween, the height on screen now
+      forumStopTween(row);
+      row.style.height = '';
+      row.style.overflow = '';
+      let added = null;
+      if (i < vis.length) {
+        if (i < lines.length) vis[i].replaceWith(lines[i].el); // grew
+        else vis.slice(i).forEach((el) => el.remove());       // a retry dropped them
+      } else {
+        added = lines[i].el;
+        box.appendChild(added);
+      }
+      if (!animate) {
+        if (!forumListNearTop()) window.scrollBy(0, document.documentElement.scrollHeight - beforeDoc);
+      } else {
+        const toH = row.offsetHeight;
+        // Not awaited: the next line may come while this one still settles;
+        // its tween takes over from wherever this one got to.
+        if (Math.abs(toH - fromH) > 0.5) forumTweenHeight(row, fromH, toH, Math.min(360, 180 + Math.abs(toH - fromH) * 0.4));
+        if (added) added.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 240, easing: 'ease-out' });
+      }
+      if (added) await new Promise((r) => setTimeout(r, FORUM_GEMINI_LINE_MS));
+    }
+    w.pumping = null;
+  })().catch(() => { w.pumping = null; });
+  return w.pumping;
+}
+
+// Resolves once every line of w.text is prepared and shown.
+async function forumGeminiDrain(w) {
+  for (let i = 0; i < 50; i++) {
+    await (w.prepChain || Promise.resolve());
+    await (w.pumping || Promise.resolve());
+    const { box } = forumGeminiBoxes(w);
+    const lines = w.lines || [];
+    const vis = [...box.children];
+    const done = vis.length === lines.length && vis.every((el, k) => el === lines[k].el)
+      && lines.map((l) => l.text).join('\n') === forumGeminiSplit(w.text || '').join('\n');
+    if (done || !w.el.isConnected) return;
+  }
+}
+
+// Takes streamed text off a row that won't become an answer (held back by
+// moderation, declined, failed), shrinking it to its status line.
+function forumGeminiDropStream(w) {
+  const row = w.el;
+  const stage = row.querySelector('.forum-gemini-stage');
+  if (stage) stage.remove();
+  const box = row.querySelector('.forum-gemini-stream');
+  if (!box) return Promise.resolve();
+  if (!row.isConnected || forumReduceMotion() || !forumListNearTop()) { forumRemoveKeepingView(box); return Promise.resolve(); }
+  const fromH = row.offsetHeight;
+  box.remove();
+  const toH = row.offsetHeight;
+  return forumTweenHeight(row, fromH, toH, 360);
+}
+
+// Ends a wait that produced no answer: any streamed text goes, a short note
+// says why, then the row folds.
+function forumEndGeminiWait(id, note) {
+  const w = forumGeminiWaits.get(id);
+  forumGeminiEnded.add(id);
+  if (!w) return;
+  w.ending = true;
+  clearInterval(w.timer);
+  if (!w.el.isConnected) { forumGeminiWaits.delete(id); return; }
+  w.el.classList.add('is-ended');
+  const time = w.el.querySelector('.forum-message-time');
+  if (time) time.textContent = '';
+  (w.chain || Promise.resolve()).then(() => forumGeminiDropStream(w)).then(() => {
+    forumGeminiSetPhrase(w, note);
+    setTimeout(() => {
+      forumCollapseRow(w.el).then(() => { if (forumGeminiWaits.get(id) === w) forumGeminiWaits.delete(id); });
+    }, 2600);
+  });
+}
+
+// Gemini's answer arrived: its row takes the thinking row's place. When the
+// answer was already streamed in, its text is (nearly) all on screen, so the
+// row is swapped without fading the body; only the height eases.
+function forumResolveGeminiWait(answerRow, answerMsg) {
+  const id = answerMsg.reply_to_id;
+  const w = forumGeminiWaits.get(id);
+  forumGeminiEnded.add(id);
+  if (!w) return false;
+  clearInterval(w.timer);
+  forumGeminiWaits.delete(id);
+  if (!w.el.isConnected) return false;
+  const streamed = !!w.text;
+  if (!streamed) {
+    w.ending = true;
+    forumMorphRow(w.el, answerRow, { fadeBody: true, stage: true });
+    return true;
+  }
+  // The rest of the answer is revealed line by line first, while the saved
+  // row is typeset off screen; then it takes the thinking row's place.
+  w.text = stripMarkdownArtifacts(answerMsg.body || '');
+  const staged = forumStageRow(answerRow, w.el.parentNode);
+  forumGeminiPrepare(w);
+  Promise.all([forumGeminiDrain(w), staged]).then(([, stagedH]) => {
+    w.ending = true;
+    if (w.el.isConnected) forumMorphRow(w.el, answerRow, { fadeBody: false, stagedH });
+  });
+  return true;
+}
+
+// The server's "gemini-done" broadcast (post-message.ts): Gemini finished
+// with this question. If it posted, the answer is on its way through the
+// usual live update; if it didn't, the wait ends now, saying why.
+const FORUM_GEMINI_END_NOTES = {
+  declined: 'Gemini decided not to answer this one.',
+  moderated: "Gemini's answer was held back by moderation.",
+};
+function forumGeminiServerDone(payload) {
+  const id = payload && Number(payload.message_id);
+  if (!id || !forumGeminiWaits.has(id)) return;
+  if (payload.posted) {
+    _forumRealtimeWake();
+    setTimeout(() => {
+      if (forumGeminiWaits.has(id) && !forumGeminiWaits.get(id).ending) forumEndGeminiWait(id, "Gemini couldn't answer this time.");
+    }, 12000);
+  } else {
+    // Older servers send no reason; their only "not posted" case was a decline.
+    const reason = payload.reason || 'declined';
+    forumEndGeminiWait(id, FORUM_GEMINI_END_NOTES[reason] || "Gemini couldn't answer this time.");
+  }
+}
+
+// Brings the thinking rows in line with what the list shows: one for each
+// question on screen that is still waiting, newest first, at the very top.
+function forumSyncGeminiThinking(known) {
+  const list = document.getElementById('forumMessageList');
+  if (!list) return;
+  if (forumSearchActive || !list.querySelector(':scope > [data-msg-id]')) {
+    for (const w of forumGeminiWaits.values()) if (w.el.isConnected && !w.ending) w.el.remove();
+    return;
+  }
+  const msgs = known || forumMessageCache[forumCacheKey()] || [];
+  const answered = new Set(msgs.filter((m) => m.device_id === FORUM_GEMINI_BOT_DEVICE_ID && m.reply_to_id).map((m) => m.reply_to_id));
+  const now = Date.now();
+  const want = msgs.filter((m) => !forumGeminiEnded.has(m.id) && !answered.has(m.id)
+    && forumTriggersGemini(m, msgs)
+    && now - forumGeminiStartedAt(m) < FORUM_GEMINI_WAIT_MAX_MS)
+    .sort((a, b) => b.id - a.id);
+  const wantIds = new Set(want.map((m) => m.id));
+
+  for (const [id, w] of forumGeminiWaits) {
+    if (answered.has(id)) { clearInterval(w.timer); forumGeminiWaits.delete(id); forumGeminiEnded.add(id); if (w.el.isConnected) w.el.remove(); }
+    else if (!wantIds.has(id) && !w.ending && w.el.isConnected) w.el.remove(); // other feed, or search
+  }
+
+  want.forEach((m, i) => {
+    let w = forumGeminiWaits.get(m.id);
+    const isNew = !w;
+    if (isNew) {
+      w = { el: forumBuildGeminiThinkingRow(m), startedAt: forumGeminiStartedAt(m), timer: null, ending: false };
+      forumGeminiWaits.set(m.id, w);
+      w.timer = setInterval(() => forumGeminiTick(m.id), 1000);
+      forumGeminiTick(m.id);
+    }
+    if (list.children[i] === w.el) return;
+    const wasShown = w.el.isConnected;
+    const nearTop = forumListNearTop();
+    const before = document.documentElement.scrollHeight;
+    list.insertBefore(w.el, list.children[i] || null);
+    if (!wasShown && nearTop) forumRevealRow(w.el);
+    else if (!wasShown) window.scrollBy(0, document.documentElement.scrollHeight - before);
+  });
+}
+
+// Whether the feed on screen already includes a message posted to this
+// scope/problem, so sending it needs no switch of filter (and no reload).
+function forumFeedShows(scope, problemKey) {
+  if (forumFilter === 'all') return true;
+  if (scope === 'global') return forumFilter === 'global';
+  if (forumFilter === 'global' || !problemKey || !problemKey.startsWith(forumFilter + '_')) return false;
+  return !forumFilterProblemId || problemKey === `${forumFilter}_${forumFilterProblemId}`;
+}
+
+function forumRevertOptimisticSend(tempId, originalBody) {
+  const list = document.getElementById('forumMessageList');
+  const row = list && list.querySelector(`[data-msg-id="${tempId}"]`);
+  if (row) {
+    forumStopTween(row);
+    row._revealing = false;
+    row._pendingUpgrade = null;
+    row.style.height = ''; row.style.paddingTop = ''; row.style.paddingBottom = ''; row.style.borderBottomWidth = ''; row.style.opacity = '';
+    forumCollapseRow(row);
+  }
+  const bodyInput = document.getElementById('forumBodyInput');
+  if (bodyInput) {
+    bodyInput.value = originalBody;
+    rebuildForumBodyMirror();
+  }
+}
+
+// Swaps the placeholder row for the real thing, built only from what
+// post-message.ts's response actually returns (id, created_at,
+// author_name, body, scope, problem_key) plus what the client already
+// knows on its own — this device is the poster, its cached avatar (if
+// any) for whatever name the server settled on, and — for a reply — the
+// parent it was answering (captured client-side before the send, since
+// the response doesn't echo it back).
+// Turns an optimistic row into the confirmed row WITHOUT a visible re-render.
+// The old code did pendingRow.replaceWith(renderForumMessage(finalMsg)), which
+// (a) replayed the 0.3s fade/slide-in entrance on a row that was already
+// showing, and (b) rebuilt the body/quote from scratch, so any LaTeX flashed
+// back to raw "$...$" until MathJax caught up again. Here the new row is
+// built without the entrance animation, and the pending row's already-
+// typeset body / reply quote / avatar nodes are moved into it whenever the
+// content is unchanged (the server rewrote the body only when LaTeX
+// shorthand was converted — that case still gets a fresh body).
+function forumUpgradePendingRow(pendingRow, finalMsg) {
+  // Still unfolding (forumRevealRow): the reveal does this when it ends.
+  if (pendingRow._revealing) { pendingRow._pendingUpgrade = finalMsg; return; }
+  const fresh = renderForumMessage(finalMsg, { noEnter: true });
+  const fromH = pendingRow.offsetHeight; // before any of its nodes move into `fresh`
+
+  const sameBody = pendingRow.dataset.msgBody === finalMsg.body && !forumHasLatexShorthand(finalMsg.body);
+  if (sameBody) {
+    const oldBody = pendingRow.querySelector('.forum-message-body');
+    const newBody = fresh.querySelector('.forum-message-body');
+    if (oldBody && newBody) newBody.replaceWith(oldBody);
+  }
+
+  const oldQuote = pendingRow.querySelector('.forum-reply-quote');
+  const newQuote = fresh.querySelector('.forum-reply-quote');
+  if (oldQuote && newQuote) newQuote.replaceWith(oldQuote);
+
+  if (pendingRow.dataset.msgAvatarSvg === (finalMsg.avatar_svg || '')) {
+    const oldAvatar = pendingRow.firstElementChild;
+    const newAvatar = fresh.firstElementChild;
+    if (oldAvatar && newAvatar) newAvatar.replaceWith(oldAvatar);
+  }
+
+  // Same text: only the icons change, so the row keeps its height (a tiny
+  // difference still eases). New text (shorthand converted to LaTeX): the
+  // row keeps its old height until the equation is typeset, then stretches.
+  forumMorphRow(pendingRow, fresh, { fadeBody: !sameBody, fromH });
+}
+
+// The optimistic row (if any) that a just-fetched server message is the
+// confirmed version of — used by forumLiveTick so a poll that lands before
+// our own send response doesn't insert a duplicate next to the pending row.
+function forumFindPendingRowFor(list, msg) {
+  if (msg.device_id !== getForumDeviceId()) return null;
+  const rows = list.querySelectorAll('[data-msg-id^="pending-"]');
+  for (const row of rows) {
+    if (row.dataset.msgBody === msg.body && row.dataset.msgAuthorName === msg.author_name) return row;
+  }
+  // The server rewrites LaTeX shorthand, so that body never matches: take
+  // our own pending row that had shorthand, oldest first.
+  for (const row of [...rows].reverse()) {
+    if (row.dataset.msgAuthorName === msg.author_name && forumHasLatexShorthand(row.dataset.msgBody || '')) return row;
+  }
+  return null;
+}
+
+function forumResolveOptimisticSend(tempId, serverMessage, replySnapshot) {
+  const finalMsg = {
+    ...serverMessage,
+    device_id: getForumDeviceId(),
+    avatar_svg: getCachedAvatarSvg(serverMessage.author_name) || '',
+    flag_status: null,
+    flag_reason: null,
+    edited_at: null,
+    reply_to_id: replySnapshot ? replySnapshot.id : null,
+    reply_to_author_name: replySnapshot ? replySnapshot.author : null,
+    reply_to_body: replySnapshot ? replySnapshot.snippet : null,
+    reply_to_flag_status: null,
+  };
+
+  const list = document.getElementById('forumMessageList');
+  if (list) {
+    const pendingRow  = list.querySelector(`[data-msg-id="${tempId}"]`);
+    const alreadyLive = list.querySelector(`[data-msg-id="${finalMsg.id}"]`);
+    if (alreadyLive) {
+      // A live-poll tick (forumLiveTick) already fetched and rendered this
+      // message while we were still waiting on our own response — just
+      // drop the placeholder (folding, not vanishing), nothing left to insert.
+      if (pendingRow) forumCollapseRow(pendingRow);
+    } else if (pendingRow) {
+      forumUpgradePendingRow(pendingRow, finalMsg);
+    }
+  }
+
+  // Keep the cache in step so the next live-poll tick or filter switch
+  // recognizes this id as already known instead of treating it as fresh
+  // and inserting it a second time (see forumLiveTick's freshMsgs filter).
+  const cacheKey = forumCacheKey();
+  const cache = forumMessageCache[cacheKey];
+  if (cache && !cache.some(m => String(m.id) === String(finalMsg.id))) {
+    cache.unshift(finalMsg);
+  }
+  // An @gemini question gets its "thinking" row as soon as it is confirmed,
+  // timed from now (this device saw it posted), not from the server clock.
+  if (!forumGeminiWaits.has(finalMsg.id)) forumGeminiLocalStart.set(finalMsg.id, Date.now());
+  forumSyncGeminiThinking(cache || [finalMsg]);
+}
+
 async function submitForumMessage(opts = {}) {
   const nameInput = document.getElementById('forumNameInput');
   const bodyInput = document.getElementById('forumBodyInput');
@@ -680,6 +1817,12 @@ async function submitForumMessage(opts = {}) {
 
   if (forumBanUntilMs && Date.now() < forumBanUntilMs) {
     statusEl.textContent = `You're banned from posting. Time left: ${forumBanRemainingText(forumBanUntilMs)}`;
+    statusEl.classList.add('forum-composer-status-error');
+    return;
+  }
+  // "off": ["forum_posting"] in site-version.json (js/site-config.js).
+  if (siteOff('forum_posting')) {
+    statusEl.textContent = 'Posting is paused for now. You can still read the forum.';
     statusEl.classList.add('forum-composer-status-error');
     return;
   }
@@ -699,6 +1842,15 @@ async function submitForumMessage(opts = {}) {
 
   statusEl.textContent = '';
   statusEl.classList.remove('forum-composer-status-error');
+
+  // Made offline and not registered yet (js/offline-account.js): reading is
+  // fine, but a post needs the account on the server. Claiming the typed
+  // name here instead would make a second account.
+  if (!claimedNickname && typeof getPendingAccount === 'function' && getPendingAccount()) {
+    statusEl.textContent = 'Posting opens once your account is registered.';
+    statusEl.classList.add('forum-composer-status-error');
+    return;
+  }
 
   if (!name) {
     statusEl.textContent = 'Enter a name first.';
@@ -726,6 +1878,37 @@ async function submitForumMessage(opts = {}) {
     return;
   }
 
+  const { scope, problem_key } = buildForumScopePayload();
+
+  // Switch the visible feed to match where this message is headed *before*
+  // showing it optimistically, so the placeholder lands in the feed the
+  // person is actually looking at. A no-op (skips the reload) in the
+  // common case of posting under whatever you're already viewing.
+  // Only when the feed on screen wouldn't show it: "All" shows everything,
+  // and switching away from it on every first post replaced the whole list
+  // with "Loading messages…" for a moment.
+  if (!forumFeedShows(scope, problem_key)) {
+    const filterKeyBefore = forumFilter + '|' + forumFilterProblemId;
+    syncForumFilterFromComposerScope();
+    if (filterKeyBefore !== (forumFilter + '|' + forumFilterProblemId)) {
+      await loadForumInitial();
+    }
+  }
+
+  // Snapshot everything the placeholder (and, on success, the final row)
+  // needs, before the composer gets cleared below.
+  const tempId = forumNextOptimisticId();
+  const replySnapshot = forumReplyTarget
+    ? { id: forumReplyTarget.id, author: forumReplyTarget.author, snippet: forumReplyTarget.snippet }
+    : null;
+
+  forumInsertOptimisticRow(renderForumMessage(
+    forumBuildOptimisticMessage(tempId, { name, body, scope, problem_key, replySnapshot }),
+    { pending: true }
+  ));
+  bodyInput.value = '';
+  rebuildForumBodyMirror();
+
   // First message under a not-yet-claimed name: try to claim it before
   // actually posting. Skipped entirely once a device has a nickname, since
   // there's nothing left to claim.
@@ -745,6 +1928,7 @@ async function submitForumMessage(opts = {}) {
           forumPendingPinToShow = data.pin;
         }
       } else if (data && data.error === 'taken') {
+        forumRevertOptimisticSend(tempId, body);
         sendBtn.disabled = false;
         sendBtn.textContent = 'Send';
         openForumClaimModal('verify', name, () => submitForumMessage());
@@ -758,8 +1942,6 @@ async function submitForumMessage(opts = {}) {
       console.warn('Forum: claim check network error, sending as free text', err);
     }
   }
-
-  const { scope, problem_key } = buildForumScopePayload();
 
   sendBtn.disabled = true;
   sendBtn.textContent = 'Sending…';
@@ -777,17 +1959,22 @@ async function submitForumMessage(opts = {}) {
       body: JSON.stringify({
         author_name: getForumIdentityName() || name,
         device_id: getForumDeviceId(),
+        device_secret: getForumDeviceSecret(),
+        device_token: getDeviceToken() || undefined,
+      identity_token: getIdentityToken() || undefined,
         body,
         scope,
         problem_key,
         force_latex: !!opts.forceLatex,
-        reply_to_id: forumReplyTarget ? forumReplyTarget.id : null,
+        reply_to_id: replySnapshot ? replySnapshot.id : null,
       }),
     });
 
     const data = await res.json().catch(() => null);
+    applyDeviceToken(data);
 
     if (!res.ok || !data || data.ok === false) {
+      forumRevertOptimisticSend(tempId, body);
       if (data && data.code === 'latex_assist_failed') {
         statusEl.textContent = 'Couldn\'t convert your LaTeX shorthand — try again, or post as-is.';
         statusEl.classList.add('forum-composer-status-error');
@@ -807,16 +1994,14 @@ async function submitForumMessage(opts = {}) {
     cancelForumReply();
 
     if (!getForumNickname()) saveForumName(name);
-    bodyInput.value = '';
-    rebuildForumBodyMirror();
     statusEl.textContent = 'Sent.';
 
-    // Refresh the currently-viewed feed so the new message appears right away
-    // if it matches the active filter, and re-sync "last seen" so this
-    // message you just posted (and are looking at) doesn't get counted as
-    // unread if you head back to the main screen a moment later.
-    syncForumFilterFromComposerScope();
-    loadForumInitial();
+    // Swap the placeholder for the real row, in place — see
+    // forumResolveOptimisticSend for why this doesn't touch anything else
+    // in the list — and re-sync "last seen" so this message you just
+    // posted (and are looking at) doesn't get counted as unread if you
+    // head back to the main screen a moment later.
+    forumResolveOptimisticSend(tempId, data.message, replySnapshot);
     markForumAsRead();
 
     // Gemini's reply (if this message tagged it) is generated by the Edge
@@ -836,7 +2021,8 @@ async function submitForumMessage(opts = {}) {
     }
   } catch (err) {
     console.error('Forum post error:', err);
-    statusEl.textContent = "Couldn't reach the forum, check your connection.";
+    forumRevertOptimisticSend(tempId, body);
+    statusEl.textContent = await dbFailureText("Couldn't reach the forum, check your connection.");
     statusEl.classList.add('forum-composer-status-error');
   } finally {
     sendBtn.disabled = false;
@@ -873,29 +2059,46 @@ let forumPendingPinToShow = null;
 // omitted, closing the modal is the only effect (e.g. the "Already claimed
 // a nickname on another device?" link, which isn't resuming anything).
 // ── Composer: "Getting Started!" screen ──────────────────────────────────────
-// Shown once before openForumClaimModal('create', ...) — see startSelected()
-// in js/quiz-engine.js, the only caller. Purely informational (what a
-// nickname is/why it's needed, an FAQ) so a person doesn't hit a bare
-// "enter a nickname" field with zero context the very first time they open
-// the app. gettingStartedOnNext holds what to do once they tap Start here —
-// same handoff pattern as forumClaimModalOnSuccess above.
-let gettingStartedOnNext = null;
+// The first thing a person without a nickname sees: new or returning, with the
+// FAQ folded away. Callers pass what to do once they're signed in (start the
+// quiz, refresh the Stats panel), which goes on to the claim modal. Back from
+// there comes here again.
+let gettingStartedOnSuccess = null;
+let gettingStartedOffline = false;
 
-function openGettingStartedModal(onNext) {
-  gettingStartedOnNext = onNext || null;
+// opts.offline: the database is offline (offlineAccountGate,
+// js/offline-account.js). A note says so, "I'm new" makes the account on this
+// device, and "I have an account" explains that logging in has to wait.
+function openGettingStartedModal(onSuccess, opts) {
+  gettingStartedOnSuccess = onSuccess || null;
+  gettingStartedOffline = !!(opts && opts.offline);
+  const note = document.getElementById('gsOfflineNote');
+  if (note) note.style.display = gettingStartedOffline ? '' : 'none';
+  setGsFaqListOpen(false);
   document.getElementById('gettingStartedModalBackdrop')?.classList.add('visible');
 }
 
 function closeGettingStartedModal() {
   document.getElementById('gettingStartedModalBackdrop')?.classList.remove('visible');
-  gettingStartedOnNext = null;
+  gettingStartedOnSuccess = null;
 }
 
-function proceedFromGettingStarted() {
-  const onNext = gettingStartedOnNext;
-  gettingStartedOnNext = null;
-  document.getElementById('gettingStartedModalBackdrop')?.classList.remove('visible');
-  if (onNext) onNext();
+// mode: 'create' (I'm new) or 'restore' (I have an account).
+function chooseGettingStarted(mode) {
+  const onSuccess = gettingStartedOnSuccess;
+  const offline = gettingStartedOffline;
+  closeGettingStartedModal();
+  if (offline) mode = mode === 'create' ? 'offline' : 'offline-restore';
+  openForumClaimModal(mode, '', onSuccess, () => openGettingStartedModal(onSuccess, { offline }));
+}
+
+function setGsFaqListOpen(open) {
+  document.getElementById('gsFaq')?.classList.toggle('open', open);
+  document.getElementById('gsFaqToggle')?.setAttribute('aria-expanded', String(open));
+}
+
+function toggleGsFaqList() {
+  setGsFaqListOpen(!document.getElementById('gsFaq')?.classList.contains('open'));
 }
 
 // Simple single-open accordion for the FAQ list — expanding one item
@@ -911,10 +2114,13 @@ function toggleGsFaq(btn) {
 
 let forumClaimModalMode = 'restore';
 let forumClaimModalOnSuccess = null;
+let forumClaimModalOnBack = null;
 
-function openForumClaimModal(mode, prefillNickname, onSuccess) {
+// onBack (optional): turns Cancel into a Back button that runs it.
+function openForumClaimModal(mode, prefillNickname, onSuccess, onBack) {
   forumClaimModalMode = mode;
   forumClaimModalOnSuccess = onSuccess || null;
+  forumClaimModalOnBack = onBack || null;
   const backdrop  = document.getElementById('forumClaimModalBackdrop');
   const title     = document.getElementById('forumClaimModalTitle');
   const desc      = document.getElementById('forumClaimModalDesc');
@@ -923,16 +2129,42 @@ function openForumClaimModal(mode, prefillNickname, onSuccess) {
   const pinInput  = document.getElementById('forumClaimPinInput');
   const statusEl  = document.getElementById('forumClaimModalStatus');
   const restoreLink = document.getElementById('forumClaimModalRestoreLink');
+  const pinHint   = document.getElementById('forumClaimPinHint');
+  const submitBtn = document.getElementById('forumClaimModalSubmit');
+  const cancelBtn = document.getElementById('forumClaimModalCancel');
   if (!backdrop) return;
 
   if (statusEl) { statusEl.textContent = ''; statusEl.classList.remove('forum-composer-status-error'); }
   if (pinInput) pinInput.value = '';
-  if (restoreLink) restoreLink.style.display = mode === 'create' ? '' : 'none';
+  if (restoreLink) restoreLink.style.display = mode === 'create' && !onBack ? '' : 'none';
+  if (pinHint) pinHint.style.display = mode === 'restore' || mode === 'verify' ? '' : 'none';
+  if (submitBtn) submitBtn.textContent = { create: "Let's go", offline: "Let's go", restore: 'Log in', verify: 'Log in' }[mode] || 'Claim';
+  if (submitBtn) submitBtn.style.display = mode === 'offline-restore' ? 'none' : '';
+  if (nickInput) nickInput.style.display = mode === 'offline-restore' ? 'none' : '';
+  if (statusEl) statusEl.style.display = mode === 'offline-restore' ? 'none' : '';
+  // The offline modes take the layout of the other offline-account windows
+  // (.acct-modal, css/forum.css): left-aligned text, buttons on the right.
+  const offlineLayout = mode === 'offline' || mode === 'offline-restore';
+  const box = backdrop.querySelector('.stats-modal-box');
+  box?.classList.toggle('acct-modal', offlineLayout);
+  box?.querySelector('.stats-modal-actions')?.classList.toggle('acct-actions', offlineLayout);
+  if (cancelBtn) cancelBtn.textContent = onBack ? 'Back' : 'Cancel';
 
   if (mode === 'create') {
-    if (title) title.textContent = 'Choose a name';
-    if (desc) desc.textContent = 'This is how attempts and forum posts are labeled, and lets your stats sync to your other devices.';
+    if (title) title.textContent = 'Choose a nickname';
+    if (desc) desc.textContent = '';
     if (nickInput) { nickInput.value = ''; nickInput.disabled = false; }
+    if (pinRow) pinRow.style.display = 'none';
+  } else if (mode === 'offline') {
+    // The database is offline (js/offline-account.js): checked against the
+    // list from the last update, registered once the database is back.
+    if (title) title.textContent = 'Choose a nickname';
+    if (desc) desc.textContent = "The database is offline, so your nickname is checked against a list from the last update. It registers once the database is back.";
+    if (nickInput) { nickInput.value = ''; nickInput.disabled = false; }
+    if (pinRow) pinRow.style.display = 'none';
+  } else if (mode === 'offline-restore') {
+    if (title) title.textContent = 'Log in';
+    if (desc) desc.textContent = "Logging in needs the database, and it's offline right now. Come back once it's on, or go back and start as new.";
     if (pinRow) pinRow.style.display = 'none';
   } else if (mode === 'verify') {
     if (title) title.textContent = 'That name is taken';
@@ -951,8 +2183,8 @@ function openForumClaimModal(mode, prefillNickname, onSuccess) {
     if (nickInput) { nickInput.value = prefillNickname || ''; nickInput.disabled = false; }
     if (pinRow) pinRow.style.display = '';
   } else {
-    if (title) title.textContent = 'Restore your nickname';
-    if (desc) desc.textContent = 'Enter the nickname and the 5-digit PIN you saved when you first claimed it.';
+    if (title) title.textContent = 'Log in';
+    if (desc) desc.textContent = '';
     // Prefill with whatever the person already typed elsewhere (the main
     // composer's name field, or the create-modal's nickname field when this
     // is reached via its own restore link below) so they don't have to type
@@ -962,12 +2194,30 @@ function openForumClaimModal(mode, prefillNickname, onSuccess) {
   }
 
   backdrop.classList.add('visible');
-  setTimeout(() => (mode !== 'create' ? pinInput : nickInput)?.focus(), 50);
+  if (mode === 'offline-restore') return;
+  setTimeout(() => (mode === 'create' || mode === 'offline' || !nickInput?.value ? nickInput : pinInput)?.focus(), 50);
 }
 
 function closeForumClaimModal() {
   document.getElementById('forumClaimModalBackdrop')?.classList.remove('visible');
   forumClaimModalOnSuccess = null;
+  forumClaimModalOnBack = null;
+}
+
+// Enter in the name field: on to the PIN if that's still to fill in, so a
+// login doesn't fail on a PIN nobody has had the chance to type.
+function forumClaimNicknameEnter() {
+  const nick = document.getElementById('forumClaimNicknameInput');
+  const pinRow = document.getElementById('forumClaimPinRow');
+  const pin = document.getElementById('forumClaimPinInput');
+  if (nick.value.trim() && pinRow.style.display !== 'none' && !pin.value.trim()) pin.focus();
+  else submitForumClaimModal();
+}
+
+function cancelForumClaimModal() {
+  const onBack = forumClaimModalOnBack;
+  closeForumClaimModal();
+  if (onBack) onBack();
 }
 
 async function submitForumClaimModal() {
@@ -977,7 +2227,7 @@ async function submitForumClaimModal() {
   if (!nickInput || !pinInput || !statusEl) return;
 
   const isCreate = forumClaimModalMode === 'create';
-  const nickname = nickInput.value.trim();
+  const nickname = normalizeNickname(nickInput.value);
   const pin = isCreate ? '' : pinInput.value.trim();
 
   statusEl.textContent = '';
@@ -986,6 +2236,30 @@ async function submitForumClaimModal() {
   if (!nickname) {
     statusEl.textContent = 'Enter a name.';
     statusEl.classList.add('forum-composer-status-error');
+    return;
+  }
+  // The same rules the server applies (js/nickname-rules.js), so a name
+  // that can't be claimed is turned down here, online or not.
+  if (isCreate || forumClaimModalMode === 'offline') {
+    const problem = nicknameProblem(nickname);
+    if (problem) {
+      statusEl.textContent = nicknameProblemText(problem, nickname);
+      statusEl.classList.add('forum-composer-status-error');
+      return;
+    }
+  }
+
+  if (forumClaimModalMode === 'offline') {
+    statusEl.textContent = 'Checking…';
+    const made = await createPendingAccount(nickname);
+    if (!made.ok) {
+      statusEl.textContent = made.text;
+      statusEl.classList.add('forum-composer-status-error');
+      return;
+    }
+    const onSuccess = forumClaimModalOnSuccess;
+    closeForumClaimModal();
+    openForumPinModal(made.pin, { andThen: onSuccess });
     return;
   }
   if (!isCreate && !/^\d{5}$/.test(pin)) {
@@ -1021,7 +2295,10 @@ async function submitForumClaimModal() {
       // A 'create' attempt landing on an already-claimed name — fall
       // through into 'verify' in place (same modal, same onSuccess),
       // exactly like the composer's own auto-claim-on-send does.
-      openForumClaimModal('verify', nickname, forumClaimModalOnSuccess);
+      openForumClaimModal('verify', nickname, forumClaimModalOnSuccess, forumClaimModalOnBack);
+    } else if (data && data.error === 'not_found') {
+      statusEl.textContent = 'No account with that name. Check the spelling.';
+      statusEl.classList.add('forum-composer-status-error');
     } else if (data && data.error === 'wrong_pin') {
       statusEl.textContent = 'Incorrect PIN.';
       statusEl.classList.add('forum-composer-status-error');
@@ -1040,7 +2317,7 @@ async function submitForumClaimModal() {
     }
   } catch (err) {
     console.error('Forum claim error:', err);
-    statusEl.textContent = "Couldn't reach the forum, check your connection.";
+    statusEl.textContent = await dbFailureText("Couldn't reach the forum, check your connection.");
     statusEl.classList.add('forum-composer-status-error');
   }
 }
@@ -1060,8 +2337,13 @@ function openForumPinModal(pinOverride, opts) {
   const backdrop = document.getElementById('forumPinModalBackdrop');
   const display   = document.getElementById('forumPinModalDisplay');
   if (!backdrop) return;
-  const pin = pinOverride || getForumPin();
+  // An account made offline keeps its PIN with the rest of it
+  // (js/offline-account.js) until it is registered; say that it waits.
+  const pending = !getForumNickname() && typeof getPendingAccount === 'function' ? getPendingAccount() : null;
+  const pin = pinOverride || getForumPin() || (pending && pending.pin);
   if (display) display.textContent = pin || '—';
+  const note = document.getElementById('forumPinModalPendingNote');
+  if (note) note.style.display = pending && pin === pending.pin ? '' : 'none';
   forumPinModalAndThen = (opts && opts.andThen) || null;
   backdrop.classList.add('visible');
 }
@@ -1109,11 +2391,11 @@ async function submitForumChangeNickname() {
       refreshForumIdentityUI();
       closeForumChangeNicknameModal();
       // Every message this identity ever posted just changed author_name
-      // (and got a re-seeded avatar_svg) server-side — forumLiveTick's next
-      // tick would eventually pick that up (see the check added there), but
-      // that's up to FORUM_LIVE_POLL_MS away and only runs at all while the
+      // (and got a re-seeded avatar_svg) server-side — forumLiveTick would
+      // eventually pick that up on its own (see the check added there), but
+      // only once the shared Realtime channel notices and only while the
       // forum screen is open. Force it now instead of leaving your own just-
-      // renamed messages showing the old name/avatar until that tick fires.
+      // renamed messages showing the old name/avatar until that happens.
       if (forumScreenOpen) loadForumInitial();
     } else if (data && data.error === 'taken') {
       statusEl.textContent = 'That nickname is already taken.';
@@ -1138,7 +2420,7 @@ async function submitForumChangeNickname() {
     }
   } catch (err) {
     console.error('Forum rename error:', err);
-    statusEl.textContent = "Couldn't reach the forum, check your connection.";
+    statusEl.textContent = await dbFailureText("Couldn't reach the forum, check your connection.");
     statusEl.classList.add('forum-composer-status-error');
   }
 }
@@ -1179,9 +2461,16 @@ async function submitForumExitDevice() {
         'apikey': SUPABASE_PUBLISHABLE_KEY,
         'Authorization': `Bearer ${SUPABASE_PUBLISHABLE_KEY}`,
       },
-      body: JSON.stringify({ device_id: getForumDeviceId(), action: 'exit' }),
+      body: JSON.stringify({
+        device_id: getForumDeviceId(),
+        device_secret: getForumDeviceSecret(),
+        device_token: getDeviceToken() || undefined,
+      identity_token: getIdentityToken() || undefined,
+        action: 'exit',
+      }),
     });
     const data = await res.json().catch(() => null);
+    applyDeviceToken(data);
 
     if (data && data.ok) {
       const oldNickname = getForumNickname();
@@ -1207,7 +2496,7 @@ async function submitForumExitDevice() {
     }
   } catch (err) {
     console.error('Forum exit-device error:', err);
-    statusEl.textContent = "Couldn't reach the forum, check your connection.";
+    statusEl.textContent = await dbFailureText("Couldn't reach the forum, check your connection.");
     statusEl.classList.add('forum-composer-status-error');
   }
 }
@@ -1298,11 +2587,22 @@ async function submitForumEditMessage() {
     statusEl.classList.add('forum-composer-status-error');
     return;
   }
+  if (siteOff('forum_posting')) { // site-version.json, as in submitForumMessage
+    statusEl.textContent = 'Editing is paused for now. Your message is unchanged.';
+    statusEl.classList.add('forum-composer-status-error');
+    return;
+  }
 
   // Only send the pieces that actually changed — a topic-only edit
   // shouldn't send `body` at all (see edit-message.ts: sending `body`
   // always re-runs moderation, even if it happens to equal the old text).
-  const payload = { device_id: getForumDeviceId(), message_id: forumEditMessageId };
+  const payload = {
+    device_id: getForumDeviceId(),
+    device_secret: getForumDeviceSecret(),
+    device_token: getDeviceToken() || undefined,
+      identity_token: getIdentityToken() || undefined,
+    message_id: forumEditMessageId,
+  };
   if (newBody !== forumEditOrigBody) payload.body = newBody;
   if (forumEditQuiz === 'global') {
     payload.scope = 'global';
@@ -1325,6 +2625,7 @@ async function submitForumEditMessage() {
       body: JSON.stringify(payload),
     });
     const data = await res.json().catch(() => null);
+    applyDeviceToken(data);
 
     if (data && data.ok) {
       closeForumEditMessageModal();
@@ -1347,7 +2648,7 @@ async function submitForumEditMessage() {
     }
   } catch (err) {
     console.error('Forum edit-message error:', err);
-    statusEl.textContent = "Couldn't reach the forum, check your connection.";
+    statusEl.textContent = await dbFailureText("Couldn't reach the forum, check your connection.");
     statusEl.classList.add('forum-composer-status-error');
   }
 }
@@ -2022,7 +3323,7 @@ async function loadForumMentionProfile(name, bodyEl, avatarEl) {
     if (isGemini) {
       bodyEl.textContent = "Gemini is the forum's bot helper — tag it in any thread to get a reply.";
     } else {
-      bodyEl.textContent = "Couldn't load — try again.";
+      bodyEl.textContent = await dbFailureText("Couldn't load — try again.");
       avatarEl.appendChild(await forumResolveAvatarEl(name));
     }
   }
@@ -2287,7 +3588,14 @@ function ensureForumMentionResizeObserver() {
   return forumMentionResizeObserver;
 }
 
-function renderForumMessageBody(bodyEl, text) {
+// opts.latexPending: true only for the optimistic row an unconfirmed send
+// renders (see submitForumMessage) — splits out &...&/&&...&& shorthand
+// spans into a greyed-out placeholder instead of showing the raw shorthand,
+// since it hasn't gone through the server's LaTeX-assist conversion yet.
+// Never true for a message that actually came back from the server: by
+// then body is already the converted (or, on force_latex, deliberately
+// literal) text, so there's nothing left to grey out.
+function renderForumMessageBody(bodyEl, text, opts = {}) {
   bodyEl.textContent = '';
   const ownName = getForumIdentityName().trim().toLowerCase();
   const lines = text.split(/\r\n|\r|\n/);
@@ -2296,7 +3604,9 @@ function renderForumMessageBody(bodyEl, text) {
   lines.forEach((line) => {
     const lineEl = document.createElement('div');
     lineEl.className = 'forum-message-line';
-    const taggedChips = renderForumLineWithMentions(lineEl, line, ownName);
+    const taggedChips = opts.latexPending
+      ? renderForumLineWithLatexPending(lineEl, line, ownName)
+      : renderForumLineWithMentions(lineEl, line, ownName);
     bodyEl.appendChild(lineEl);
     if (taggedChips.length) taggedChipsByLine.push({ lineEl, taggedChips });
   });
@@ -2387,6 +3697,36 @@ function renderForumLineWithMentions(container, text, ownNameLower) {
   return taggedChips;
 }
 
+// Same job as renderForumLineWithMentions above, but for the optimistic
+// pre-confirmation row only (see renderForumMessageBody's latexPending
+// branch): first splits the line on FORUM_LATEX_ASSIST_RE, rendering each
+// matched &...&/&&...&& span as a greyed "pending LaTeX conversion"
+// placeholder, and delegates every plain segment in between to the ordinary
+// mention renderer so @mentions still work while a message is in flight.
+function renderForumLineWithLatexPending(container, text, ownNameLower) {
+  FORUM_LATEX_ASSIST_RE.lastIndex = 0;
+  let lastIndex = 0;
+  let match;
+  const taggedChips = [];
+
+  while ((match = FORUM_LATEX_ASSIST_RE.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      const segment = text.slice(lastIndex, match.index);
+      taggedChips.push(...renderForumLineWithMentions(container, segment, ownNameLower));
+    }
+    const pending = document.createElement('span');
+    pending.className = 'forum-latex-pending';
+    pending.textContent = 'pending LaTeX conversion';
+    pending.title = 'Converting your LaTeX shorthand…';
+    container.appendChild(pending);
+    lastIndex = FORUM_LATEX_ASSIST_RE.lastIndex;
+  }
+  if (lastIndex < text.length) {
+    taggedChips.push(...renderForumLineWithMentions(container, text.slice(lastIndex), ownNameLower));
+  }
+  return taggedChips;
+}
+
 // Messages are plain text — always rendered via textContent (per mention
 // chip / text node, see renderForumMessageBody above), never innerHTML, so
 // nothing a user types can be interpreted as markup. renderMathIn() (see
@@ -2412,9 +3752,16 @@ async function flagForumMessage(messageId, btnEl) {
         'apikey': SUPABASE_PUBLISHABLE_KEY,
         'Authorization': `Bearer ${SUPABASE_PUBLISHABLE_KEY}`,
       },
-      body: JSON.stringify({ message_id: messageId, device_id: getForumDeviceId() }),
+      body: JSON.stringify({
+        message_id: messageId,
+        device_id: getForumDeviceId(),
+        device_secret: getForumDeviceSecret(),
+        device_token: getDeviceToken() || undefined,
+      identity_token: getIdentityToken() || undefined,
+      }),
     });
     const data = await res.json().catch(() => null);
+    applyDeviceToken(data);
 
     if (data && data.ok && data.result === 'kept') {
       btnEl.classList.add('forum-flag-btn-kept');
@@ -2445,7 +3792,16 @@ async function flagForumMessage(messageId, btnEl) {
   }
 }
 
-function renderForumMessage(msg) {
+// opts.pending: true only for the optimistic row submitForumMessage() shows
+// the instant Send is tapped, before the server has confirmed anything —
+// see the big comment block in submitForumMessage for the full flow. A
+// pending row gets no edit/flag/reply icon (none of those make sense
+// against a message that doesn't have a real id yet) and, if its body
+// contains &...&/&&...&& LaTeX shorthand, greys that span out instead of
+// showing the raw shorthand (see renderForumMessageBody's latexPending
+// branch) — everything else renders exactly like a normal confirmed row,
+// on purpose, so it reads as "already posted" rather than "sending".
+function renderForumMessage(msg, opts = {}) {
   const row = document.createElement('div');
   row.className = 'forum-message';
   // Tagged so renderForumMessageList() can recognize and reuse this exact
@@ -2555,7 +3911,7 @@ function renderForumMessage(msg) {
   const tsGroup = document.createElement('span');
   tsGroup.className = 'forum-message-timestamp-group';
 
-  if (!isGeminiBot) {
+  if (!isGeminiBot && !opts.pending) {
     // Same device always counts, but ONLY for a message that has no owning
     // identity at all (identity_id null — an anonymous/free-text post from
     // before this device_id ever claimed a nickname). For an identity-
@@ -2614,7 +3970,7 @@ function renderForumMessage(msg) {
     }
   }
 
-  if (msg.flag_status !== 'deleted') {
+  if (msg.flag_status !== 'deleted' && !opts.pending) {
     const replyBtn = document.createElement('button');
     replyBtn.type = 'button';
     replyBtn.className = 'forum-reply-btn';
@@ -2646,10 +4002,13 @@ function renderForumMessage(msg) {
     // Highlights only the specific line(s) mentioning the viewer's own name
     // (see renderForumMessageBody) — not the whole message bubble, and not
     // for mentions of anyone else.
-    renderForumMessageBody(body, bodyText);
+    renderForumMessageBody(body, bodyText, {
+      latexPending: !!opts.pending && forumHasLatexShorthand(bodyText),
+    });
   }
 
   content.appendChild(meta);
+  let quoteTypeset = null;
   if (msg.reply_to_id) {
     const quote = document.createElement('div');
     quote.className = 'forum-reply-quote';
@@ -2658,11 +4017,13 @@ function renderForumMessage(msg) {
       : `↩ ${msg.reply_to_author_name}: ${forumReplyQuoteSnippet(msg.reply_to_body)}`;
     quote.addEventListener('click', () => jumpForumToMessage(msg.reply_to_id));
     content.appendChild(quote);
-    renderMathIn(quote);
+    quoteTypeset = renderMathIn(quote);
   }
   content.appendChild(body);
   row.appendChild(content);
-  if (msg.flag_status !== 'deleted') renderMathIn(body);
+  // Kept so forumRevealRow/forumMorphRow can wait for the final height.
+  row._typeset = Promise.all([quoteTypeset, msg.flag_status !== 'deleted' ? renderMathIn(body) : null])
+    .then(() => { row._typesetDone = true; });
 
   // Fade/slide-in instead of the row just snapping into place — applies to
   // every freshly-created row (initial load, "load older", and live-poll
@@ -2670,8 +4031,13 @@ function renderForumMessage(msg) {
   // transition before. The class is stripped once the animation finishes so
   // later DOM reinsertion of this same reused node (renderForumMessageList
   // replaces list.innerHTML on every refresh) never risks replaying it.
-  row.classList.add('forum-message-enter');
-  row.addEventListener('animationend', () => row.classList.remove('forum-message-enter'), { once: true });
+  // opts.noEnter: set by forumUpgradePendingRow() — that row replaces one
+  // already on screen, so replaying the entrance animation there is exactly
+  // the flicker seen when a sent message gets confirmed.
+  if (!opts.noEnter) {
+    row.classList.add('forum-message-enter');
+    row.addEventListener('animationend', () => row.classList.remove('forum-message-enter'), { once: true });
+  }
 
   return row;
 }
@@ -2720,6 +4086,7 @@ function renderForumMessageList(list, data) {
 
   list.innerHTML = '';
   list.appendChild(frag);
+  forumSyncGeminiThinking(data);
 }
 
 function setForumStatus(text, isError = false) {
@@ -2755,10 +4122,23 @@ async function loadForumInitial() {
 
   const { data, error } = await fetchForumMessages();
 
+  // Stale-response guard. openForumForProblem() opens the forum (one load,
+  // unfiltered) and then applies the problem filter (a second, overlapping
+  // load). On a slow connection — i.e. mostly phones — the first response can
+  // land AFTER the second and paint the whole unfiltered forum over the
+  // filtered view. A response only gets to render if the filter it was
+  // fetched for is still the active one; either way it's still valid data for
+  // its own cache key, so keep that.
+  if (forumCacheKey() !== cacheKey) {
+    if (!error && data) forumMessageCache[cacheKey] = data;
+    return;
+  }
+
   if (error) {
     // Only clobber the view with an error if we had nothing cached to show.
     if (!cached || cached.length === 0) {
-      setForumStatus("Couldn't load the forum right now — try again in a bit.", true);
+      const failure = await dbFailureText("Couldn't load the forum right now — try again in a bit.");
+      if (forumCacheKey() === cacheKey) setForumStatus(failure, true);
       if (loadMoreBtn) loadMoreBtn.style.display = 'none';
     }
     return;
@@ -2804,7 +4184,15 @@ async function loadForumOlder() {
   const loadMoreBtn = document.getElementById('forumLoadMoreBtn');
   if (loadMoreBtn) { loadMoreBtn.disabled = true; loadMoreBtn.textContent = 'Loading…'; }
 
+  const reqKey = forumCacheKey();
   const { data, error } = await fetchForumMessages(forumOldestLoadedId);
+
+  // Filter changed mid-flight: these rows belong to the previous filter.
+  if (forumCacheKey() !== reqKey) {
+    forumLoadingMore = false;
+    if (loadMoreBtn) { loadMoreBtn.disabled = false; loadMoreBtn.textContent = 'Load older messages'; }
+    return;
+  }
 
   if (!error && data.length > 0) {
     forumVisibleData(data).forEach(msg => list.appendChild(renderForumMessage(msg)));
@@ -2881,7 +4269,7 @@ async function runForumSearch(term) {
   if (!input || input.value.trim() !== term) return;
 
   if (error) {
-    setForumStatus("Couldn't search right now — try again in a bit.", true);
+    setForumStatus(await dbFailureText("Couldn't search right now — try again in a bit."), true);
     return;
   }
   if (data.length === 0) {
@@ -3099,13 +4487,16 @@ function updateForumFilterProblemSelect() {
   sel.appendChild(generalOpt);
 
   if (quiz && Array.isArray(quiz.problems)) {
-    quiz.problems.forEach(p => {
+    quiz.problems.forEach((p) => {
       const opt = document.createElement('option');
       opt.value = p.id;
-      opt.textContent = p.id;
+      opt.textContent = problemLabel(parseInt(quizNum, 10), p.id);
       sel.appendChild(opt);
     });
   }
+  // Landed on a retired problem's thread (e.g. from attempt review)? Keep it
+  // selectable so the filter shows what's actually being viewed.
+  _forumAppendRetiredOption(sel, quizNum, forumFilterProblemId);
 
   sel.value = forumFilterProblemId;
   sel.style.display = '';
@@ -3219,23 +4610,21 @@ async function forumCountsByProblemKey() {
 // Paints each solve-all card's forum button from the map above. Unread wins:
 // shows just the unread count, badge colored like the rest of the app's
 // unread indicators; otherwise shows the thread's total (0 if empty), muted.
-// Refreshes solve-all's per-problem buttons every 5s while that mode is
-// open (started/stopped from quiz-engine.js's _startSolveAllCore/
-// exitSolveAll) — a separate timer from FORUM_POLL_INTERVAL_MS (which drives
-// the main/FAB unread badge), but kept at the same cadence so the two badge
-// styles visibly refresh together instead of the FAB looking stuck.
-const FORUM_PROBLEM_COUNTS_POLL_MS = 5000;
-let forumProblemCountsPollTimer = null;
+// Refreshes solve-all's per-problem buttons while that mode is open
+// (started/stopped from quiz-engine.js's _startSolveAllCore/exitSolveAll),
+// off the same shared Realtime channel as the main/FAB unread badge — see
+// _ensureForumRealtime near getForumClient() above.
 
 function startForumProblemCountsPolling() {
-  if (forumProblemCountsPollTimer) return;
-  forumCountsByProblemKey().then(applyForumProblemCounts);
-  forumProblemCountsPollTimer = setInterval(() => {
-    forumCountsByProblemKey().then(applyForumProblemCounts);
-  }, FORUM_PROBLEM_COUNTS_POLL_MS);
+  if (isLockdownSession()) return; // no forum in Safe Exam Browser
+  if (_forumProblemCountsActive) return;
+  _forumProblemCountsActive = true;
+  _ensureForumRealtime();
+  forumCountsByProblemKey().then(applyForumProblemCounts); // check immediately
 }
 function stopForumProblemCountsPolling() {
-  if (forumProblemCountsPollTimer) { clearInterval(forumProblemCountsPollTimer); forumProblemCountsPollTimer = null; }
+  _forumProblemCountsActive = false;
+  _maybeTeardownForumRealtime();
 }
 
 // Shared painter for both solve-all's "sa-forum-" cards and plain Random 6's
@@ -3258,7 +4647,7 @@ function paintForumProblemButtons(list, prefix, counts) {
       badgeEl.style.display = 'flex';
       atEl.style.display = c.mentioned ? 'flex' : 'none';
     } else {
-      totalEl.textContent = String(c.total);
+      totalEl.textContent = c.total > 0 ? String(c.total) : '';
       badgeEl.style.display = 'none';
       atEl.style.display = 'none';
     }
@@ -3295,12 +4684,14 @@ function showForumProblemContext(quizNum, problemId) {
   const toggle = document.getElementById('forumProblemContextToggle');
   const body   = document.getElementById('forumProblemContextBody');
   if (!toggle || !body) return;
-  const quiz = typeof QUIZZES !== 'undefined' ? QUIZZES[quizNum - 1] : null;
-  const problem = quiz && Array.isArray(quiz.problems) ? quiz.problems.find(pr => pr.id === problemId) : null;
+  // Active OR retired — a retired problem's thread still shows its statement.
+  const problem = typeof getQuizProblem === 'function' ? getQuizProblem(quizNum, problemId) : null;
+  const label = typeof problemLabel === 'function' ? problemLabel(quizNum, problemId) : problemId;
   body.innerHTML = problem ? problem.text : '';
   body.dataset.problemId = problemId;
+  body.dataset.problemLabel = label;
   body.style.display = '';
-  toggle.textContent = '▾ Hide ' + problemId;
+  toggle.textContent = '▾ Hide ' + label;
   toggle.dataset.expanded = 'true';
   if (typeof renderMathIn === 'function') renderMathIn(body);
 }
@@ -3312,7 +4703,7 @@ function toggleForumProblemContext() {
   const wasExpanded = toggle.dataset.expanded === 'true';
   body.style.display = wasExpanded ? 'none' : '';
   toggle.dataset.expanded = wasExpanded ? 'false' : 'true';
-  toggle.textContent = (wasExpanded ? '▸ Show ' : '▾ Hide ') + (body.dataset.problemId || 'problem');
+  toggle.textContent = (wasExpanded ? '▸ Show ' : '▾ Hide ') + (body.dataset.problemLabel || 'problem');
   if (!wasExpanded && typeof renderMathIn === 'function') renderMathIn(body);
 }
 
@@ -3322,6 +4713,12 @@ function toggleForumProblemContext() {
 // logic rather than duplicating it; the extra timeout just applies the
 // filter after that flow's own reset-to-"All" settles.
 function openForumForProblem(quizNum, problemId) {
+  // Pre-set so the load openForumFromFab() kicks off is already for this
+  // problem, instead of first fetching the whole forum. (The fallback
+  // openForumScreen() path still resets to "All" — the timeout below
+  // re-applies it either way.)
+  forumFilter = 'q' + quizNum;
+  forumFilterProblemId = problemId;
   openForumFromFab();
   setTimeout(() => {
     forumFilter = 'q' + quizNum;
@@ -3379,7 +4776,7 @@ function forumBodyMentionsName(body, ownNameLower) {
 }
 
 async function pollForumUnread() {
-  if (forumScreenOpen) return; // badge is irrelevant while already looking at the forum
+  if (forumScreenOpen || isLockdownSession()) return; // badge is irrelevant while already looking at the forum
   const client = getForumClient();
   if (!client) return;
 
@@ -3406,12 +4803,14 @@ async function pollForumUnread() {
 }
 
 function startForumPolling() {
-  if (forumPollTimer) return;
-  pollForumUnread(); // check immediately, don't wait a full interval
-  forumPollTimer = setInterval(pollForumUnread, FORUM_POLL_INTERVAL_MS);
+  if (_forumUnreadActive) return;
+  _forumUnreadActive = true;
+  _ensureForumRealtime();
+  pollForumUnread(); // check immediately, don't wait for a change event
 }
 function stopForumPolling() {
-  if (forumPollTimer) { clearInterval(forumPollTimer); forumPollTimer = null; }
+  _forumUnreadActive = false;
+  _maybeTeardownForumRealtime();
 }
 
 // ── Live updates while the forum screen is open ──────────────────────────────
@@ -3429,11 +4828,13 @@ function stopForumPolling() {
 // scrolling them there. (The page itself scrolls now, not an inner
 // .forum-list scroll container — see the history note atop forum.css.)
 function startForumLivePolling() {
-  if (forumLiveTimer) return;
-  forumLiveTimer = setInterval(forumLiveTick, FORUM_LIVE_POLL_MS);
+  if (_forumLiveActive) return;
+  _forumLiveActive = true;
+  _ensureForumRealtime();
 }
 function stopForumLivePolling() {
-  if (forumLiveTimer) { clearInterval(forumLiveTimer); forumLiveTimer = null; }
+  _forumLiveActive = false;
+  _maybeTeardownForumRealtime();
   forumPendingNewCount = 0;
   hideForumNewMsgsPill();
 }
@@ -3443,10 +4844,15 @@ async function forumLiveTick() {
 
   checkForumBanStatus(); // fire-and-forget, keeps the ban banner/countdown fresh
 
+  const reqKey = forumCacheKey();
   const { data, error } = await fetchForumMessages(); // first page of the currently-active filter
   if (error || !data || data.length === 0) return;
+  data.forEach((m) => _forumNoteMessageAt(m.created_at)); // keeps quiet mode's clock current
+  // Filter switched while this was in flight — this page belongs to the old
+  // filter, so caching/rendering it now would mix it into the new one.
+  if (forumCacheKey() !== reqKey) return;
 
-  const cacheKey = forumCacheKey();
+  const cacheKey = reqKey;
   const priorCache = forumMessageCache[cacheKey] || [];
   const cachedTop = priorCache[0];
   const knownTopId = cachedTop ? cachedTop.id : 0;
@@ -3488,7 +4894,7 @@ async function forumLiveTick() {
   if (freshMsgs.length === 0 && changedMsgs.length === 0) return;
 
   const list = document.getElementById('forumMessageList');
-  if (!list || !list.firstChild || !list.firstChild.dataset || !list.firstChild.dataset.msgId) {
+  if (!list || !list.querySelector(':scope > [data-msg-id]')) {
     // Nothing sensible to update in place (empty state, error state, etc.) —
     // just let the next full reload (filter switch, reopen) pick this up.
     return;
@@ -3501,18 +4907,37 @@ async function forumLiveTick() {
     if (row) row.replaceWith(renderForumMessage(msg));
   });
 
-  if (freshMsgs.length === 0) return;
+  if (freshMsgs.length === 0) { forumSyncGeminiThinking(data); return; }
 
-  const nearTop = window.scrollY < 40;
+  const nearTop = forumListNearTop();
   const prevScrollHeight = document.documentElement.scrollHeight;
   const prevScrollY      = window.scrollY;
 
-  const frag = document.createDocumentFragment();
-  freshMsgs.forEach(msg => frag.appendChild(renderForumMessage(msg)));
-  list.insertBefore(frag, list.firstChild);
+  const added = [];
+  freshMsgs.forEach(msg => {
+    // Our own just-sent message arriving via the poll before the send
+    // response does: adopt the pending row in place instead of inserting a
+    // second copy beside it.
+    const pendingRow = forumFindPendingRowFor(list, msg);
+    if (pendingRow) { forumUpgradePendingRow(pendingRow, msg); return; }
+    const row = renderForumMessage(msg, { noEnter: nearTop });
+    // Gemini's answer to a question whose "thinking" row is showing turns
+    // that row into the answer, in place.
+    if (msg.device_id === FORUM_GEMINI_BOT_DEVICE_ID && msg.reply_to_id && forumResolveGeminiWait(row, msg)) return;
+    // By id, not simply on top: a message that arrives in the same tick as
+    // Gemini's answer (which took its thinking row's place) may be older.
+    let before = forumListTopAnchor(list);
+    while (before) {
+      const id = before.dataset && before.dataset.msgId;
+      if (id && !id.startsWith('pending-') && Number(id) < msg.id) break;
+      before = before.nextSibling;
+    }
+    list.insertBefore(row, before);
+    added.push(row);
+  });
 
   if (nearTop) {
-    window.scrollTo(0, 0); // pin to the very top as new rows keep landing there
+    added.forEach((row) => forumRevealRow(row));
   } else {
     // Keep whatever the reader was looking at in the same visual spot. The
     // page (not the list) is what scrolls now, so measure against the whole
@@ -3521,6 +4946,7 @@ async function forumLiveTick() {
     forumPendingNewCount += freshMsgs.length;
     showForumNewMsgsPill();
   }
+  forumSyncGeminiThinking(data);
 }
 
 function showForumNewMsgsPill() {
@@ -3559,7 +4985,7 @@ const FORUM_INFINITE_SCROLL_THRESHOLD_PX = 600;
 // qualifying scroll tick without extra guards here).
 function onForumListScroll() {
   if (!forumScreenOpen) return; // the listener below is on window, so guard against firing while browsing the quiz
-  if (window.scrollY < 40 && forumPendingNewCount > 0) {
+  if (forumListNearTop() && forumPendingNewCount > 0) {
     forumPendingNewCount = 0;
     hideForumNewMsgsPill();
   }
@@ -3570,16 +4996,18 @@ function onForumListScroll() {
   }
 }
 
-// Polling only makes sense while the person is actually looking at the main
-// screen with the tab in focus — not mid-quiz, and not in a backgrounded
-// tab. Rather than thread start/stop calls through every screen-transition
-// function elsewhere in the app, watch #landingScreen's own visibility
-// (via its "hidden" class) plus the page's visibility state, and let those
-// two signals drive polling on their own.
+// Polling only makes sense while the person is on the main screen (or one
+// showing the forum button) — not mid-quiz. Rather than thread start/stop
+// calls through every screen-transition function elsewhere in the app,
+// watch #landingScreen's own visibility (via its "hidden" class) and let
+// that drive polling on its own. A backgrounded tab keeps polling "active":
+// the fallback timer already skips hidden ticks, and stopping here used to
+// tear the channel down and re-check on every tab switch (see
+// _forumFallbackTick).
 function initForumPollingWatcher() {
   const landing = document.getElementById('landingScreen');
   const wrap    = document.getElementById('forumFabWrap');
-  if (!landing) return;
+  if (!landing || isLockdownSession()) return; // no forum in Safe Exam Browser
 
   const sync = () => {
     const onMainScreen = !landing.classList.contains('hidden');
@@ -3587,13 +5015,12 @@ function initForumPollingWatcher() {
     // for every other screen the FAB can appear on, so piggyback on it
     // instead of re-deriving "is the FAB up" from scratch here.
     const fabVisible = wrap && wrap.classList.contains('forum-fab-visible');
-    if ((onMainScreen || fabVisible) && !forumScreenOpen && !document.hidden) startForumPolling();
+    if ((onMainScreen || fabVisible) && !forumScreenOpen) startForumPolling();
     else stopForumPolling();
   };
 
   new MutationObserver(sync).observe(landing, { attributes: true, attributeFilter: ['class'] });
   if (wrap) new MutationObserver(sync).observe(wrap, { attributes: true, attributeFilter: ['class'] });
-  document.addEventListener('visibilitychange', sync);
   sync();
 }
 
@@ -3652,24 +5079,37 @@ const FORUM_FAB_HOSTS = [
     isVisible: el => el.classList.contains('visible'),
     hide:      el => el.classList.remove('visible', 'fading-out'),
     show:      el => el.classList.add('visible'),
+    scrollY: 0,
   },
   {
     id: 'statsScreen',
     isVisible: el => el.classList.contains('visible'),
     hide:      el => el.classList.remove('visible', 'fading-out'),
     show:      el => el.classList.add('visible'),
+    scrollY: 0,
   },
   {
     id: 'reviewScreen',
     isVisible: el => el.classList.contains('visible'),
     hide:      el => el.classList.remove('visible', 'fading-out'),
     show:      el => el.classList.add('visible'),
+    scrollY: 0,
   },
   {
     id: 'choicePage',
     isVisible: el => !el.classList.contains('hidden'),
     hide:      el => el.classList.add('hidden'),
     show:      el => el.classList.remove('hidden', 'fading-out'),
+    scrollY: 0,
+  },
+  {
+    // js/solutions.js — reachable from the Solution screen too. Without
+    // this entry it stayed showing, stacked under the screen opened over it.
+    id: 'solutionScreen',
+    isVisible: el => el.classList.contains('visible'),
+    hide:      el => el.classList.remove('visible', 'fading-out'),
+    show:      el => el.classList.add('visible'),
+    scrollY: 0,
   },
 ];
 
@@ -3711,6 +5151,7 @@ function openForumFromFab() {
   if (!host) { openForumScreen(); return; }
 
   const hostEl = document.getElementById(host.id);
+  host.scrollY = typeof captureScreenScroll === 'function' ? captureScreenScroll() : (window.scrollY || 0);
 
   stopForumPolling();
   if (typeof setFieldLinesVisible === 'function') setFieldLinesVisible(false);
@@ -3721,6 +5162,8 @@ function openForumFromFab() {
     forumFabHostId = host.id;
     forum.classList.add('visible');
     forumScreenOpen = true;
+    if (typeof scrollScreenToTop === 'function') scrollScreenToTop();
+    else window.scrollTo(0, 0);
     resetForumComposerScope();
     refreshForumIdentityUI();
     renderForumPinnedBanner();
@@ -3733,7 +5176,7 @@ function openForumFromFab() {
 
 // `forceLanding` is true only when goToMainMenu() (quiz-engine.js) closes the
 // forum via the site logo/main-menu action — that's a distinct, more
-// explicit "take me all the way home" than the forum's own ✕ Close button,
+// explicit "take me all the way home" than the forum's own ✕ button,
 // which instead returns to wherever the forum was actually opened from.
 function closeForumScreen(forceLanding) {
   const landing = document.getElementById('landingScreen');
@@ -3741,7 +5184,6 @@ function closeForumScreen(forceLanding) {
   if (!landing || !forum) return;
 
   stopForumLivePolling();
-  if (forumProblemOnlyMode) setForumProblemOnlyMode(false);
   exitForumSearch({ silent: true });
 
   // Polling is paused the whole time the forum screen is open, so anything
@@ -3754,12 +5196,22 @@ function closeForumScreen(forceLanding) {
     forum.classList.remove('visible', 'fading-out');
     forumScreenOpen = false;
     if (typeof setFieldLinesVisible === 'function') setFieldLinesVisible(true);
+    // Un-hides the scope-picker/filter bar and hides the collapsed problem-
+    // context panel — a real layout change, not just a class toggle. Done
+    // here, after the fade-out has finished and the screen is already
+    // hidden, rather than up front where it used to run: doing it before
+    // forum.classList.add('fading-out') meant this swap happened while the
+    // forum was still fully visible, so the filter bar reappearing (and
+    // the problem context panel vanishing) was plainly visible mid-fade —
+    // looked like the filter had "switched to Global" right in front of
+    // the person on their way out.
+    if (forumProblemOnlyMode) setForumProblemOnlyMode(false);
 
     const hostId = forumFabHostId;
     forumFabHostId = null;
 
     if (forceLanding && typeof exitAppOrChoiceToLanding === 'function') {
-      // Also unwinds solve-all/mistakes state the same way leaving that
+      // Also unwinds solve-all state the same way leaving that
       // screen normally does — not just "hide forum, show landing" — see
       // exitAppOrChoiceToLanding() in quiz-engine.js.
       exitAppOrChoiceToLanding();
@@ -3769,7 +5221,11 @@ function closeForumScreen(forceLanding) {
     if (hostId) {
       const host = FORUM_FAB_HOSTS.find(h => h.id === hostId);
       const hostEl = host && document.getElementById(hostId);
-      if (host && hostEl) host.show(hostEl);
+      if (host && hostEl) {
+        host.show(hostEl);
+        if (typeof restoreScreenScroll === 'function') restoreScreenScroll(host.scrollY);
+        else window.scrollTo(0, host.scrollY || 0);
+      }
       return;
     }
 
@@ -3782,7 +5238,7 @@ function closeForumScreen(forceLanding) {
 // ── Floating button visibility ────────────────────────────────────────────
 // Visible on any screen except the landing screen (which already has the
 // big "💬 Forum" button) and a plain "Random 6" quiz still in progress
-// (appPage visible, neither solve-all nor mistakes mode active, and not yet
+// (appPage visible, solve-all mode not active, and not yet
 // checked) — per Ansar's call. Once that attempt is checked, it's no
 // longer "plain" (there's a result to discuss) and the FAB reappears, same
 // as every other screen — see the `checked` check below and its call sites
@@ -3798,11 +5254,14 @@ function syncForumFabVisibility() {
   const forum    = document.getElementById('forumScreen');
   const appPage  = document.getElementById('appPage');
   const solveAll = document.getElementById('solveAllMode');
-  const mistakes = document.getElementById('mistakesMode');
   if (!landing || !appPage) return;
 
   const onLanding = !landing.classList.contains('hidden');
   const inForum   = forum && forum.classList.contains('visible');
+  // The License screen (js/license.js) is a landing-screen page, not one of
+  // FORUM_FAB_HOSTS, so the FAB stays hidden there like on landing itself.
+  const license   = document.getElementById('licenseScreen');
+  const inLicense = !!license && license.classList.contains('visible');
   // `checked` (quiz-engine.js) flips true once "Check answers" runs on a
   // plain Random 6 attempt — at that point there's a result to discuss, so
   // this no longer counts as "plain" and the FAB (plus each card's own
@@ -3814,22 +5273,21 @@ function syncForumFabVisibility() {
   const inPlainRandom6 =
     appPage.classList.contains('visible') &&
     !(solveAll && solveAll.classList.contains('active')) &&
-    !(mistakes && mistakes.classList.contains('active')) &&
     !(typeof checked !== 'undefined' && checked);
 
   // Once the forum was reached via the FAB (or a per-problem forum button,
-  // which reuses the same open path) from solve-all/mistakes/stats/choice,
+  // which reuses the same open path) from solve-all/stats/choice,
   // forumFabHostId is set — keep the FAB showing instead of hiding it, so
   // it's still there to tap closed (see toggleForumFab). Opened the
   // "ordinary" way instead, from the landing screen's own Forum button,
   // forumFabHostId stays null and the FAB is hidden exactly like before.
   const keepFabWhileInForum = inForum && !!forumFabHostId;
 
-  wrap.classList.toggle('forum-fab-visible', keepFabWhileInForum || (!onLanding && !inForum && !inPlainRandom6));
+  wrap.classList.toggle('forum-fab-visible', keepFabWhileInForum || (!onLanding && !inForum && !inLicense && !inPlainRandom6));
 }
 
 function initForumFabWatcher() {
-  const watchIds = ['landingScreen', 'forumScreen', 'appPage', 'solveAllMode', 'mistakesMode', 'statsScreen', 'reviewScreen', 'choicePage'];
+  const watchIds = ['landingScreen', 'forumScreen', 'appPage', 'solveAllMode', 'statsScreen', 'reviewScreen', 'choicePage', 'licenseScreen', 'solutionScreen'];
   watchIds.forEach((id) => {
     const el = document.getElementById(id);
     if (!el) return;
@@ -3844,6 +5302,21 @@ initForumBodyHoverPreview();
 initForumPollingWatcher();
 initForumFabWatcher();
 renderLandingIdentity(getForumNickname());
+
+// The Stats screen (js/stats.js, tier 1) can be opened before this file
+// (tier 2) has finished loading. If that happens, its identity row
+// (renderSfpIdentity, inside loadStatsPanel) rendered against
+// getForumNickname() not existing yet — read as "not registered" — and
+// its live poll (pollStatsPanel) rendered against getForumClient() not
+// existing yet — a silent no-op, not an error. Both are one-shot calls,
+// so without this they'd stay stuck on the stale/empty state until the
+// screen is closed and reopened. Now that this file has actually
+// arrived, catch the panel up immediately if it's currently open.
+if (typeof _isStatsScreenOpen === 'function' && _isStatsScreenOpen()) {
+  if (typeof renderSfpIdentity === 'function') renderSfpIdentity(getForumNickname());
+  if (typeof pollStatsPanel === 'function') pollStatsPanel();
+  if (typeof startStatsPanelPolling === 'function') startStatsPanelPolling();
+}
 
 (function initForumListScrollWatcher() {
   window.addEventListener('scroll', onForumListScroll);

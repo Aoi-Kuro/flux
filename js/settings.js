@@ -1,0 +1,1998 @@
+// ─── Settings ────────────────────────────────────────────────────────────
+// Phase 0 built: a versioned, localStorage settings schema + migration
+// (synced across devices since by js/settings-sync.js); the settings
+// panel shell (gear button -> full-screen panel, same open/close fade
+// pattern as #manualScreen — see js/manual.js); and grouped tabs (Display /
+// Notifications / Study / Sync & Storage).
+//
+// Phase 1: six Display-tab visual-decluttering toggles — floating avatar,
+// floating splashes, Manual button, theme-selector button, daylight
+// switch, floating Forum button. Framed as "Show X" and on by default
+// (matching each element's actual default-visible behavior), rather than
+// "Hide X" off by default — same end state, but a switch that's ON when
+// something is showing reads more naturally than one that's OFF for the
+// same thing. Each just flips a class on <html> (applyDisplaySettings
+// below); the actual hide/show is plain CSS in css/settings.css, so
+// nothing here has to know where those elements live in the DOM. See the
+// anti-flicker inline script in index.html's <head> for why <html> and not
+// <body> — it has to apply these before <body> exists at all, so a user
+// who's turned something off never sees it flash on for a frame first.
+//
+// Also fixed: a race condition where tapping the gear then the site logo
+// (or vice versa) within the ~280ms open/close fade window could leave the
+// panel stuck open with the landing page hidden underneath, or briefly
+// render both at once — see settingsIsOpen/settingsAnimTimer below.
+//
+// Later phases just add entries to SETTINGS_DEFAULTS and a row to the
+// relevant renderSettings*Tab() function below — no changes to the
+// storage/migration/panel plumbing itself should ever be needed again.
+
+const SETTINGS_STORAGE_KEY = 'flux_settings';
+const SETTINGS_SCHEMA_VERSION = 1;
+
+// Every real setting gets registered here as {tab: {key: defaultValue}}.
+// Display's six default to true ("shown") since that's every element's
+// actual out-of-the-box behavior; new settings elsewhere still default to
+// today's unchanged behavior per the Phase 0 planning decision.
+const SETTINGS_DEFAULTS = {
+  display: {
+    showAvatar:      true,
+    showSplashes:    true,
+    showManualBtn:   true,
+    showThemeBtn:    true,
+    showDaylightBtn: true,
+    followDeviceTheme: false,
+    showForumFab:    true,
+    // The 👤 personal cabinet button beside the logo (js/cabinet-link.js).
+    showCabinetBtn:  true,
+    hideFieldLinesByDefault: false,
+    showTopBarTip:   true,
+    // The logo cube's tumble when the main menu appears (js/logo-tumble.js).
+    showLogoTumble:  true,
+    // 'off' | 'protan' | 'deutan' | 'tritan' — whole-page colour correction
+    // filter (index.html's hidden <svg>, css/settings.css). See
+    // applyColorCorrection() below.
+    colorCorrection: 'off',
+    // Percent applied to every figure (problem images/SVGs and solution
+    // figures) through the --user-fig-scale CSS variable. See
+    // applyFigureScale() below.
+    figureScale:     100,
+    // Animated figures (js/figure-anim.js): the base speed (the speed chip
+    // under a figure multiplies it), whether one-shot animations repeat
+    // until stopped, and whether looped ones stop after one cycle.
+    figAnimSpeed:    1,
+    figAnimRepeatOneShot: false,
+    figAnimLoopOnce: false,
+    // Hides the play button + speed chip under animated figures (CSS only,
+    // css/settings.css), so they stay as the published drawing.
+    hideFigAnimControls: false,
+    // Cuts CSS animations/transitions site-wide (applyReduceMotion). Lived
+    // under study before — migrateSettings and the backup import
+    // still read the old study.reduceMotion.
+    reduceMotion:    false,
+    // Sub of reduceMotion, but independent of it: also reduce motion while
+    // the battery is below reduceMotionBatteryPct (10-40) and not charging.
+    reduceMotionBatteryOn:  false,
+    reduceMotionBatteryPct: 20,
+    // 'classic' (single-colour drawn icons) | 'modern' (the emoji) —
+    // js/icons.js, which also applies it before first paint.
+    iconStyle:       'classic',
+    // One font for all UI text over the colour theme's own (Outfit unless
+    // changed), or 'theme' to keep the theme's — the old default, listed as
+    // "<its name> (previous)". The list and applyUiFont() live in
+    // index.html's <head>, which applies it before first paint.
+    uiFont:          'outfit',
+  },
+  notifications: {
+    hideUpdateReminder: false,
+    forceRefreshOutsideQuiz: false,
+    hideThemeNudge: false,
+    hideBugReportReminder: false,
+    goSilent: false,
+    goSilentAutoOff24h: false,
+    // Timestamp (ms) of when goSilent was last turned on — null while it's
+    // off. Drives the 24h auto-off check in applyNotificationSettings();
+    // stored (not just held in memory) so the 24h window survives a reload
+    // instead of quietly resetting every visit.
+    goSilentEnabledAt: null,
+  },
+  study: {
+    showLiveTimer: true,
+    // Random N draws skip the problems the previous attempt just showed.
+    avoidRepeatProblems: true,
+    // Logo / ✕ / New quiz ask before discarding a started Random N attempt.
+    warnBeforeLeavingQuiz: true,
+    // Problem figures as the redrawn, theme-coloured SVGs (on) or the
+    // original images (off). See js/figure-style.js.
+    redrawnFigures: true,
+    resetFilterOnLoad: false,
+    autoStopAt50Min: false,
+    fullscreenRandomN: true,
+    // 'ask' | 'ordinary' | 'lockdown': how a Random N attempt starts, set by
+    // the choice screen's "Remember" (js/lockdown.js).
+    quizStartMode: 'ask',
+    // The 10-second "you're in full screen" banner: hidden unless turned on.
+    hideFullscreenReminder: true,
+    hideTopicWhileActive: false,
+    // The main screen preselects the set last started in Random N or
+    // Entire Set (js/quiz-engine.js, _lastUsedQuizNum). Replaced
+    // selectLatestQuizByDefault (the newest available set), dropped in
+    // migrateSettings.
+    selectLastUsedQuiz: true,
+    cumulativeDefaultOn: false,
+    lockSolveAllOrder: false,
+    // 'ordered' | 'unordered' — sub of lockSolveAllOrder, which order gets
+    // used automatically once the order-picker modal is skipped.
+    solveAllLockedOrder: 'ordered',
+    revealWrongInstantly: false,
+    // 'note' | 'hint' | 'button' | 'off': what a wrong answer matching a
+    // common mistake does (js/common-mistakes.js).
+    commonMistakes: 'note',
+    // 'inline' | 'tabs' | 'legacy': where a card's controls sit (js/card-layout.js).
+    cardLayout: 'inline',
+    // The left/right progress rail shown beside Solve-All on wide screens
+    // (js/solve-all-nav.js). On by default — it's been the only behavior
+    // until now, so this just makes it optional going forward.
+    showSolveAllNavRail: true,
+    // The floating solved-count badge, bottom-right, during Solve-All
+    // (#stickyScore). Was always on; now optional, still on by default.
+    showStickyScore: true,
+    // The Solution screen opens with its Solution list already showing,
+    // with no ✕, instead of the ‹ › row (js/solutions.js, openSolution).
+    openSolutionList: true,
+  },
+  offline: {
+    // ms epoch when the current "Go offline" 24h window expires — null
+    // while offline mode is off. See js/offline-mode.js, which owns
+    // everything else about this feature (the download, the IndexedDB
+    // mirror sw.js reads, the tab's own rendering); this file only needs
+    // to know the key exists so getSetting/setSetting/migrateSettings work
+    // the same way for it as for every other setting.
+    until: null,
+    // Settings > Sync & Storage > "Sync settings on this device"
+    // (js/settings-sync.js). Lives in this tab because the tab is never
+    // synced and never in a backup: whether a device syncs is that
+    // device's own choice.
+    syncSettings: true,
+  },
+};
+
+let settingsCache = null;
+
+// Loads once per page life, merges saved data over SETTINGS_DEFAULTS (see
+// migrateSettings), and caches the result — every getSetting/setSetting
+// call after the first reuses this instead of re-parsing localStorage.
+function loadSettings() {
+  if (settingsCache) return settingsCache;
+  let raw = null;
+  try {
+    raw = JSON.parse(localStorage.getItem(SETTINGS_STORAGE_KEY) || 'null');
+  } catch (e) {
+    raw = null; // corrupted/foreign value — fall back to defaults rather than throw
+  }
+  settingsCache = migrateSettings(raw);
+  return settingsCache;
+}
+
+// Merges whatever was actually saved (possibly from an older
+// schemaVersion, possibly missing keys added since) on top of
+// SETTINGS_DEFAULTS. A brand-new key added in a future phase just shows up
+// with its default the first time an old save is loaded — no explicit
+// per-version migration steps needed as long as every setting has a
+// sensible default here. schemaVersion is still stamped and kept for the
+// day a change genuinely isn't additive (e.g. a renamed/restructured key)
+// and needs a real one-off transform.
+function migrateSettings(raw) {
+  const merged = { schemaVersion: SETTINGS_SCHEMA_VERSION };
+  for (const tab of Object.keys(SETTINGS_DEFAULTS)) {
+    const savedTab = (raw && typeof raw[tab] === 'object' && raw[tab]) ? raw[tab] : {};
+    merged[tab] = { ...SETTINGS_DEFAULTS[tab], ...savedTab };
+  }
+  // Reduce motion moved from Study to Display: carry an old save over.
+  const oldStudy = raw && typeof raw.study === 'object' && raw.study;
+  if (oldStudy && typeof oldStudy.reduceMotion === 'boolean'
+      && !(raw.display && typeof raw.display.reduceMotion === 'boolean')) {
+    merged.display.reduceMotion = oldStudy.reduceMotion;
+  }
+  delete merged.study.reduceMotion;
+  // "Select latest quiz" became "Select last used quiz" (a new key, on by
+  // default): the old choice doesn't carry over.
+  delete merged.study.selectLatestQuizByDefault;
+  // Outfit became the default font; the old default ('default', the colour
+  // theme's own font) is now the 'theme' option. Defaults are saved along
+  // with real choices, so an old 'default' can't be told apart from a
+  // deliberate pick: it moves to the new default, and "(previous)" in the
+  // list brings the theme font back.
+  if (merged.display.uiFont === 'default' || !merged.display.uiFont) merged.display.uiFont = 'outfit';
+  return merged;
+}
+
+function saveSettings() {
+  if (!settingsCache) return;
+  try {
+    localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settingsCache));
+  } catch (e) {
+    console.error('Failed to save settings:', e);
+  }
+}
+
+function getSetting(tab, key) {
+  const s = loadSettings();
+  return s[tab] ? s[tab][key] : undefined;
+}
+
+function setSetting(tab, key, value) {
+  const s = loadSettings();
+  if (!s[tab]) s[tab] = {};
+  s[tab][key] = value;
+  saveSettings();
+  if (typeof settingsSyncNoteLocalChanges === 'function') settingsSyncNoteLocalChanges(); // js/settings-sync.js
+}
+
+// ── Screen state ────────────────────────────────────────────────────────
+let settingsActiveTab = 'display';
+
+// Reachable from the same fixed top-right icon strip as the manual button,
+// so it can be opened from mid-quiz/mid-stats/mid-forum too — not just the
+// landing screen. Keeps its own copy of the host list (same convention as
+// MANUAL_HOSTS in js/manual.js and FORUM_FAB_HOSTS in js/forum.js) rather
+// than sharing one, so this module doesn't depend on load order relative
+// to theirs.
+const SETTINGS_HOSTS = [
+  {
+    id: 'appPage',
+    isVisible: el => el.classList.contains('visible'),
+    hide:      el => el.classList.remove('visible', 'fading-out'),
+    show:      el => el.classList.add('visible'),
+    scrollY: 0,
+  },
+  {
+    id: 'statsScreen',
+    isVisible: el => el.classList.contains('visible'),
+    hide:      el => el.classList.remove('visible', 'fading-out'),
+    show:      el => el.classList.add('visible'),
+    scrollY: 0,
+  },
+  {
+    id: 'reviewScreen',
+    isVisible: el => el.classList.contains('visible'),
+    hide:      el => el.classList.remove('visible', 'fading-out'),
+    show:      el => el.classList.add('visible'),
+    scrollY: 0,
+  },
+  {
+    id: 'forumScreen',
+    isVisible: el => el.classList.contains('visible'),
+    hide:      el => el.classList.remove('visible', 'fading-out'),
+    show:      el => el.classList.add('visible'),
+    scrollY: 0,
+  },
+  {
+    id: 'manualScreen',
+    isVisible: el => el.classList.contains('visible'),
+    hide:      el => el.classList.remove('visible', 'fading-out'),
+    show:      el => el.classList.add('visible'),
+    scrollY: 0,
+  },
+  {
+    id: 'choicePage',
+    isVisible: el => !el.classList.contains('hidden'),
+    hide:      el => el.classList.add('hidden'),
+    show:      el => el.classList.remove('hidden', 'fading-out'),
+    scrollY: 0,
+  },
+  {
+    // js/license.js — the settings gear is reachable from it too.
+    id: 'licenseScreen',
+    isVisible: el => el.classList.contains('visible'),
+    hide:      el => el.classList.remove('visible', 'fading-out'),
+    show:      el => el.classList.add('visible'),
+    scrollY: 0,
+  },
+  {
+    // js/solutions.js — reachable from the Solution screen too. Without
+    // this entry it stayed showing, stacked under the screen opened over it.
+    id: 'solutionScreen',
+    isVisible: el => el.classList.contains('visible'),
+    hide:      el => el.classList.remove('visible', 'fading-out'),
+    show:      el => el.classList.add('visible'),
+    scrollY: 0,
+  },
+];
+
+let settingsHostId = null;
+
+// Mirrors FORUM_FAB_HOSTS' own host.scrollY (js/forum.js) — see the same
+// comment on manualLandingScrollY (js/manual.js). Landing isn't in
+// SETTINGS_HOSTS (it's the fallback, not a host entry), so its own return
+// offset needs its own variable rather than living on a host object.
+let settingsLandingScrollY = 0;
+
+// ── Logical open/closed state + in-flight-animation guard ─────────────────
+// The panel's own `visible` CSS class only gets added/removed inside the
+// 280ms setTimeout below (to match the fade animation), so checking that
+// class to decide "is it open" is unreliable for the first ~280ms after
+// either action — a fast second tap (gear then logo, or vice versa) landed
+// in that window read the *stale* class, and worse, the first action's
+// delayed callback had no idea a second action had countermanded it, so it
+// ran anyway once its timer fired — sometimes leaving the panel stuck
+// visible with the landing page hidden, sometimes both rendered at once
+// (#settingsScreen sits later in the DOM than #landingScreen, so "both
+// visible" shows the panel appended below the main page).
+// `settingsIsOpen` is the authoritative state, set the instant open/close
+// is *decided* rather than when its animation finishes, and
+// `settingsAnimTimer` lets each call cancel whatever the other one still
+// had pending before scheduling its own.
+let settingsIsOpen = false;
+let settingsAnimTimer = null;
+
+function isSettingsScreenOpen() {
+  return settingsIsOpen;
+}
+
+function toggleSettingsScreen() {
+  if (settingsIsOpen) {
+    closeSettingsScreen();
+  } else {
+    openSettingsScreen();
+  }
+}
+
+function openSettingsScreen(initialTab = 'display', focusRowKey = null) {
+  const landing  = document.getElementById('landingScreen');
+  const settings = document.getElementById('settingsScreen');
+  if (!landing || !settings || settingsIsOpen) return;
+  settingsIsOpen = true;
+  const requestedTab = ['display', 'notifications', 'study', 'offline'].includes(initialTab) ? initialTab : 'display';
+  // #saNavRail/#stickyScore are position:fixed and independent of whichever
+  // screen is showing, so they render on top of #settingsScreen unless we
+  // hide them explicitly — see the html.settings-screen-open rule in
+  // css/settings.css. Toggled immediately (not inside the fade timeout
+  // below) so there's no frame where they're still visible over the
+  // incoming panel.
+  document.documentElement.classList.add('settings-screen-open');
+  if (settingsAnimTimer) { clearTimeout(settingsAnimTimer); settingsAnimTimer = null; }
+
+  if (typeof setFieldLinesVisible === 'function') setFieldLinesVisible(false);
+
+  const landingShowing = !landing.classList.contains('hidden');
+  const hostEntry = landingShowing ? null : SETTINGS_HOSTS.find(h => {
+    const el = document.getElementById(h.id);
+    return el && h.isVisible(el);
+  });
+  const hostEl = hostEntry ? document.getElementById(hostEntry.id) : landing;
+  settingsHostId = hostEntry ? hostEntry.id : null;
+
+  // Capture wherever the host page is currently scrolled to before hiding
+  // it, then start the Settings screen itself at the top — same convention
+  // as FORUM_FAB_HOSTS (js/forum.js) and the attempt-review sub-screen
+  // (js/stats.js), just applied to Settings too.
+  const scrollY = typeof captureScreenScroll === 'function' ? captureScreenScroll() : (window.scrollY || 0);
+  if (hostEntry) hostEntry.scrollY = scrollY; else settingsLandingScrollY = scrollY;
+
+  // Defensive: strip any 'fading-out' a just-cancelled close attempt might
+  // have left on the panel itself before this open's own animation starts.
+  settings.classList.remove('fading-out');
+  hostEl.classList.add('fading-out');
+  settingsAnimTimer = setTimeout(() => {
+    settingsAnimTimer = null;
+    if (hostEntry) {
+      hostEntry.hide(hostEl);
+    } else {
+      hostEl.classList.add('hidden');
+      hostEl.classList.remove('fading-out');
+    }
+    settings.classList.add('visible');
+    if (typeof scrollScreenToTop === 'function') scrollScreenToTop();
+    else window.scrollTo(0, 0);
+    // Normal opens still land on Display. Deep links (such as the
+    // full-screen reminder) can request a specific tab without changing
+    // that default for the gear button.
+    settingsActiveTab = requestedTab;
+    renderSettingsScreen();
+    if (focusRowKey) _scrollSettingsRowIntoView(focusRowKey);
+  }, 280);
+}
+
+function _scrollSettingsRowIntoView(rowKey) {
+  if (!rowKey) return;
+  requestAnimationFrame(() => {
+    const row = document.querySelector(`[data-row-key="${rowKey}"]`);
+    if (!row) return;
+    row.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'auto' });
+  });
+}
+
+// Used by the Random N full-screen hint: the whole banner is a shortcut
+// straight to the relevant Study setting, including when Settings is
+// already open on a different tab.
+function openSettingsStudySection(rowKey = 'fullscreenRandomN') {
+  if (settingsIsOpen) {
+    settingsActiveTab = 'study';
+    renderSettingsScreen();
+    _scrollSettingsRowIntoView(rowKey);
+    return;
+  }
+  openSettingsScreen('study', rowKey);
+}
+
+// `forceLanding` is true only when goToMainMenu() (quiz-engine.js) closes
+// Settings via the site logo/main-menu action — same convention as
+// closeManualScreen/closeForumScreen's own forceLanding param.
+function closeSettingsScreen(forceLanding) {
+  const landing  = document.getElementById('landingScreen');
+  const settings = document.getElementById('settingsScreen');
+  if (!landing || !settings || !settingsIsOpen) return;
+  settingsIsOpen = false;
+  // Counterpart to the class added in openSettingsScreen — see that
+  // comment. Removed up front, same reasoning: no stale hidden frame once
+  // Settings starts closing.
+  document.documentElement.classList.remove('settings-screen-open');
+  if (settingsAnimTimer) { clearTimeout(settingsAnimTimer); settingsAnimTimer = null; }
+
+  settings.classList.add('fading-out');
+  settingsAnimTimer = setTimeout(() => {
+    settingsAnimTimer = null;
+    settings.classList.remove('visible', 'fading-out');
+
+    const hostId = settingsHostId;
+    settingsHostId = null;
+
+    // Defensive: if open() had already started fading its host out before
+    // this close cancelled it, that host never got to finish (or undo)
+    // that fade — clear it here so it can never get stuck mid-transition.
+    landing.classList.remove('fading-out');
+    if (hostId) {
+      const strandedHostEl = document.getElementById(hostId);
+      if (strandedHostEl) strandedHostEl.classList.remove('fading-out');
+    }
+
+    if (forceLanding && typeof exitAppOrChoiceToLanding === 'function') {
+      exitAppOrChoiceToLanding();
+      if (typeof setFieldLinesVisible === 'function') setFieldLinesVisible(true);
+      return;
+    }
+
+    if (hostId) {
+      const host = SETTINGS_HOSTS.find(h => h.id === hostId);
+      const hostEl = host && document.getElementById(hostId);
+      if (host && hostEl) {
+        host.show(hostEl);
+        if (typeof restoreScreenScroll === 'function') restoreScreenScroll(host.scrollY);
+        else window.scrollTo(0, host.scrollY || 0);
+        return;
+      }
+    }
+
+    landing.classList.remove('hidden');
+    if (typeof showNewSplash === 'function') showNewSplash();
+    if (typeof setFieldLinesVisible === 'function') setFieldLinesVisible(true);
+    if (typeof restoreScreenScroll === 'function') restoreScreenScroll(settingsLandingScrollY);
+    else window.scrollTo(0, settingsLandingScrollY || 0);
+  }, 280);
+}
+
+// ── Reset all settings ── run from Settings > Sync & Storage's "Reset all
+// settings" row (CACHE_STORAGE_ROWS in js/offline-mode.js), which owns the
+// tap-twice confirmation.
+//
+// Wipes the whole settings store (every tab, every toggle) back to
+// SETTINGS_DEFAULTS and reloads. A full reload — rather than re-rendering
+// in place the way doResetFilterPreferences() does — is deliberate here:
+// several of these settings only ever get applied once, at boot, before
+// this very script even runs (index.html's anti-flicker inline script,
+// changelog.js's field-lines default, etc.), so there's no single
+// in-place code path that could reliably re-apply every one of them
+// consistently. A reload re-runs that whole boot sequence for free.
+//
+// The Sync & Storage "offline" tab survives the reset: its "Sync settings
+// on this device" switch is the person's choice about syncing itself (a
+// reset used to turn sync back on, then push the defaults to every other
+// device), and offline.until is this device's offline-download state, not
+// a preference. With sync on, the reset still reaches the other devices:
+// on the reload every reset value reads as a change made now
+// (settingsSyncNoteLocalChanges in js/settings-sync.js), which beats the
+// older copies on the server.
+function doResetAllSettings() {
+  const keep = loadSettings().offline;
+  settingsCache = null;
+  try {
+    if (keep) localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify({ schemaVersion: SETTINGS_SCHEMA_VERSION, offline: keep }));
+    else localStorage.removeItem(SETTINGS_STORAGE_KEY);
+  } catch (e) {
+    localStorage.removeItem(SETTINGS_STORAGE_KEY);
+  }
+  location.reload(true);
+}
+
+// ── Export / Import settings backup ─────────────────────────────────────
+// Lets the whole settings store move to another device/browser, or be
+// restored after a reinstall or a cleared site data. Exported as flat
+// "tab.key" codes (e.g. "display.showAvatar") rather than the nested
+// {tab:{key}} shape settingsCache actually uses — that flat code is each
+// setting's stable identity in a backup file, independent of which tab it
+// happens to live under in SETTINGS_DEFAULTS today. That's what makes an
+// old backup safe to import after later phases change things:
+//  - a setting added since the backup was made simply isn't in the file,
+//    so it's left alone (same per-key merge migrateSettings() already does
+//    for a freshly-loaded old save — importing doesn't wipe the store, it
+//    only overwrites the keys actually present in the file);
+//  - a setting removed since the backup was made has no matching code
+//    anymore, so it's silently skipped rather than resurrected;
+//  - a setting that moves to a different tab in a future phase still
+//    matches by its code as long as the code itself (tab.key at the time
+//    it was first introduced) isn't reused for something else — same
+//    convention as never reassigning an old localStorage key to a new
+//    meaning.
+// Only a setting's key itself getting renamed breaks the match — no worse
+// than what a rename would already do to migrateSettings().
+const SETTINGS_BACKUP_APP_ID = 'flux-settings-backup';
+
+// Tabs deliberately left out of every export/import: not real portable
+// preferences, just runtime state tied to *this* device's own cache/
+// download, which a backup file can't carry along with the number.
+// offline.until says whether sw.js should currently be treating the
+// offline-mode file cache as present — importing that timestamp from
+// another device (or an old backup on this one) without the matching
+// download actually existing risks the app believing it's offline-ready,
+// and sw.js blocking every request, when nothing was actually fetched.
+const SETTINGS_BACKUP_EXCLUDED_TABS = ['offline'];
+
+// Codes a setting had in older backups, mapped to its code now, so a backup
+// made before a setting moved tabs still restores it.
+const SETTINGS_BACKUP_RENAMED_CODES = {
+  'study.reduceMotion': 'display.reduceMotion',
+};
+
+function _settingsBackupValidCodes() {
+  const codes = {};
+  for (const tab of Object.keys(SETTINGS_DEFAULTS)) {
+    if (SETTINGS_BACKUP_EXCLUDED_TABS.indexOf(tab) !== -1) continue;
+    for (const key of Object.keys(SETTINGS_DEFAULTS[tab])) codes[tab + '.' + key] = true;
+  }
+  return codes;
+}
+
+function buildSettingsBackupPayload() {
+  const s = loadSettings();
+  const flat = {};
+  for (const code of Object.keys(_settingsBackupValidCodes())) {
+    const dot = code.indexOf('.');
+    const tab = code.slice(0, dot), key = code.slice(dot + 1);
+    flat[code] = s[tab] ? s[tab][key] : SETTINGS_DEFAULTS[tab][key];
+  }
+  return {
+    app: SETTINGS_BACKUP_APP_ID,
+    schemaVersion: SETTINGS_SCHEMA_VERSION,
+    exportedAt: new Date().toISOString(),
+    settings: flat,
+  };
+}
+
+function exportSettingsBackup() {
+  try {
+    const payload = buildSettingsBackupPayload();
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `flux-settings-backup-${payload.exportedAt.slice(0, 10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (e) {
+    console.error('Settings export failed:', e);
+    alert("Sorry \u2014 that export didn't work. Please try again.");
+  }
+}
+
+function triggerImportSettingsBackup() {
+  const input = document.getElementById('settingsImportFileInput');
+  if (input) input.click();
+}
+
+// Validates and previews the whole import (which codes match, which are
+// unrecognized) before writing anything, so a cancelled confirm() below
+// leaves settingsCache/localStorage completely untouched — the write only
+// happens after the person confirms.
+function handleSettingsImportFileSelected(event) {
+  const input = event.target;
+  const file = input.files && input.files[0];
+  input.value = ''; // reset so re-picking the same file still fires 'change' next time
+  if (!file) return;
+
+  const reader = new FileReader();
+  reader.onload = () => {
+    let data;
+    try {
+      data = JSON.parse(reader.result);
+    } catch (e) {
+      alert("That file isn't a valid settings backup (couldn't be read as JSON).");
+      return;
+    }
+    if (!data || typeof data.settings !== 'object' || !data.settings) {
+      alert("That file isn't a valid settings backup.");
+      return;
+    }
+
+    const validCodes = _settingsBackupValidCodes();
+    const toApply = [];
+    let skipped = 0;
+    for (let code of Object.keys(data.settings)) {
+      const value = data.settings[code];
+      code = SETTINGS_BACKUP_RENAMED_CODES[code] || code;
+      if (!validCodes[code]) { skipped++; continue; }
+      const dot = code.indexOf('.');
+      toApply.push([code.slice(0, dot), code.slice(dot + 1), value]);
+    }
+
+    if (toApply.length === 0) {
+      alert("That backup didn't contain any settings this version recognizes.");
+      return;
+    }
+
+    const skippedNote = skipped ? ` (${skipped} unrecognized entr${skipped === 1 ? 'y' : 'ies'} skipped)` : '';
+    const ok = confirm(`Import ${toApply.length} setting${toApply.length === 1 ? '' : 's'}${skippedNote}? This overwrites your current settings and reloads the page.`);
+    if (!ok) return;
+
+    toApply.forEach(([tab, key, value]) => setSetting(tab, key, value));
+    // Same full-reload approach as doResetAllSettings() above, and for the
+    // same reason: several settings only ever get applied once at boot
+    // (index.html's anti-flicker inline script, changelog.js's field-lines
+    // default, etc.), so a reload is the one path that's guaranteed to
+    // re-apply every imported value consistently, not just the ones this
+    // file happens to also re-apply live.
+    location.reload();
+  };
+  reader.onerror = () => {
+    alert("Sorry \u2014 that file couldn't be read. Please try again.");
+  };
+  reader.readAsText(file);
+}
+
+// ── Rendering (called from renderSettingsOfflineTab() in js/offline-mode.js,
+// appended after its own Cache & storage section — see that file — so this
+// is always the very last section of the Settings screen.) ──
+function renderSettingsBackupSection() {
+  return `
+    <div class="settings-backup-section" data-row-key="backup">
+      <div class="settings-offline-heading">Backup</div>
+      <div class="settings-offline-desc">Save every setting on this device to a file, or restore one saved earlier \u2014 including on another device, or after clearing site data. A setting added since an old backup was made just keeps its default; one removed since is skipped.</div>
+      <div class="settings-backup-btn-row">
+        <button type="button" class="settings-offline-btn settings-offline-btn-secondary" onclick="exportSettingsBackup()" title="Download all settings as a file">
+          <span class="settings-offline-btn-label">\u2B07\uFE0F Export settings</span>
+        </button>
+        <button type="button" class="settings-offline-btn settings-offline-btn-secondary" onclick="triggerImportSettingsBackup()" title="Restore settings from a file">
+          <span class="settings-offline-btn-label">\u2B06\uFE0F Import settings</span>
+        </button>
+      </div>
+      <input type="file" id="settingsImportFileInput" accept="application/json,.json" style="display:none" onchange="handleSettingsImportFileSelected(event)">
+    </div>
+  `;
+}
+
+const SETTINGS_TABS = [
+  { id: 'display',       label: 'Display' },
+  { id: 'notifications', label: 'Notifications' },
+  { id: 'study',         label: 'Study' },
+  { id: 'offline',       label: 'Sync & Storage' },
+  { id: 'search',        label: 'Search' }, // js/settings-search.js
+];
+
+function switchSettingsTab(tabId) {
+  settingsActiveTab = tabId;
+  renderSettingsScreen();
+}
+
+function renderSettingsScreen() {
+  renderSettingsTabs();
+  renderSettingsBody();
+}
+
+function renderSettingsTabs() {
+  const nav = document.getElementById('settingsTabs');
+  if (!nav) return;
+  nav.innerHTML = SETTINGS_TABS.map(t => `
+    <button class="settings-tab-btn${t.id === settingsActiveTab ? ' active' : ''}"
+            onclick="switchSettingsTab('${t.id}')">${t.label}</button>
+  `).join('');
+}
+
+// One row-renderer per tab. Display has the five Phase 1 toggles; the rest
+// still render their empty-state note. Later phases replace a tab's body
+// here with its real rows — the surrounding panel/tabs/storage layer
+// doesn't change.
+function renderSettingsBody() {
+  const body = document.getElementById('settingsBody');
+  if (!body) return;
+
+  if (settingsActiveTab === 'display') {
+    body.innerHTML = renderSettingsDisplayTab();
+  } else if (settingsActiveTab === 'notifications') {
+    body.innerHTML = renderSettingsNotificationsTab();
+  } else if (settingsActiveTab === 'study') {
+    body.innerHTML = renderSettingsStudyTab();
+  } else if (settingsActiveTab === 'offline') {
+    body.innerHTML = renderSettingsOfflineTab(); // js/offline-mode.js
+    // The "Reset prerendered LaTeX equations" button's own label has a
+    // literal $\mathrm{La\TeX}$ snippet in it (see renderCacheStorageSection
+    // in js/offline-mode.js) — needs an explicit typeset pass same as any
+    // other dynamically-inserted math, since MathJax only ever looks at
+    // elements it's told to.
+    if (typeof renderMathIn === 'function') renderMathIn(body);
+  } else if (settingsActiveTab === 'search' && typeof renderSettingsSearchTab === 'function') {
+    renderSettingsSearchTab(body); // js/settings-search.js
+  }
+}
+
+// One row per Display toggle: {key in SETTINGS_DEFAULTS.display, section,
+// title, desc}. `section` is the heading it's listed under (DISPLAY_SECTIONS).
+// Checked = shown (default); unchecked = hidden. The one exception is
+// followDeviceTheme (`sub`, grouped under showDaylightBtn — see
+// renderSettingsDisplayTab): checked means "on" rather than "shown". While
+// it's on, showDaylightBtn's own row renders forced-off and disabled (its
+// stored value is untouched, just not in effect) and applyDisplaySettings()
+// keeps the actual button hidden in the top icon strip regardless of that
+// stored value.
+const DISPLAY_TOGGLES = [
+  {
+    key: 'showAvatar',
+    section: 'main',
+    title: 'Show floating avatar',
+    desc: 'Shows the signed-in identity avatar on the main page.',
+  },
+  {
+    key: 'showSplashes',
+    section: 'main',
+    title: 'Show floating splashes',
+    desc: 'Shows the Minecraft-style splash text badge on the main page.',
+  },
+  {
+    key: 'showCabinetBtn',
+    section: 'main',
+    title: 'Show personal cabinet button',
+    desc: 'Shows the 👤 button beside the logo that opens your stats.',
+  },
+  {
+    key: 'showManualBtn',
+    section: 'main',
+    title: 'Show manual button',
+    desc: 'Shows the 📖 manual button in the top icon strip.',
+  },
+  {
+    key: 'showThemeBtn',
+    section: 'main',
+    title: 'Show theme selector button',
+    desc: 'Shows the 🎨 color-theme button in the top icon strip.',
+  },
+  {
+    key: 'showDaylightBtn',
+    section: 'main',
+    title: 'Show daylight switch button',
+    desc: 'Shows the light/dark mode toggle in the top icon strip.',
+  },
+  {
+    key: 'followDeviceTheme',
+    section: 'main',
+    title: 'Follow device theme',
+    desc: 'Match light/dark mode to your device automatically.',
+    sub: 'showDaylightBtn', // rendered indented, directly under the row for the key above
+  },
+  {
+    key: 'showForumFab',
+    section: 'extra',
+    title: 'Show floating forum button',
+    desc: 'Shows the floating 💬 forum button that follows you mid-quiz, in Stats, and elsewhere off the main page.',
+  },
+  {
+    key: 'showTopBarTip',
+    section: 'extra',
+    title: 'Show running line',
+    desc: 'Shows the rotating one-line tip that occasionally appears in the top bar once it\u2019s scrolled.',
+  },
+  {
+    key: 'hideFigAnimControls',
+    section: 'anim',
+    title: 'Hide animation control buttons',
+    desc: 'Hides the play button and speed chip under animated figures, so they stay as the still drawing.',
+  },
+  {
+    key: 'showLogoTumble',
+    section: 'anim',
+    title: 'Logo animation',
+    desc: 'Tumbles the logo when the main menu opens.',
+  },
+  {
+    key: 'hideFieldLinesByDefault',
+    section: 'anim',
+    title: 'Hide field lines by default',
+    desc: 'Hides field lines animation that appear upon changelog opening.',
+  },
+];
+
+const DISPLAY_SECTIONS = [
+  { id: 'font',  title: 'Font' },
+  { id: 'icons', title: 'Icons' },
+  { id: 'main',  title: 'Main screen' },
+  { id: 'anim',  title: 'Animations and figures' },
+  { id: 'extra', title: 'Extra' },
+  { id: 'vision', title: 'Colour vision' },
+];
+
+// Three headed sections like the Study tab's. Toggles that have a `sub`
+// entry pointing at them get rendered as one visually-grouped unit with
+// that sub-row — showDaylightBtn/followDeviceTheme. "Animations and
+// figures" opens with Reduce motion and its battery sub-row, then the
+// figure sliders/switches, then its plain toggles.
+function renderSettingsDisplayTab() {
+  const followDevice = getSetting('display', 'followDeviceTheme') === true;
+
+  function renderRow(t, opts) {
+    opts = opts || {};
+    const blocked = !!opts.blocked;
+    const storedOn = getSetting('display', t.key) !== false;
+    // Blocked rows render forced-off, not whatever the user last stored —
+    // that stored value is exactly what comes back once unblocked, so it's
+    // never overwritten just because it's temporarily moot.
+    const on = blocked ? false : storedOn;
+    // followDeviceTheme also has to (re)sync the actual light/dark mode
+    // and its matchMedia listener the moment it's flipped, not just the
+    // hide/show class applyDisplaySettings() handles for every other row.
+    // hideFieldLinesByDefault is intentionally NOT special-cased here
+    // (unlike followDeviceTheme above): it only ever writes the persisted
+    // default via the generic branch below, with no call into
+    // setFieldLinesEnabled — see js/changelog.js's toggleFieldLines() for
+    // the session-only counterpart this no longer syncs with.
+    const onchange = t.key === 'followDeviceTheme'
+      ? `setSetting('display', '${t.key}', this.checked); applyFollowDeviceTheme(); applyDisplaySettings(); syncShowDaylightBtnBlock(this.checked);`
+      : `setSetting('display', '${t.key}', this.checked); applyDisplaySettings();`;
+    return `
+      <div class="settings-row${opts.sub ? ' settings-row-sub' : ''}${blocked ? ' settings-row-blocked' : ''}" data-row-key="${t.key}">
+        <div class="settings-row-label">
+          <div class="settings-row-title">${t.title}</div>
+          <div class="settings-row-desc">${t.desc}</div>
+        </div>
+        <label class="settings-switch">
+          <input type="checkbox" ${on ? 'checked' : ''} ${blocked ? 'disabled' : ''}
+                 onchange="${onchange}">
+          <span class="settings-switch-track"></span>
+        </label>
+      </div>
+    `;
+  }
+
+  function renderToggles(section) {
+    const out = [];
+    for (const t of DISPLAY_TOGGLES) {
+      if (t.section !== section || t.sub) continue; // a sub is rendered inline below, as part of its parent's group
+      const subToggle = DISPLAY_TOGGLES.find(s => s.sub === t.key);
+      if (!subToggle) { out.push(renderRow(t)); continue; }
+      out.push(`
+        <div class="settings-group">
+          ${renderRow(t, { blocked: t.key === 'showDaylightBtn' && followDevice })}
+          ${renderRow(subToggle, { sub: true })}
+        </div>
+      `);
+    }
+    return out.join('');
+  }
+
+  const html = [];
+  for (const sec of DISPLAY_SECTIONS) {
+    html.push(`<div class="settings-section-header">${sec.title}</div>`);
+    if (sec.id === 'font') html.push(renderUiFontRow());
+    if (sec.id === 'icons') html.push(renderIconStyleRow());
+    if (sec.id === 'anim') {
+      html.push(renderReduceMotionGroup());
+      html.push(renderFigureSettingsRows());
+    }
+    if (sec.id === 'vision') html.push(renderColorCorrectionRow());
+    html.push(renderToggles(sec.id));
+  }
+  return html.join('');
+}
+
+// Colour correction: shifts every colour on the site so colours a given
+// colour-vision deficiency merges become distinguishable again.
+const COLOR_CORRECTION_OPTIONS = [
+  { id: 'off',    name: 'Off' },
+  { id: 'deutan', name: 'Deuteranopia (green)' },
+  { id: 'protan', name: 'Protanopia (red)' },
+  { id: 'tritan', name: 'Tritanopia (blue)' },
+];
+function colorCorrectionValue() {
+  const v = getSetting('display', 'colorCorrection');
+  return COLOR_CORRECTION_OPTIONS.some(o => o.id === v) ? v : 'off';
+}
+function applyColorCorrection() {
+  const v = colorCorrectionValue();
+  if (v === 'off') document.documentElement.removeAttribute('data-color-correction');
+  else document.documentElement.setAttribute('data-color-correction', v);
+}
+function renderColorCorrectionRow() {
+  const current = colorCorrectionValue();
+  const options = COLOR_CORRECTION_OPTIONS.map(o =>
+    `<option value="${o.id}"${o.id === current ? ' selected' : ''}>${o.name}</option>`).join('');
+  return `
+    <div class="settings-row" data-row-key="colorCorrection">
+      <div class="settings-row-label">
+        <div class="settings-row-title">Colour correction</div>
+        <div class="settings-row-desc">Adjusts all colours on the site, logo included, to make them easier to tell apart.</div>
+      </div>
+      <select class="settings-select" id="settingsColorCorrection" aria-label="Colour correction"
+              onchange="setSetting('display', 'colorCorrection', this.value); applyColorCorrection();">${options}</select>
+    </div>
+  `;
+}
+
+// Icons: Modern (emoji) or Classic (drawn), js/icons.js. Each button shows
+// its own sample whatever the current style: Modern's emoji are kept as
+// they are (.ic-keep), Classic's are pre-wrapped and always drawn
+// (.ic-always).
+function renderIconStyleRow() {
+  const style = getSetting('display', 'iconStyle') === 'modern' ? 'modern' : 'classic';
+  const btn = (value, label, sample) => `
+          <button type="button" class="settings-choice-btn settings-icon-style-btn${style === value ? ' active' : ''}" data-icon-style="${value}"
+                  onclick="setIconStyleSetting('${value}')">${label}<span class="settings-icon-style-sample">${sample}</span></button>`;
+  return `
+    <div class="settings-row" data-row-key="iconStyle">
+      <div class="settings-row-label">
+        <div class="settings-row-title">Icon style</div>
+      </div>
+      <div class="settings-choice-group">${
+        btn('modern', 'Modern', '<span class="ic-keep">🎨 ⚠️</span>')}${
+        btn('classic', 'Classic', '<span class="ic ic-always" data-ic="palette">🎨</span> <span class="ic ic-always" data-ic="warning">⚠️</span>')}</div>
+    </div>
+  `;
+}
+
+// Font: one font for all text, headers included, over the theme's own.
+// Options come from window.UI_FONT_OPTIONS (index.html's <head>). A custom
+// dropdown rather than a <select>, so each name is drawn in its own font
+// (phones' native pickers ignore fonts on <option>).
+function uiFontFamily(f) {
+  return f.family ? `'${f.family}', ${uiThemeSansFont()}` : uiThemeSansFont();
+}
+// The colour theme's own --sans, read with the override briefly lifted, so
+// the "(previous)" option shows the font it would actually bring back.
+// Lifting the override restyles the whole page (seconds on Solve-All), so
+// one reading is reused for the rest of the current task: rendering the
+// list asks once per option.
+let _uiThemeSansCache = null;
+function uiThemeSansFont() {
+  if (_uiThemeSansCache !== null) return _uiThemeSansCache;
+  _uiThemeSansCache = readUiThemeSansFont();
+  setTimeout(() => { _uiThemeSansCache = null; }, 0);
+  return _uiThemeSansCache;
+}
+function readUiThemeSansFont() {
+  const root = document.documentElement;
+  const id = root.getAttribute('data-ui-font');
+  if (id) root.removeAttribute('data-ui-font');
+  const sans = getComputedStyle(document.body).getPropertyValue('--sans').trim() || 'sans-serif';
+  if (id) root.setAttribute('data-ui-font', id);
+  return sans;
+}
+
+// The list as shown: the theme font named after the font it really is in
+// the current colour theme ("IBM Plex Sans (previous)"), everything sorted
+// alphabetically by that shown name.
+function uiFontOptions() {
+  const fonts = window.UI_FONT_OPTIONS || [];
+  const themeName = (uiThemeSansFont().split(',')[0] || '').replace(/['"]/g, '').trim();
+  return fonts
+    .map(f => f.id === 'theme' && themeName ? { ...f, name: `${themeName} (previous)` } : f)
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+function uiFontById(id) {
+  const fonts = uiFontOptions();
+  return fonts.find(f => f.id === id) || fonts.find(f => f.id === 'outfit') || fonts[0];
+}
+
+function renderUiFontRow() {
+  const fonts = uiFontOptions();
+  if (!fonts.length) return '';
+  const current = uiFontById(getSetting('display', 'uiFont'));
+  const esc = s => s.replace(/"/g, '&quot;');
+  const options = fonts.map(f => `
+          <li role="option" class="settings-font-option" tabindex="-1" data-font="${f.id}"
+              aria-selected="${f.id === current.id}" style="font-family: ${esc(uiFontFamily(f))}"
+              onclick="pickUiFont('${f.id}')">${f.name}</li>`).join('');
+  return `
+    <div class="settings-row" data-row-key="uiFont">
+      <div class="settings-row-label">
+        <div class="settings-row-title">Font</div>
+        <div class="settings-row-desc">Used for all text, headers and buttons included, whatever the colour theme. Problems and equations keep their own font.</div>
+      </div>
+      <div class="settings-font-picker" onkeydown="uiFontMenuKey(event, this)">
+        <button type="button" class="settings-select settings-font-btn" aria-haspopup="listbox" aria-expanded="false"
+                aria-label="Font: ${current.name}" style="font-family: ${esc(uiFontFamily(current))}"
+                onclick="toggleUiFontMenu(this.parentNode)">${current.name}</button>
+        <ul class="settings-font-menu" role="listbox" aria-label="Font" hidden>${options}
+        </ul>
+      </div>
+    </div>
+  `;
+}
+
+function toggleUiFontMenu(picker, open) {
+  const menu = picker.querySelector('.settings-font-menu');
+  const btn = picker.querySelector('.settings-font-btn');
+  if (open === undefined) open = menu.hidden;
+  if (open && typeof loadUiFontPreviews === 'function') loadUiFontPreviews();
+  menu.hidden = !open;
+  btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (open) {
+    const sel = menu.querySelector('[aria-selected="true"]') || menu.firstElementChild;
+    if (sel) sel.focus();
+  }
+}
+
+// ↑ ↓ Home End move, Enter/Space picks, Esc and Tab close.
+function uiFontMenuKey(e, picker) {
+  const menu = picker.querySelector('.settings-font-menu');
+  const btn = picker.querySelector('.settings-font-btn');
+  if (menu.hidden) {
+    if (e.target === btn && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+      e.preventDefault();
+      toggleUiFontMenu(picker, true);
+    }
+    return;
+  }
+  const items = Array.from(menu.children);
+  const i = items.indexOf(document.activeElement);
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    const next = i < 0 ? 0 : (i + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+    items[next].focus();
+  } else if (e.key === 'Home' || e.key === 'End') {
+    e.preventDefault();
+    items[e.key === 'Home' ? 0 : items.length - 1].focus();
+  } else if ((e.key === 'Enter' || e.key === ' ') && i >= 0) {
+    e.preventDefault();
+    pickUiFont(items[i].dataset.font);
+    btn.focus();
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    e.stopPropagation();
+    toggleUiFontMenu(picker, false);
+    btn.focus();
+  } else if (e.key === 'Tab') {
+    toggleUiFontMenu(picker, false);
+  }
+}
+
+// Clicking anywhere outside an open font menu closes it.
+document.addEventListener('click', (e) => {
+  document.querySelectorAll('.settings-font-picker').forEach(picker => {
+    if (!picker.contains(e.target)) {
+      const menu = picker.querySelector('.settings-font-menu');
+      if (!menu.hidden) toggleUiFontMenu(picker, false);
+    }
+  });
+});
+
+function pickUiFont(value) {
+  setSetting('display', 'uiFont', value);
+  applyDisplaySettings();
+  // The Search tab can show this row too; keep every copy in step.
+  const f = uiFontById(value);
+  document.querySelectorAll('.settings-font-picker').forEach(picker => {
+    const btn = picker.querySelector('.settings-font-btn');
+    btn.textContent = f.name;
+    btn.style.fontFamily = uiFontFamily(f);
+    btn.setAttribute('aria-label', 'Font: ' + f.name);
+    picker.querySelectorAll('.settings-font-option').forEach(o => {
+      o.setAttribute('aria-selected', o.dataset.font === value ? 'true' : 'false');
+    });
+    toggleUiFontMenu(picker, false);
+  });
+}
+
+function setIconStyleSetting(value) {
+  setSetting('display', 'iconStyle', value);
+  applyDisplaySettings();
+  document.querySelectorAll('[data-row-key="iconStyle"] .settings-choice-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.iconStyle === value);
+  });
+}
+
+// Animations and figures: Figure size, Default animation speed and the two
+// animated-figure switches.
+function renderFigureSettingsRows() {
+  const rows = [];
+  const figPct = clampFigureScale(getSetting('display', 'figureScale'));
+  rows.push(`
+    <div class="settings-row" data-row-key="figureScale">
+      <div class="settings-row-label">
+        <div class="settings-row-title">Figure size</div>
+        <div class="settings-row-desc">Scales every figure in problems and solutions. Double-click the slider to reset to 100%.</div>
+      </div>
+      <div class="settings-slider">
+        <input type="range" min="${FIGURE_SCALE_MIN}" max="${FIGURE_SCALE_MAX}" step="10" value="${figPct}"
+               aria-label="Figure size" oninput="setFigureScale(this.value)"
+               ondblclick="this.value = 100; setFigureScale(100)">
+        <span class="settings-slider-value" id="figureScaleValue">${figPct}%</span>
+      </div>
+    </div>
+  `);
+  const animSpeed = clampFigAnimSpeed(getSetting('display', 'figAnimSpeed'));
+  const animSwitch = (key, title, desc) => `
+    <div class="settings-row" data-row-key="${key}">
+      <div class="settings-row-label">
+        <div class="settings-row-title">${title}</div>
+        <div class="settings-row-desc">${desc}</div>
+      </div>
+      <label class="settings-switch">
+        <input type="checkbox" ${getSetting('display', key) === true ? 'checked' : ''}
+               onchange="setSetting('display', '${key}', this.checked)">
+        <span class="settings-switch-track"></span>
+      </label>
+    </div>`;
+  rows.push(`
+    <div class="settings-row" data-row-key="figAnimSpeed">
+      <div class="settings-row-label">
+        <div class="settings-row-title">Default animation speed</div>
+        <div class="settings-row-desc">How fast animated figures play. The speed chip under a figure multiplies it. Double-click the slider to reset to 1×.</div>
+      </div>
+      <div class="settings-slider">
+        <input type="range" min="0.25" max="5" step="0.25" value="${animSpeed}"
+               aria-label="Default animation speed" oninput="setFigAnimDefaultSpeed(this.value)"
+               ondblclick="this.value = 1; setFigAnimDefaultSpeed(1)">
+        <span class="settings-slider-value" id="figAnimSpeedValue">${animSpeed}×</span>
+      </div>
+    </div>
+    ${animSwitch('figAnimRepeatOneShot', 'Repeat one-shot animations',
+      'Animations that play once and run back (like a falling mug) start again until you press ⏸, instead of stopping by themselves.')}
+    ${animSwitch('figAnimLoopOnce', 'Play looped animations only once',
+      'Animations that repeat (like a spinning shell) play one cycle and stop by themselves, instead of repeating until you press ⏸.')}
+  `);
+  return rows.join('');
+}
+
+// ── Reduce motion ──
+// One switch plus a battery sub-row, each reducing motion on its own: the
+// switch all the time, the sub-row whenever the battery is below its percent
+// and not charging. The two don't block each other, so the percent stays
+// set while the switch is flipped by hand. Battery level comes from
+// navigator.getBattery(), which only Chromium browsers have; elsewhere the
+// sub-row says so and stays blocked.
+const REDUCE_MOTION_BATTERY_MIN = 10;
+const REDUCE_MOTION_BATTERY_MAX = 40;
+const REDUCE_MOTION_BATTERY_STEP = 10;
+let reduceMotionBattery = null;          // BatteryManager once getBattery() resolves
+let reduceMotionBatteryRequested = false;
+
+function reduceMotionBatterySupported() {
+  return typeof navigator !== 'undefined' && typeof navigator.getBattery === 'function';
+}
+function clampReduceMotionBatteryPct(v) {
+  const n = Math.round(Number(v) / REDUCE_MOTION_BATTERY_STEP) * REDUCE_MOTION_BATTERY_STEP;
+  return isFinite(n) ? Math.min(REDUCE_MOTION_BATTERY_MAX, Math.max(REDUCE_MOTION_BATTERY_MIN, n)) : 20;
+}
+function reduceMotionBatteryLow() {
+  const b = reduceMotionBattery;
+  if (getSetting('display', 'reduceMotionBatteryOn') !== true || !b || b.charging) return false;
+  return Math.round(b.level * 100) < clampReduceMotionBatteryPct(getSetting('display', 'reduceMotionBatteryPct'));
+}
+function applyReduceMotion() {
+  const on = getSetting('display', 'reduceMotion') === true || reduceMotionBatteryLow();
+  document.documentElement.classList.toggle('settings-reduce-motion', on);
+  // Asks for the battery the first time the sub-row is on, then follows its
+  // level/charging events for the rest of the page's life.
+  if (getSetting('display', 'reduceMotionBatteryOn') === true && !reduceMotionBatteryRequested && reduceMotionBatterySupported()) {
+    reduceMotionBatteryRequested = true;
+    navigator.getBattery().then(b => {
+      reduceMotionBattery = b;
+      b.addEventListener('levelchange', applyReduceMotion);
+      b.addEventListener('chargingchange', applyReduceMotion);
+      applyReduceMotion();
+    }).catch(() => {});
+  }
+}
+
+const SETTINGS_CHEVRON_UP = '<svg viewBox="0 0 10 6" width="9" height="6" aria-hidden="true" focusable="false"><path d="M1 5 5 1l4 4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const SETTINGS_CHEVRON_DOWN = '<svg viewBox="0 0 10 6" width="9" height="6" aria-hidden="true" focusable="false"><path d="M1 1l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+function renderReduceMotionGroup() {
+  const supported = reduceMotionBatterySupported();
+  const dis = supported ? '' : 'disabled';
+  const batteryOn = getSetting('display', 'reduceMotionBatteryOn') === true;
+  const pct = clampReduceMotionBatteryPct(getSetting('display', 'reduceMotionBatteryPct'));
+  return `
+    <div class="settings-group">
+      <div class="settings-row" data-row-key="reduceMotion">
+        <div class="settings-row-label">
+          <div class="settings-row-title">Reduce motion</div>
+          <div class="settings-row-desc">Cuts every animation/transition site-wide down to effectively instant. Might be helpful for power-saving.</div>
+        </div>
+        <label class="settings-switch">
+          <input type="checkbox" ${getSetting('display', 'reduceMotion') === true ? 'checked' : ''}
+                 onchange="setSetting('display', 'reduceMotion', this.checked); applyReduceMotion();">
+          <span class="settings-switch-track"></span>
+        </label>
+      </div>
+      <div class="settings-row settings-row-sub${supported ? '' : ' settings-row-blocked'}" data-row-key="reduceMotionBattery">
+        <div class="settings-row-label">
+          <div class="settings-row-title">Reduce motion automatically if the battery is less than</div>
+          <div class="settings-row-desc">${supported
+            ? 'Works on its own, whether Reduce motion above is on or off. Not while charging.'
+            : 'This browser doesn’t report the battery level, so this can’t work here.'}</div>
+        </div>
+        <div class="settings-choice-group">
+          <button type="button" class="settings-choice-btn${batteryOn ? '' : ' active'}" data-battery="off" ${dis}
+                  onclick="setReduceMotionBatteryOn(false)">Off</button>
+          <div class="settings-choice-btn settings-choice-stepper${batteryOn ? ' active' : ''}" data-battery="on">
+            <button type="button" class="settings-stepper-value" id="reduceMotionBatteryValue" ${dis}
+                    onclick="setReduceMotionBatteryOn(true)">${pct}%</button>
+            <span class="settings-stepper-arrows">
+              <button type="button" data-step="up" aria-label="Raise battery level" ${supported && pct < REDUCE_MOTION_BATTERY_MAX ? '' : 'disabled'}
+                      onclick="stepReduceMotionBatteryPct(1)">${SETTINGS_CHEVRON_UP}</button>
+              <button type="button" data-step="down" aria-label="Lower battery level" ${supported && pct > REDUCE_MOTION_BATTERY_MIN ? '' : 'disabled'}
+                      onclick="stepReduceMotionBatteryPct(-1)">${SETTINGS_CHEVRON_DOWN}</button>
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// In-place updates of the battery sub-row — see syncShowDaylightBtnBlock's
+// comment for why not a full renderSettingsBody().
+function setReduceMotionBatteryOn(on) {
+  setSetting('display', 'reduceMotionBatteryOn', on);
+  applyReduceMotion();
+  syncReduceMotionBatteryRow();
+}
+// The arrows only change the percent; Off stays off until the percent is picked.
+function stepReduceMotionBatteryPct(dir) {
+  const pct = clampReduceMotionBatteryPct(getSetting('display', 'reduceMotionBatteryPct'));
+  setSetting('display', 'reduceMotionBatteryPct', clampReduceMotionBatteryPct(pct + dir * REDUCE_MOTION_BATTERY_STEP));
+  applyReduceMotion();
+  syncReduceMotionBatteryRow();
+}
+function syncReduceMotionBatteryRow() {
+  const row = document.querySelector('[data-row-key="reduceMotionBattery"]');
+  if (!row) return;
+  const on = getSetting('display', 'reduceMotionBatteryOn') === true;
+  const pct = clampReduceMotionBatteryPct(getSetting('display', 'reduceMotionBatteryPct'));
+  row.querySelector('[data-battery="off"]').classList.toggle('active', !on);
+  row.querySelector('[data-battery="on"]').classList.toggle('active', on);
+  row.querySelector('#reduceMotionBatteryValue').textContent = pct + '%';
+  row.querySelector('[data-step="up"]').disabled = pct >= REDUCE_MOTION_BATTERY_MAX;
+  row.querySelector('[data-step="down"]').disabled = pct <= REDUCE_MOTION_BATTERY_MIN;
+}
+
+// ── Animated figures: default speed ──
+function clampFigAnimSpeed(v) {
+  const n = Number(v);
+  return isFinite(n) ? Math.min(5, Math.max(0.25, Math.round(n * 4) / 4)) : 1;
+}
+function setFigAnimDefaultSpeed(v) {
+  const k = clampFigAnimSpeed(v);
+  setSetting('display', 'figAnimSpeed', k);
+  const label = document.getElementById('figAnimSpeedValue');
+  if (label) label.textContent = k + '×';
+}
+
+// ── Figure size ──
+// One percent value scales every figure on the site. The CSS reads it as
+// --user-fig-scale on <html> (css/style.css for problem figures,
+// css/figure.css for solution figures); index.html's anti-flicker script
+// sets the same variable before first paint — keep its clamp in sync.
+const FIGURE_SCALE_MIN = 50;
+const FIGURE_SCALE_MAX = 200;
+function clampFigureScale(v) {
+  const n = Number(v);
+  if (!isFinite(n)) return 100;
+  return Math.min(FIGURE_SCALE_MAX, Math.max(FIGURE_SCALE_MIN, Math.round(n)));
+}
+function applyFigureScale() {
+  const pct = clampFigureScale(getSetting('display', 'figureScale'));
+  document.documentElement.style.setProperty('--user-fig-scale', String(pct / 100));
+}
+function setFigureScale(v) {
+  const pct = clampFigureScale(v);
+  setSetting('display', 'figureScale', pct);
+  applyFigureScale();
+  const label = document.getElementById('figureScaleValue');
+  if (label) label.textContent = pct + '%';
+}
+
+// In-place counterpart to a full renderSettingsBody() for followDeviceTheme
+// -> showDaylightBtn: a full re-render would rebuild followDeviceTheme's
+// own switch too, mid-flip — the new checkbox node is created already
+// sitting in its final checked position, so its on/off slide never gets a
+// frame to animate from and just snaps instead. This only patches the
+// OTHER row (showDaylightBtn), leaving the switch that was actually
+// clicked untouched so its own CSS transition plays normally. Mirrors the
+// `blocked` forced-off logic in renderRow above: while Follow device theme
+// is on, the row renders dimmed/disabled and its switch shows off,
+// regardless of showDaylightBtn's own stored value.
+function syncShowDaylightBtnBlock(followDeviceOn) {
+  const row = document.querySelector('[data-row-key="showDaylightBtn"]');
+  if (!row) return;
+  row.classList.toggle('settings-row-blocked', followDeviceOn);
+  const input = row.querySelector('input[type="checkbox"]');
+  if (!input) return;
+  input.disabled = followDeviceOn;
+  input.checked = followDeviceOn ? false : (getSetting('display', 'showDaylightBtn') !== false);
+}
+
+// Notifications tab: two independent single toggles (theme nudge, bug
+// report) plus two parent+sub groups. Unlike the Display tab's groups
+// above, the blocking direction here runs the other way — each sub only
+// does anything while its OWN parent is ON, so the sub is what renders
+// blocked/disabled, not the parent:
+//   - hideUpdateReminder -> forceRefreshOutsideQuiz (sub blocked unless the
+//     reminder is actually hidden — the sub has nothing to override
+//     otherwise)
+//   - goSilent -> goSilentAutoOff24h (sub blocked unless Go silent is
+//     actually on — nothing to auto-turn-off otherwise)
+// All six default OFF, unlike Display's default-on toggles, since every
+// one of these is an opt-in suppression of today's normal behavior.
+function renderSettingsNotificationsTab() {
+  function renderRow(key, title, desc, opts) {
+    opts = opts || {};
+    const blocked = !!opts.blocked;
+    const on = getSetting('notifications', key) === true;
+    // goSilent also has to stamp/clear goSilentEnabledAt (the 24h auto-off
+    // window's start time) the moment it's flipped, not just the hide
+    // classes applyNotificationSettings() handles for every other row.
+    // Only hideUpdateReminder and goSilent have a sub-row to unblock, so
+    // only those two call syncNotificationSubBlock — the rest have nothing
+    // else on the page depending on them and don't need any DOM sync
+    // beyond their own switch, which the browser already handles on its
+    // own via the input's :checked CSS transition (see
+    // syncShowDaylightBtnBlock's comment, above renderSettingsDisplayTab,
+    // for why calling a full re-render here — as this used to — would kill
+    // that transition for every one of these six switches).
+    const onchange = key === 'goSilent'
+      ? `setSetting('notifications', 'goSilent', this.checked); setSetting('notifications', 'goSilentEnabledAt', this.checked ? Date.now() : null); applyNotificationSettings(); syncNotificationSubBlock('goSilent', this.checked);`
+      : (key === 'hideUpdateReminder'
+          ? `setSetting('notifications', '${key}', this.checked); applyNotificationSettings(); syncNotificationSubBlock('hideUpdateReminder', this.checked);`
+          : `setSetting('notifications', '${key}', this.checked); applyNotificationSettings();`);
+    return `
+      <div class="settings-row${opts.sub ? ' settings-row-sub' : ''}${blocked ? ' settings-row-blocked' : ''}" data-row-key="${key}">
+        <div class="settings-row-label">
+          <div class="settings-row-title">${title}</div>
+          <div class="settings-row-desc">${desc}</div>
+        </div>
+        <label class="settings-switch">
+          <input type="checkbox" ${on ? 'checked' : ''} ${blocked ? 'disabled' : ''}
+                 onchange="${onchange}">
+          <span class="settings-switch-track"></span>
+        </label>
+      </div>
+    `;
+  }
+
+  const hideUpdate = getSetting('notifications', 'hideUpdateReminder') === true;
+  const goSilentOn = getSetting('notifications', 'goSilent') === true;
+
+  return `
+    <div class="settings-group">
+      ${renderRow('hideUpdateReminder', 'Hide update reminder', 'Hides the "new version available" banner.')}
+      ${renderRow('forceRefreshOutsideQuiz', 'Update anyway outside quiz mode', 'While the reminder above is hidden, silently reloads the page the instant you\u2019re not in the middle of a timed Random-quiz attempt.', { sub: true, blocked: !hideUpdate })}
+    </div>
+    ${renderRow('hideThemeNudge', 'Hide try new theme reminder', 'Hides the occasional "trying the X theme" banner.')}
+    ${renderRow('hideBugReportReminder', 'Hide bug report reminder', 'Hides the "Report on Telegram" banner.')}
+    <div class="settings-group">
+      ${renderRow('goSilent', 'Go silent', 'Hides every notification badge (problem buttons, the forum button) and every banner above, and mutes forum push notifications while it\u2019s on.')}
+      ${renderRow('goSilentAutoOff24h', 'Turn off automatically after 24 hours', 'Turns Go silent back off on its own a day after you enable it.', { sub: true, blocked: !goSilentOn })}
+    </div>
+  `;
+}
+
+// In-place counterpart to a full renderSettingsBody() for the two
+// Notifications parent/sub pairs — see syncShowDaylightBtnBlock's comment
+// (Display tab, above) for why re-rendering the whole tab here would kill
+// the parent switch's own on/off animation. Both subs here are only ever
+// blocked by "parent is off" (unlike showDaylightBtn, which also gets
+// forced to a different on/off value), so this only needs to touch the
+// dimmed look and the disabled state.
+const NOTIFICATION_SUB_ROW_KEYS = {
+  hideUpdateReminder: 'forceRefreshOutsideQuiz',
+  goSilent: 'goSilentAutoOff24h',
+};
+function syncNotificationSubBlock(parentKey, parentOn) {
+  const subKey = NOTIFICATION_SUB_ROW_KEYS[parentKey];
+  const row = subKey && document.querySelector(`[data-row-key="${subKey}"]`);
+  if (!row) return;
+  row.classList.toggle('settings-row-blocked', !parentOn);
+  const input = row.querySelector('input[type="checkbox"]');
+  if (input) input.disabled = !parentOn;
+}
+
+// Study tab: a general row (Redrawn figures), then two visibly-labeled
+// sections — Random Quiz and Solve Them All — since most of these settings
+// only make sense for one mode or the other. Parent+sub groups here follow
+// the Notifications tab's "sub blocked unless parent is on" shape
+// (fullscreenRandomN -> its reminder preference, and lockSolveAllOrder ->
+// its ordered/shuffled choice), while the remaining rows are standalone toggles.
+function renderSettingsStudyTab() {
+  const showLiveTimerOn = getSetting('study', 'showLiveTimer') !== false;
+  const lockOrderOn     = getSetting('study', 'lockSolveAllOrder') === true;
+  const lockedOrder     = getSetting('study', 'solveAllLockedOrder') === 'unordered' ? 'unordered' : 'ordered';
+  const navRailOn       = getSetting('study', 'showSolveAllNavRail') !== false;
+  const quizStart       = getSetting('study', 'quizStartMode');
+  const quizStartBtn = (value, label) => `<button type="button" class="settings-choice-btn${quizStart === value ? ' active' : ''}" data-start="${value}"
+                  onclick="setSetting('study', 'quizStartMode', '${value}'); syncQuizStartActive('${value}');">${label}</button>`;
+
+  return `
+    <div class="settings-row" data-row-key="redrawnFigures">
+      <div class="settings-row-label">
+        <div class="settings-row-title">Redrawn figures</div>
+        <div class="settings-row-desc">Shows problem figures redrawn in your theme's colours. Turn off to see the original images.</div>
+      </div>
+      <label class="settings-switch">
+        <input type="checkbox" ${getSetting('study', 'redrawnFigures') !== false ? 'checked' : ''}
+               onchange="setSetting('study', 'redrawnFigures', this.checked); if (typeof applyFigureStyle === 'function') applyFigureStyle();">
+        <span class="settings-switch-track"></span>
+      </label>
+    </div>
+
+    <div class="settings-section-header">Random Quiz</div>
+
+    <div class="settings-row" data-row-key="quizStartMode">
+      <div class="settings-row-label">
+        <div class="settings-row-title">Starting a quiz</div>
+        <div class="settings-row-desc">Ask each time, or always start in this browser or in the lockdown browser.</div>
+      </div>
+      <div class="settings-choice-group">
+        ${quizStartBtn('ask', 'Ask')}${quizStartBtn('ordinary', 'Ordinary')}${quizStartBtn('lockdown', 'Lockdown')}
+      </div>
+    </div>
+
+    <div class="settings-row" data-row-key="showLiveTimer">
+      <div class="settings-row-label">
+        <div class="settings-row-title">Show live timer</div>
+        <div class="settings-row-desc">Shows a floating clock, bottom-right, counting up while you take a Random 6 or cumulative quiz.</div>
+      </div>
+      <label class="settings-switch">
+        <input type="checkbox" ${showLiveTimerOn ? 'checked' : ''}
+               onchange="setSetting('study', 'showLiveTimer', this.checked); if (typeof setLiveQuizTimerDisplayEnabled === 'function') setLiveQuizTimerDisplayEnabled(this.checked);">
+        <span class="settings-switch-track"></span>
+      </label>
+    </div>
+
+    <div class="settings-row" data-row-key="avoidRepeatProblems">
+      <div class="settings-row-label">
+        <div class="settings-row-title">Avoid repeat problems</div>
+        <div class="settings-row-desc">Skips the problems from your last attempt when possible.</div>
+      </div>
+      <label class="settings-switch">
+        <input type="checkbox" ${getSetting('study', 'avoidRepeatProblems') !== false ? 'checked' : ''}
+               onchange="setSetting('study', 'avoidRepeatProblems', this.checked);">
+        <span class="settings-switch-track"></span>
+      </label>
+    </div>
+
+    <div class="settings-row" data-row-key="warnBeforeLeavingQuiz">
+      <div class="settings-row-label">
+        <div class="settings-row-title">Warn before leaving a quiz</div>
+        <div class="settings-row-desc">Asks before an unfinished attempt is discarded.</div>
+      </div>
+      <label class="settings-switch">
+        <input type="checkbox" ${getSetting('study', 'warnBeforeLeavingQuiz') !== false ? 'checked' : ''}
+               onchange="setSetting('study', 'warnBeforeLeavingQuiz', this.checked);">
+        <span class="settings-switch-track"></span>
+      </label>
+    </div>
+
+    <div class="settings-row" data-row-key="resetFilterOnLoad">
+      <div class="settings-row-label">
+        <div class="settings-row-title">Reset filter on page load</div>
+        <div class="settings-row-desc">Clears any saved topic/number/type filter back to "everything" the moment the page loads, instead of remembering what you last had set.</div>
+      </div>
+      <label class="settings-switch">
+        <input type="checkbox" ${getSetting('study', 'resetFilterOnLoad') === true ? 'checked' : ''}
+               onchange="setSetting('study', 'resetFilterOnLoad', this.checked);">
+        <span class="settings-switch-track"></span>
+      </label>
+    </div>
+
+    <div class="settings-row" data-row-key="autoStopAt50Min">
+      <div class="settings-row-label">
+        <div class="settings-row-title">Automatically stop after 50 minutes</div>
+        <div class="settings-row-desc">Submits the attempt on its own if 50 minutes pass without you finishing.</div>
+      </div>
+      <label class="settings-switch">
+        <input type="checkbox" ${getSetting('study', 'autoStopAt50Min') === true ? 'checked' : ''}
+               onchange="setSetting('study', 'autoStopAt50Min', this.checked);">
+        <span class="settings-switch-track"></span>
+      </label>
+    </div>
+
+    <div class="settings-group">
+      <div class="settings-row" data-row-key="fullscreenRandomN">
+        <div class="settings-row-label">
+          <div class="settings-row-title">Full screen for Random N</div>
+          <div class="settings-row-desc">Enters full screen the moment a Random N attempt starts, and leaves it again the instant your score is revealed.</div>
+        </div>
+        <label class="settings-switch">
+          <input type="checkbox" ${getSetting('study', 'fullscreenRandomN') === true ? 'checked' : ''}
+                 onchange="setSetting('study', 'fullscreenRandomN', this.checked); syncFullscreenHintSubBlock(this.checked); if (typeof syncFullscreenHintPreference === 'function') syncFullscreenHintPreference();">
+          <span class="settings-switch-track"></span>
+        </label>
+      </div>
+      <div class="settings-row settings-row-sub${getSetting('study', 'fullscreenRandomN') === true ? '' : ' settings-row-blocked'}" data-row-key="hideFullscreenReminder">
+        <div class="settings-row-label">
+          <div class="settings-row-title">Don’t show full-screen reminder</div>
+          <div class="settings-row-desc">Hides the 10-second hint that appears at the bottom when a Random N quiz enters full screen.</div>
+        </div>
+        <label class="settings-switch">
+          <input type="checkbox" ${getSetting('study', 'hideFullscreenReminder') === true ? 'checked' : ''} ${getSetting('study', 'fullscreenRandomN') === true ? '' : 'disabled'}
+                 onchange="setSetting('study', 'hideFullscreenReminder', this.checked); if (typeof syncFullscreenHintPreference === 'function') syncFullscreenHintPreference();">
+          <span class="settings-switch-track"></span>
+        </label>
+      </div>
+    </div>
+
+    <div class="settings-row" data-row-key="selectLastUsedQuiz">
+      <div class="settings-row-label">
+        <div class="settings-row-title">Select last used quiz by default</div>
+        <div class="settings-row-desc">The main page opens on the set you last started, in Random or Entire Set, instead of always Quiz #1. Applies from your next page load.</div>
+      </div>
+      <label class="settings-switch">
+        <input type="checkbox" ${getSetting('study', 'selectLastUsedQuiz') !== false ? 'checked' : ''}
+               onchange="setSetting('study', 'selectLastUsedQuiz', this.checked);">
+        <span class="settings-switch-track"></span>
+      </label>
+    </div>
+
+    <div class="settings-row" data-row-key="cumulativeDefaultOn">
+      <div class="settings-row-label">
+        <div class="settings-row-title">Select cumulative by default</div>
+        <div class="settings-row-desc">Selecting quiz #2 or later starts with the Cumulative switch already on, instead of Single Set. Applies from your next page load.</div>
+      </div>
+      <label class="settings-switch">
+        <input type="checkbox" ${getSetting('study', 'cumulativeDefaultOn') === true ? 'checked' : ''}
+               onchange="setSetting('study', 'cumulativeDefaultOn', this.checked);">
+        <span class="settings-switch-track"></span>
+      </label>
+    </div>
+
+    <div class="settings-row" data-row-key="hideTopicWhileActive">
+      <div class="settings-row-label">
+        <div class="settings-row-title">Hide topic while active</div>
+        <div class="settings-row-desc">Hides each problem's topic label (top-right of the card) while the attempt is in progress. Comes back once your score is revealed.</div>
+      </div>
+      <label class="settings-switch">
+        <input type="checkbox" ${getSetting('study', 'hideTopicWhileActive') === true ? 'checked' : ''}
+               onchange="setSetting('study', 'hideTopicWhileActive', this.checked); applyStudySettings();">
+        <span class="settings-switch-track"></span>
+      </label>
+    </div>
+
+    <div class="settings-section-header">Entire Set</div>
+
+    <div class="settings-group">
+      <div class="settings-row" data-row-key="lockSolveAllOrder">
+        <div class="settings-row-label">
+          <div class="settings-row-title">Lock order</div>
+          <div class="settings-row-desc">Skips the order picker: jumps straight into the order chosen below.</div>
+        </div>
+        <label class="settings-switch">
+          <input type="checkbox" ${lockOrderOn ? 'checked' : ''}
+                 onchange="setSetting('study', 'lockSolveAllOrder', this.checked); syncSolveAllOrderBlock(this.checked);">
+          <span class="settings-switch-track"></span>
+        </label>
+      </div>
+      <div class="settings-row settings-row-sub${lockOrderOn ? '' : ' settings-row-blocked'}" data-row-key="solveAllOrder">
+        <div class="settings-row-label">
+          <div class="settings-row-title">Order</div>
+          <div class="settings-row-desc">Which order gets used automatically once the picker above is skipped.</div>
+        </div>
+        <div class="settings-choice-group">
+          <button type="button" class="settings-choice-btn${lockedOrder === 'ordered' ? ' active' : ''}" ${lockOrderOn ? '' : 'disabled'} data-order="ordered"
+                  onclick="setSetting('study', 'solveAllLockedOrder', 'ordered'); syncSolveAllOrderActive('ordered');">Ordered</button>
+          <button type="button" class="settings-choice-btn${lockedOrder === 'unordered' ? ' active' : ''}" ${lockOrderOn ? '' : 'disabled'} data-order="unordered"
+                  onclick="setSetting('study', 'solveAllLockedOrder', 'unordered'); syncSolveAllOrderActive('unordered');">Shuffled</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="settings-row" data-row-key="showSolveAllNavRail">
+      <div class="settings-row-label">
+        <div class="settings-row-title">Line progress</div>
+        <div class="settings-row-desc">Shows the progress rail beside Entire Set on wide screens — problem ticks, a "you are here" segment, and a pointer that tracks scroll.</div>
+      </div>
+      <label class="settings-switch">
+        <input type="checkbox" ${navRailOn ? 'checked' : ''}
+               onchange="setSetting('study', 'showSolveAllNavRail', this.checked); applyStudySettings();">
+        <span class="settings-switch-track"></span>
+      </label>
+    </div>
+
+    <div class="settings-row" data-row-key="showStickyScore">
+      <div class="settings-row-label">
+        <div class="settings-row-title">Show progress window</div>
+        <div class="settings-row-desc">The floating solved-count badge, bottom-right, while Entire Set is open.</div>
+      </div>
+      <label class="settings-switch">
+        <input type="checkbox" ${getSetting('study', 'showStickyScore') !== false ? 'checked' : ''}
+               onchange="setSetting('study', 'showStickyScore', this.checked); applyStudySettings();">
+        <span class="settings-switch-track"></span>
+      </label>
+    </div>
+
+    <div class="settings-row" data-row-key="revealWrongInstantly">
+      <div class="settings-row-label">
+        <div class="settings-row-title">Reveal wrong answer instantly</div>
+        <div class="settings-row-desc">Skips the "See correct answer" step. A wrong answer (not partial credit) shows the correct one right away; you can still solve the problem.</div>
+      </div>
+      <label class="settings-switch">
+        <input type="checkbox" ${getSetting('study', 'revealWrongInstantly') === true ? 'checked' : ''}
+               onchange="setSetting('study', 'revealWrongInstantly', this.checked);">
+        <span class="settings-switch-track"></span>
+      </label>
+    </div>
+
+    <div class="settings-section-header">Problem card</div>
+
+    <div class="settings-row" data-row-key="cardLayout">
+      <div class="settings-row-label">
+        <div class="settings-row-title">Layout under each problem</div>
+        <div class="settings-row-desc">Inline joins Check to your answer, with chat, Common mistakes and Solution in a row below. Tabs turns that row into three tabs across the card. Legacy keeps every button in one row.</div>
+      </div>
+      <div class="settings-choice-group">${[['inline', 'Inline'], ['tabs', 'Tabs'], ['legacy', 'Legacy']].map(([value, label]) => `
+        <button type="button" class="settings-choice-btn${getCardLayout() === value ? ' active' : ''}" data-card-layout="${value}"
+                onclick="setCardLayout('${value}');">${label}</button>`).join('')}
+      </div>
+    </div>
+
+    <div class="settings-section-header">Common mistakes</div>
+
+    <div class="settings-row" data-row-key="commonMistakes">
+      <div class="settings-row-label">
+        <div class="settings-row-title">When your answer matches a common mistake</div>
+        <div class="settings-row-desc">Reason shows why, right under your answer. Hint only flashes the button. Button does nothing until you open it. Off hides common mistakes completely.</div>
+      </div>
+      <div class="settings-choice-group">${[['note', 'Reason'], ['hint', 'Hint'], ['button', 'Button'], ['off', 'Off']].map(([value, label]) => `
+        <button type="button" class="settings-choice-btn${(getSetting('study', 'commonMistakes') || 'note') === value ? ' active' : ''}" data-mistakes="${value}"
+                onclick="setCommonMistakesMode('${value}');">${label}</button>`).join('')}
+      </div>
+    </div>
+
+    <div class="settings-section-header">Solutions</div>
+
+    <div class="settings-row" data-row-key="openSolutionList">
+      <div class="settings-row-label">
+        <div class="settings-row-title">Show the solution list by default</div>
+        <div class="settings-row-desc">Every solution shows the grid of all the problems in its set under it. Turn off to get ‹ › buttons and a Solution list button instead, with ✕ to close the list.</div>
+      </div>
+      <label class="settings-switch">
+        <input type="checkbox" ${getSetting('study', 'openSolutionList') !== false ? 'checked' : ''}
+               onchange="setSetting('study', 'openSolutionList', this.checked); if (typeof syncSolutionListClose === 'function') syncSolutionListClose();">
+        <span class="settings-switch-track"></span>
+      </label>
+    </div>
+  `;
+}
+
+// In-place counterpart to a full renderSettingsBody() for Lock order ->
+// Order — see syncShowDaylightBtnBlock's comment (Display tab, above
+// renderSettingsDisplayTab) for why re-rendering the whole tab on every
+// flip would kill Lock order's own switch animation. The Order sub-row
+// only ever gets blocked/unblocked here, never forced to a different
+// choice, so this just toggles the dimmed look and the two buttons'
+// disabled state.
+function syncFullscreenHintSubBlock(fullscreenOn) {
+  const row = document.querySelector('[data-row-key="hideFullscreenReminder"]');
+  if (!row) return;
+  row.classList.toggle('settings-row-blocked', !fullscreenOn);
+  const input = row.querySelector('input[type="checkbox"]');
+  if (input) input.disabled = !fullscreenOn;
+}
+
+function syncQuizStartActive(value) {
+  document.querySelectorAll('[data-row-key="quizStartMode"] .settings-choice-btn').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.start === value);
+  });
+}
+
+function syncSolveAllOrderBlock(lockOrderOn) {
+  const row = document.querySelector('[data-row-key="solveAllOrder"]');
+  if (!row) return;
+  row.classList.toggle('settings-row-blocked', !lockOrderOn);
+  row.querySelectorAll('.settings-choice-btn').forEach(btn => { btn.disabled = !lockOrderOn; });
+}
+
+// In-place counterpart to a full renderSettingsBody() for the
+// Ordered/Shuffled choice buttons themselves — same reasoning as
+// syncSolveAllOrderBlock above, just for the .active highlight instead of
+// the blocked state.
+function setCardLayout(layout) {
+  setSetting('study', 'cardLayout', layout);
+  applyCardLayout();
+  document.querySelectorAll('[data-row-key="cardLayout"] .settings-choice-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.cardLayout === layout);
+  });
+}
+
+function setCommonMistakesMode(mode) {
+  setSetting('study', 'commonMistakes', mode);
+  applyStudySettings();
+  document.querySelectorAll('[data-row-key="commonMistakes"] .settings-choice-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.mistakes === mode);
+  });
+}
+
+function syncSolveAllOrderActive(order) {
+  const row = document.querySelector('[data-row-key="solveAllOrder"]');
+  if (!row) return;
+  row.querySelectorAll('.settings-choice-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.order === order);
+  });
+}
+
+// Applies the Study-tab settings that need an <html> class
+// (hide-topic-while-active, the Solve-All nav rail's show/hide, the sticky
+// score badge's show/hide) — same mechanism as applyDisplaySettings/
+// applyNotificationSettings above. Called once at load and again from each
+// relevant row's onchange.
+function applyStudySettings() {
+  document.documentElement.classList.toggle('settings-hide-topic-while-active', getSetting('study', 'hideTopicWhileActive') === true);
+  document.documentElement.classList.toggle('settings-hide-sa-nav-rail', getSetting('study', 'showSolveAllNavRail') === false);
+  document.documentElement.classList.toggle('settings-hide-sticky-score', getSetting('study', 'showStickyScore') === false);
+  // Classes rather than a redraw, so a change applies to the cards on screen.
+  const mistakes = getSetting('study', 'commonMistakes') || 'note';
+  document.documentElement.classList.toggle('settings-mistakes-off', mistakes === 'off');
+  document.documentElement.classList.toggle('settings-mistakes-quiet', mistakes !== 'note');
+}
+
+// Settings > Study > "Reset filter on page load" — clears every quiz's
+// saved topic/number/type filter (and filter-mode) back to defaults.
+// Called once at load, before the person has any real chance to have
+// opened a quiz yet — see the "own copy, read early" reasoning on
+// _readStudySettingRaw (js/quiz-engine.js) for why this can't just wait
+// for initTopics() to run instead: that only runs once a mode is actually
+// selected, by which point the filter's already been read and rendered
+// with whatever was there before this clears it.
+function maybeResetProblemPoolFilters() {
+  if (getSetting('study', 'resetFilterOnLoad') !== true) return;
+  if (typeof QUIZZES === 'undefined' || typeof STORAGE_PREFIX === 'undefined') return;
+  QUIZZES.forEach((_, idx) => {
+    const n = idx + 1;
+    localStorage.removeItem(STORAGE_PREFIX + '_topics_q' + n);
+    localStorage.removeItem(STORAGE_PREFIX + '_typefilter_q' + n);
+    localStorage.removeItem(STORAGE_PREFIX + '_numfilter_q' + n);
+    localStorage.removeItem(STORAGE_PREFIX + '_filtermode_q' + n);
+  });
+}
+
+// Maps each Display toggle's key to the <html> class that hides its
+// target element(s) when the toggle is OFF — the actual hide/show rules
+// live in css/settings.css as `html.<class> <selector> { display: none; }`,
+// so this function never needs to know where those elements actually live
+// in the DOM. Named for what the class *does* (hide), even though the
+// toggle it's driven by is framed the opposite way ("show", on by
+// default) — keeps this in sync with the class names css/settings.css
+// actually matches on.
+const DISPLAY_TOGGLE_HIDE_CLASSES = {
+  showAvatar:      'settings-hide-avatar',
+  showSplashes:    'settings-hide-splashes',
+  showManualBtn:   'settings-hide-manual-btn',
+  showThemeBtn:    'settings-hide-theme-btn',
+  showDaylightBtn: 'settings-hide-daylight-btn',
+  showForumFab:    'settings-hide-forum-fab',
+  showTopBarTip:   'settings-hide-top-bar-tip',
+  showCabinetBtn:  'settings-hide-cabinet-btn',
+};
+
+// Applies every current Display setting to <html>'s classList (not
+// <body> — see the header comment on why). Called once at load (bottom of
+// this file) so a live-toggled change since the anti-flicker script last
+// ran is reconciled, and again from each toggle's onchange above.
+function applyDisplaySettings() {
+  for (const key of Object.keys(DISPLAY_TOGGLE_HIDE_CLASSES)) {
+    const cls = DISPLAY_TOGGLE_HIDE_CLASSES[key];
+    let shown = getSetting('display', key) !== false;
+    // followDeviceTheme overrides showDaylightBtn's own value: once mode is
+    // following the device automatically, the manual switch has nothing
+    // left to do, so it stays blocked from showing regardless of whether
+    // showDaylightBtn itself is still checked.
+    if (key === 'showDaylightBtn' && getSetting('display', 'followDeviceTheme') === true) {
+      shown = false;
+    }
+    document.documentElement.classList.toggle(cls, !shown);
+  }
+  // Framed as "Hide …" (on = hidden), unlike the "Show …" toggles above.
+  document.documentElement.classList.toggle('settings-hide-fig-anim-controls', getSetting('display', 'hideFigAnimControls') === true);
+  applyFigureScale();
+  applyReduceMotion();
+  applyColorCorrection();
+  // The cabinet button showing or not moves the Editorial link beside it.
+  if (typeof layoutLogoLinks === 'function') layoutLogoLinks();
+  if (typeof setIconStyle === 'function') setIconStyle(getSetting('display', 'iconStyle'));
+  if (typeof applyUiFont === 'function') applyUiFont(getSetting('display', 'uiFont'));
+}
+
+// ── Notifications ───────────────────────────────────────────────────────
+// Banner-hide classes: one per banner, each driven by "its own hide
+// setting OR Go silent" — Go silent is a blanket override on top of the
+// three individual reminders, not a separate fourth hide mechanism.
+const NOTIF_BANNER_HIDE_CLASSES = {
+  hideUpdateReminder:     'settings-hide-update-banner',
+  hideThemeNudge:         'settings-hide-theme-banner',
+  hideBugReportReminder:  'settings-hide-bug-banner',
+};
+
+// IndexedDB mirror of the effective Go-silent state, so sw.js's 'push'
+// handler can read it: that handler is a true service-worker-only event
+// (fires even with the site fully closed, no tab/page context at all — see
+// sw.js's own comment), and localStorage — where every other setting
+// lives — simply isn't reachable from a service worker. IndexedDB is the
+// one storage both sides can actually get to. Same DB name/store/key must
+// stay in sync with sw.js's own copy of this.
+const NOTIF_MUTE_DB_NAME = 'flux-notif-mute';
+const NOTIF_MUTE_STORE = 'flags';
+function writeNotifMuteFlag(muted) {
+  if (typeof indexedDB === 'undefined') return;
+  try {
+    const req = indexedDB.open(NOTIF_MUTE_DB_NAME, 1);
+    req.onupgradeneeded = () => { req.result.createObjectStore(NOTIF_MUTE_STORE); };
+    req.onsuccess = () => {
+      const db = req.result;
+      try {
+        const tx = db.transaction(NOTIF_MUTE_STORE, 'readwrite');
+        tx.objectStore(NOTIF_MUTE_STORE).put(!!muted, 'muted');
+        tx.oncomplete = () => db.close();
+        tx.onerror = () => db.close();
+      } catch (e) { db.close(); }
+    };
+    // req.onerror: IndexedDB unavailable/blocked — push notifications (if
+    // any are even subscribed) just show as normal; nothing further to do.
+  } catch (e) { /* ignore */ }
+}
+
+// Applies every current Notifications setting: banner-hide classes on
+// <html> (same mechanism as applyDisplaySettings — see css/settings.css),
+// the badge-hide class for Go silent, and the IndexedDB mirror push
+// notifications read. Called once at load (bottom of this file) and again
+// from every row's onchange above. Also where the 24h auto-off actually
+// gets enforced — checked every time this runs, which includes the
+// periodic recheck scheduleGoSilentAutoOffCheck() sets up below, so it
+// still fires even if the tab's been left open past the 24h mark without
+// a reload.
+function applyNotificationSettings() {
+  // ── 24h auto-off ──
+  const goSilentOn = getSetting('notifications', 'goSilent') === true;
+  const autoOffOn  = getSetting('notifications', 'goSilentAutoOff24h') === true;
+  const enabledAt  = getSetting('notifications', 'goSilentEnabledAt');
+  if (goSilentOn && autoOffOn && enabledAt && (Date.now() - enabledAt >= 24 * 60 * 60 * 1000)) {
+    setSetting('notifications', 'goSilent', false);
+    setSetting('notifications', 'goSilentEnabledAt', null);
+  }
+  const effectiveSilent = getSetting('notifications', 'goSilent') === true; // re-read: may have just been auto-cleared above
+
+  // ── Per-banner hide classes (own setting OR Go silent) ──
+  for (const key of Object.keys(NOTIF_BANNER_HIDE_CLASSES)) {
+    const cls = NOTIF_BANNER_HIDE_CLASSES[key];
+    const hide = getSetting('notifications', key) === true || effectiveSilent;
+    document.documentElement.classList.toggle(cls, hide);
+  }
+  if (typeof syncThemeNudgeSuppression === 'function') syncThemeNudgeSuppression(); // js/themes.js: stops a running theme preview too
+
+  // ── Badges (problem buttons + forum button) — Go silent only ──
+  document.documentElement.classList.toggle('settings-silent-badges', effectiveSilent);
+  document.documentElement.classList.toggle('settings-hide-fullscreen-hint', effectiveSilent);
+  if (typeof syncFullscreenHintPreference === 'function') syncFullscreenHintPreference();
+
+  // ── Push notifications mirror ──
+  writeNotifMuteFlag(effectiveSilent);
+}
+
+// Catches the 24h auto-off boundary even if the tab is simply left open
+// (not reloaded) past it — applyNotificationSettings() re-checks this
+// every time it runs, this just makes sure it keeps running periodically
+// rather than only on the next settings change. Same interval as the
+// version-update poll; no need for anything finer-grained than that.
+setInterval(() => { if (typeof applyNotificationSettings === 'function') applyNotificationSettings(); }, 5 * 60 * 1000);
+
+// ── Follow device theme ─────────────────────────────────────────────────
+// Day/night mode (body.light + localStorage[STORAGE_PREFIX + '-theme'] —
+// see toggleTheme()/the restore IIFE in js/quiz-engine.js, which has
+// already run by the time this tier-2 file loads) normally only changes
+// via the manual daylight switch. When followDeviceTheme is on, this
+// takes over instead: mode tracks matchMedia('(prefers-color-scheme:
+// dark)') live, and the manual switch is hidden by applyDisplaySettings()
+// above since there's nothing left for it to do. Turning this back off
+// just stops syncing — whatever mode the system last set stays as the new
+// manual preference, so flipping it off never causes its own extra flip.
+//
+// Only settings.js (not quiz-engine.js) owns this: it's tier-2, so a
+// device-following user can see one brief flash of their *last manually
+// saved* mode before this runs and corrects it to the system's current
+// mode — same latency every other Display toggle already accepts (see
+// index.html's anti-flicker script) for not being in the tier-1 path.
+const DEVICE_THEME_QUERY = (typeof window.matchMedia === 'function')
+  ? window.matchMedia('(prefers-color-scheme: dark)')
+  : null;
+let _deviceThemeListening = false;
+
+function setModeFromSystem() {
+  const isLight = !!(DEVICE_THEME_QUERY && !DEVICE_THEME_QUERY.matches);
+  // Skip entirely if the site is already showing what the device wants —
+  // without this, turning the setting on (or every page load) always ran
+  // the fade tick and re-applied every hook below even when dark-to-dark
+  // or light-to-light, causing a visible flicker for no actual change.
+  if (document.body.classList.contains('light') === isLight) return;
+  if (window.themeFadeTick) themeFadeTick();
+  document.body.classList.toggle('light', isLight);
+  const track = document.getElementById('themeTrack');
+  if (track) track.classList.toggle('on', isLight);
+  localStorage.setItem(STORAGE_PREFIX + '-theme', isLight ? 'light' : 'dark');
+  // Same post-flip hooks toggleTheme() itself calls, so custom-theme mode
+  // colors and on-color contrast stay in sync either way.
+  if (window.__applyCustomOnModeChange) window.__applyCustomOnModeChange();
+  if (window.__updateOnColorVars) window.__updateOnColorVars();
+  if (window.__onModeChanged) window.__onModeChanged();
+  // Records the device-set mode as already seen, not as a change, so turning
+  // Follow device theme off later doesn't send it to other devices
+  // (js/settings-sync.js ignores theme.mode while this is on).
+  if (typeof settingsSyncNoteLocalChanges === 'function') settingsSyncNoteLocalChanges();
+}
+
+function onDeviceThemeChange() {
+  if (getSetting('display', 'followDeviceTheme') === true) setModeFromSystem();
+}
+
+function applyFollowDeviceTheme() {
+  if (!DEVICE_THEME_QUERY) return; // no matchMedia support — setting is inert, button just stays hidden per its own value
+  const on = getSetting('display', 'followDeviceTheme') === true;
+  if (on && !_deviceThemeListening) {
+    if (DEVICE_THEME_QUERY.addEventListener) DEVICE_THEME_QUERY.addEventListener('change', onDeviceThemeChange);
+    else DEVICE_THEME_QUERY.addListener(onDeviceThemeChange); // Safari < 14
+    _deviceThemeListening = true;
+  } else if (!on && _deviceThemeListening) {
+    if (DEVICE_THEME_QUERY.removeEventListener) DEVICE_THEME_QUERY.removeEventListener('change', onDeviceThemeChange);
+    else DEVICE_THEME_QUERY.removeListener(onDeviceThemeChange);
+    _deviceThemeListening = false;
+  }
+  if (on) setModeFromSystem();
+}
+
+// Runs immediately at load, not just when the panel is opened, so a live
+// toggle change made during this same page life (or a schema addition
+// this version introduced) is reflected right away. The very first paint
+// is already covered by index.html's own anti-flicker inline script — this
+// is the settings.js-side reconciliation pass, safe to run redundantly
+// against it. settings.js is loaded via the tier-2 sequential loader (see
+// index.html) after the body's own markup has already been parsed, so
+// document.documentElement and every target element already exist by the
+// time this line runs. applyFollowDeviceTheme() runs first since it may
+// itself set STORAGE_PREFIX + '-theme' anew — applyDisplaySettings() reads
+// followDeviceTheme's already-current value either way, so order between
+// the two doesn't actually matter for the hide/show class itself.
+applyFollowDeviceTheme();
+applyDisplaySettings();
+// changelog.js loads before this file in the tier-2 sequence (see index.html's
+// loader list) and defaults fieldLinesEnabled to true since it has no way to
+// read a persisted setting yet at that point — apply the "hide by default"
+// starting state here, the one time it actually applies: this file loading
+// is the start of the session, exactly what the setting controls. Nothing
+// after this point keeps the two in sync on purpose — see
+// hideFieldLinesByDefault above and toggleFieldLines() in changelog.js.
+// No flash-of-wrong-state risk the way theme/display toggles have: field
+// lines only ever become visible once the person opens the changelog
+// panel, a later action that's already well past this point.
+if (typeof setFieldLinesEnabled === 'function') setFieldLinesEnabled(getSetting('display', 'hideFieldLinesByDefault') !== true);
+
+// Notifications: applies banner-hide classes, the badge-hide class, the
+// 24h Go-silent auto-off check, and mirrors the effective mute state into
+// IndexedDB for sw.js's push handler — all on this same "start of session"
+// pass, same reasoning as the two calls above.
+applyNotificationSettings();
+
+// Study: hide-topic-while-active and the other <html> classes, and the
+// one-time "clear every quiz's saved filter" pass — same "start of
+// session" timing as everything above. selectLastUsedQuiz/
+// cumulativeDefaultOn/lockSolveAllOrder/autoStopAt50Min/fullscreenRandomN/
+// revealWrongInstantly/avoidRepeatProblems/warnBeforeLeavingQuiz all read getSetting() directly at the point they're
+// needed instead (quiz-engine.js), so nothing else needs applying here.
+applyStudySettings();
+maybeResetProblemPoolFilters();

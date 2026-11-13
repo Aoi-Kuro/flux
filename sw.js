@@ -1,7 +1,23 @@
-// Minimal service worker — its ONLY job is showing offline.html when a page
-// reload happens with no internet. It does not cache or serve the rest of
-// the site (quiz pages, forum, etc.) for offline use — this is just the
-// "you're offline" fallback, not a full offline-first app shell.
+// This service worker does two independent jobs, layered on top of each
+// other rather than fighting for the same fetch events:
+//
+//   1. (Original, always on) Shows offline.html when a page reload happens
+//      with no internet — a lightweight "you're offline" fallback, not a
+//      full offline-first app shell. See PRECACHE_URLS/CACHE_NAME below.
+//
+//   2. (Phase 4, js/offline-mode.js) Settings > Offline & Sync's "Go
+//      offline" button downloads the FULL app — course data, quiz images,
+//      every JS/CSS file — into its own cache (OFFLINE_MODE_CACHE_NAME,
+//      completely separate from CACHE_NAME below so a version bump on
+//      either one never deletes the other's files — see 'activate') and
+//      sets a 24h expiry. While that window is running, every fetch —
+//      same-origin or not, network reachable or not — gets routed through
+//      respondFullOffline() first: cross-origin requests (Supabase, GitHub,
+//      the jsdelivr CDN, etc.) are refused outright, same-origin requests
+//      are served from that cache. Job 1's logic (below, in
+//      respondDefault()) only ever runs once job 2 has confirmed it has
+//      nothing to say about a given request — normal online behavior is
+//      completely unaffected outside the 24h window.
 //
 // The MathJax vendor bundle is precached too because offline.html renders
 // LaTeX (its "meanwhile, look at..." panel) using the site's own local
@@ -15,12 +31,95 @@
 // no `document`, so it can't read the data-course attribute the way every
 // other file here does. This is a manual swap item at release time —
 // change the 'phys162' prefix by hand alongside the data-course attribute.
-const CACHE_NAME = 'phys162-offline-v5';
+const CACHE_NAME = 'phys162-offline-v12';
+
+// ── Phase 4: full offline mode (js/offline-mode.js) ──
+// OFFLINE_MODE_CACHE_NAME must match that file's own copy of the same
+// constant exactly — it's the cache startGoOffline() fills and this file
+// reads from. OFFLINE_MODE_DB_NAME/STORE must match its
+// writeOfflineModeUntilFlag()'s copy the same way: IndexedDB is the one
+// storage a service worker and a page both have access to (no
+// localStorage here), same reasoning as the existing Go-silent mute flag
+// below.
+const OFFLINE_MODE_CACHE_NAME = 'flux-offline-mode-v1';
+const OFFLINE_MODE_DB_NAME = 'flux-offline-mode';
+const OFFLINE_MODE_STORE = 'flags';
+
+function readOfflineModeUntil() {
+  return new Promise((resolve) => {
+    try {
+      const req = indexedDB.open(OFFLINE_MODE_DB_NAME, 1);
+      req.onupgradeneeded = () => { req.result.createObjectStore(OFFLINE_MODE_STORE); };
+      req.onsuccess = () => {
+        const db = req.result;
+        try {
+          const tx = db.transaction(OFFLINE_MODE_STORE, 'readonly');
+          const getReq = tx.objectStore(OFFLINE_MODE_STORE).get('until');
+          getReq.onsuccess = () => { resolve(getReq.result || null); db.close(); };
+          getReq.onerror = () => { resolve(null); db.close(); };
+        } catch (e) { resolve(null); db.close(); }
+      };
+      req.onerror = () => resolve(null);
+    } catch (e) { resolve(null); }
+  });
+}
+
+// Handles one fetch while the 24h full-offline window is active. Returns a
+// Response if it has one, or null to fall through to respondDefault()
+// below — the only expected null case is a same-origin request for
+// something Go offline's manifest didn't happen to include (e.g. a URL
+// added to a quiz after the last download), which is safe to just let
+// through normally since it never leaves the same origin.
+async function respondFullOffline(event) {
+  const request = event.request;
+  const url = new URL(request.url);
+
+  // Cross-origin — the Supabase backend, GitHub API (manual.js's version
+  // check), the Dicebear avatar service, the jsdelivr Supabase client
+  // bundle, push subscription calls, etc. This is the actual "block DB +
+  // host requests" half of the 24h window: refused outright, not just
+  // left unfetched, so a real connection coming back mid-window changes
+  // nothing.
+  //
+  // Google Fonts is the one exception: it's a read-only static asset (the
+  // splash text's 'Bangers' font, plus the rest of index.html's <link>
+  // fonts) with no bearing on "block DB + host requests" at all, and Go
+  // offline's manifest never downloads it (Google serves different actual
+  // font files per User-Agent from one dynamic CSS URL, so it can't be
+  // predownloaded the same static way as everything else in
+  // OFFLINE_CORE_FILES). Blocking it just meant the splash text silently
+  // fell back to a plain sans-serif font for no real benefit. Falls
+  // through to the browser's own HTTP cache below (fonts are typically
+  // cached long-lived already from any earlier visit) instead of being
+  // refused outright.
+  if (url.origin !== self.location.origin
+      && url.hostname !== 'fonts.googleapis.com'
+      && url.hostname !== 'fonts.gstatic.com') {
+    return new Response(null, { status: 503, statusText: 'Offline mode active' });
+  }
+
+  if (request.mode === 'navigate') {
+    // Serve the actual app shell, not just offline.html's minimal fallback
+    // — job 1 only ever shows offline.html on a failed *network* request,
+    // but here there's no attempt at the network at all.
+    const shell = await caches.match('index.html', { cacheName: OFFLINE_MODE_CACHE_NAME });
+    if (shell) return shell;
+    return null; // shouldn't happen: startGoOffline() never activates the window unless every file, including index.html, was cached successfully
+  }
+
+  // ignoreSearch: true — index.html requests site.webmanifest with a
+  // ?v=1.0.3 cache-busting query string, but it's cached here under its
+  // plain path (OFFLINE_CORE_FILES has no query strings at all), so an
+  // exact-URL match would always miss and fall through to a network
+  // request that fails outright when there's no real connection.
+  const cached = await caches.match(request, { cacheName: OFFLINE_MODE_CACHE_NAME, ignoreSearch: true });
+  return cached || null;
+}
 const OFFLINE_URL = 'offline.html';
 const PRECACHE_URLS = [
   OFFLINE_URL,
-  'images/offline/light.png',
-  'images/offline/dark.png',
+  'images/offline/light.webp',
+  'images/offline/dark.webp',
   'favicon/favicon.svg',
   'course/offline-laws.json',
   // Theme colors/logic are referenced by offline.html, not duplicated —
@@ -99,77 +198,348 @@ const PRECACHE_URLS = [
   'vendor/mathjax/fonts/woff/mjx-stx-v.woff',
   'vendor/mathjax/fonts/woff/mjx-stx-vx.woff',
   'vendor/mathjax/fonts/woff/mjx-stx-zero.woff',
+  // The font's on-demand glyph files (chtml.fontPath in index.html).
+  'vendor/mathjax/stix2-font/chtml/dynamic/accents-other.js',
+  'vendor/mathjax/stix2-font/chtml/dynamic/accents.js',
+  'vendor/mathjax/stix2-font/chtml/dynamic/arrows.js',
+  'vendor/mathjax/stix2-font/chtml/dynamic/calligraphic.js',
+  'vendor/mathjax/stix2-font/chtml/dynamic/cyrillic.js',
+  'vendor/mathjax/stix2-font/chtml/dynamic/dingbats.js',
+  'vendor/mathjax/stix2-font/chtml/dynamic/double-struck.js',
+  'vendor/mathjax/stix2-font/chtml/dynamic/enclosed.js',
+  'vendor/mathjax/stix2-font/chtml/dynamic/fraktur.js',
+  'vendor/mathjax/stix2-font/chtml/dynamic/greek.js',
+  'vendor/mathjax/stix2-font/chtml/dynamic/latin-b.js',
+  'vendor/mathjax/stix2-font/chtml/dynamic/latin-bi.js',
+  'vendor/mathjax/stix2-font/chtml/dynamic/latin-i.js',
+  'vendor/mathjax/stix2-font/chtml/dynamic/latin.js',
+  'vendor/mathjax/stix2-font/chtml/dynamic/math.js',
+  'vendor/mathjax/stix2-font/chtml/dynamic/monospace.js',
+  'vendor/mathjax/stix2-font/chtml/dynamic/phonetics.js',
+  'vendor/mathjax/stix2-font/chtml/dynamic/sans-serif.js',
+  'vendor/mathjax/stix2-font/chtml/dynamic/script.js',
+  'vendor/mathjax/stix2-font/chtml/dynamic/shapes.js',
+  'vendor/mathjax/stix2-font/chtml/dynamic/stretchy.js',
+  'vendor/mathjax/stix2-font/chtml/dynamic/symbols-other.js',
+  'vendor/mathjax/stix2-font/chtml/dynamic/symbols.js',
+  'vendor/mathjax/stix2-font/chtml/dynamic/upright.js',
+  'vendor/mathjax/stix2-font/chtml/dynamic/variants.js',
 ];
 
+// cache: 'no-cache' revalidates every file with the server, so a precache
+// run right after an update stores the new files rather than older
+// HTTP-cached copies — but an unchanged file comes back as an empty 304 and
+// is taken from the HTTP cache. ('reload' downloaded the full ~2.7 MB list
+// again on every install and every update purge.)
+function precacheAll() {
+  return caches.open(CACHE_NAME)
+    .then((cache) => Promise.all(
+      PRECACHE_URLS.map((url) =>
+        cache.add(new Request(url, { cache: 'no-cache' }))
+          .catch((err) => console.warn('[sw] precache failed:', url, err))
+      )
+    ));
+}
+
+// ── Purge limit ──
+// Each refill (precacheAll) is ~100 requests, even when they're all empty
+// 304s, and Netlify bills every one. Current pages purge at most once per
+// new version (quiz-engine.js's purgeUpdateCacheAndWait), but a tab still
+// running older code purges on every 5-minute poll for as long as it stays
+// open. So a purge within PURGE_MIN_INTERVAL of the last refill is answered
+// without wiping anything. An install's own precache counts as a refill: it
+// just fetched every file fresh, so the purge the page sends right after
+// would only repeat it. The time lives in IndexedDB, not a variable: the
+// browser stops an idle worker between polls.
+const PURGE_MIN_INTERVAL = 60 * 60 * 1000;
+const SW_META_DB_NAME = 'flux-sw-meta';
+const SW_META_STORE = 'meta';
+
+function swMeta(mode, run) {
+  return new Promise((resolve) => {
+    try {
+      const req = indexedDB.open(SW_META_DB_NAME, 1);
+      req.onupgradeneeded = () => { req.result.createObjectStore(SW_META_STORE); };
+      req.onsuccess = () => {
+        const db = req.result;
+        try {
+          const r = run(db.transaction(SW_META_STORE, mode).objectStore(SW_META_STORE));
+          r.onsuccess = () => { resolve(r.result); db.close(); };
+          r.onerror = () => { resolve(undefined); db.close(); };
+        } catch (e) { resolve(undefined); db.close(); }
+      };
+      req.onerror = () => resolve(undefined);
+    } catch (e) { resolve(undefined); }
+  });
+}
+const readLastRefillAt = () => swMeta('readonly', (s) => s.get('lastRefillAt')).then((t) => t || 0);
+const writeLastRefillAt = () => swMeta('readwrite', (s) => s.put(Date.now(), 'lastRefillAt'));
+
 self.addEventListener('install', (event) => {
-  event.waitUntil(
-    caches.open(CACHE_NAME)
-      .then((cache) => Promise.all(
-        PRECACHE_URLS.map((url) =>
-          cache.add(url).catch((err) => console.warn('[sw] precache failed:', url, err))
-        )
-      ))
-      .then(() => self.skipWaiting())
-  );
+  event.waitUntil(writeLastRefillAt().then(precacheAll).then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys()
       .then((names) => Promise.all(
-        names.filter((n) => n !== CACHE_NAME).map((n) => caches.delete(n))
+        // Never touch OFFLINE_MODE_CACHE_NAME here — it's versioned and
+        // managed entirely by js/offline-mode.js's own startGoOffline()/
+        // endOfflineMode(), on a completely different lifecycle than this
+        // worker's own install/activate. Deleting it on every activate (as
+        // a naive "clean up anything not CACHE_NAME" pass would) would
+        // wipe out everything Go offline downloaded the next time this
+        // file's own CACHE_NAME gets bumped for an unrelated reason.
+        names.filter((n) => n !== CACHE_NAME && n !== OFFLINE_MODE_CACHE_NAME).map((n) => caches.delete(n))
       ))
       .then(() => self.clients.claim())
   );
 });
 
-// Network-first for page navigations: try the real page, and only fall
-// back to the cached offline.html if the network request actually fails.
-//
-// For every other request that matches something we precached (dark/light
-// theme images, style.css, themes.js, offline-laws.json, the MathJax
-// vendor bundle + its fonts): cache-first, revalidating in the background.
-// Serve the cached copy immediately if there is one — no network round
-// trip in the way at all — then still kick off a real fetch to refresh the
-// cache for next time. Previously this was network-first-with-cache-
-// fallback, which meant every one of these requests waited for the
-// network call to actually finish failing before falling back — with no
-// connection, that's not instant, it's however long Chrome takes to give
-// up on the request (5-10s in practice), which is why the theme images and
-// MathJax's fonts visibly stalled instead of appearing immediately. Since
-// PRECACHE_URLS is already versioned by CACHE_NAME (bumped on any change
-// per the comment above), cache-first can't serve something stale forever
-// — a version bump always repopulates it on the next install.
+// -- Update-triggered precache purge -------------------------------------
+// respondDefault()'s isPrecached branch below is cache-first with a
+// background revalidate -- great for speed, but it structurally means a
+// changed file (the MathJax bundle, the offline art; our own style.css,
+// course-config.js, banner-manager.js and themes.js are network-first now,
+// see OWN_PRECACHED) never shows up on the SAME reload that fetches it:
+// reload #1 serves the stale cached copy instantly while quietly re-fetching
+// in the background, and only reload #2 actually serves what just landed in
+// the cache. quiz-engine.js's checkForUpdate() already knows the instant a
+// real content update exists (site-version.json vs CURRENT_VERSION) -- when it
+// does, it messages this listener to wipe CACHE_NAME before the page
+// reloads, so that one reload's fetches all miss cache and go straight to
+// the network, repopulating it fresh. Everyday browsing (no version
+// mismatch) never sends this message, so the normal cache-first path above
+// is completely unaffected.
+self.addEventListener('message', (event) => {
+  if (!event.data || event.data.type !== 'purge-update-cache') return;
+  // Refill the cache right after wiping it. Without this, the purge left
+  // offline.html, its art and offline-laws.json uncached until the worker
+  // itself was next reinstalled (the page never requests them, so the
+  // revalidate path below never brings them back), and a reload with no
+  // connection then had nothing to fall back to: Chrome's ERR_FAILED page.
+  // The page is answered first so its reload isn't held up by the refill.
+  const reply = () => { if (event.ports && event.ports[0]) event.ports[0].postMessage({ ok: true }); };
+  event.waitUntil(
+    readLastRefillAt().then((last) => {
+      // A refill within the limit: answer, wipe nothing (see "Purge limit"
+      // above). A time in the future (clock moved back) doesn't count.
+      const age = Date.now() - last;
+      if (age >= 0 && age < PURGE_MIN_INTERVAL) { reply(); return; }
+      return writeLastRefillAt()
+        .then(() => caches.delete(CACHE_NAME))
+        .then(() => { reply(); return precacheAll(); });
+    })
+  );
+});
+
 self.addEventListener('fetch', (event) => {
+  event.respondWith(routeFetch(event));
+});
+
+// ── Shared solution links (/s/<problem_key>) ──
+// On the server they are answered by netlify/edge-functions/share.ts, for
+// the link previews. A visitor who already has the site is sent straight
+// to the solution from here instead: no round trip, and it works in full
+// offline mode too, where the cached app shell served at /s/... would load
+// with every relative path pointing under /s/.
+function respondShareLink(event) {
+  if (event.request.mode !== 'navigate') return null;
+  const scope = new URL(self.registration.scope);
+  const url = new URL(event.request.url);
+  const prefix = scope.pathname + 's/';
+  if (url.origin !== scope.origin || !url.pathname.startsWith(prefix)) return null;
+  let key = '';
+  try { key = decodeURIComponent(url.pathname.slice(prefix.length).replace(/\/+$/, '')); } catch (e) { /* bad escape */ }
+  return Response.redirect(new URL(key ? '?solution=' + encodeURIComponent(key) : '', scope).href, 302);
+}
+
+async function routeFetch(event) {
+  const shared = respondShareLink(event);
+  if (shared) return shared;
+  const until = await readOfflineModeUntil();
+  if (until && Date.now() < until) {
+    const handled = await respondFullOffline(event);
+    if (handled) return handled;
+    // null: same-origin request Go offline's manifest didn't cover — fall
+    // through to the normal job-1 handling below, same as if full offline
+    // mode weren't running at all.
+  } else {
+    // Not during full offline mode: its cache can hold an old build, and the
+    // reload would only bring that same build back, every 5 minutes.
+    const stale = await respondStaleTab(event);
+    if (stale) return stale;
+  }
+  return respondDefault(event);
+}
+
+// ── Tabs stuck on 12.4.4 or older ──
+// Those builds poll /version.json, renamed to site-version.json since (see
+// VERSION_MANIFEST_URL in js/quiz-engine.js). They get a 404, take it as
+// "server unavailable" and never hear of an update, so a tab left open stays
+// on old code until someone reloads it by hand. No current page asks for
+// that name, so the request itself marks such a tab: reload it (navigations
+// are network-first, so it comes back on the current build, which never asks
+// again) and answer with site-version.json, so a tab the reload misses still
+// sees the update (12.4.4 forces it within 24 h, older builds show the
+// Reload banner, and their cache purges are capped by PURGE_MIN_INTERVAL).
+//
+// The editor's old code polls the same name; it is answered but never
+// reloaded, as a reload there could lose unsaved work. The fragment is
+// dropped from the URL because navigating to the same URL with a fragment
+// only scrolls, it doesn't reload. Never put a real version.json back on
+// the server: tabs on 12.4.3 or older would re-download the whole precache
+// list through their old worker every 5 minutes.
+async function respondStaleTab(event) {
+  const scope = new URL(self.registration.scope);
+  const url = new URL(event.request.url);
+  if (url.origin !== scope.origin || url.pathname !== scope.pathname + 'version.json') return null;
+  const client = event.clientId ? await self.clients.get(event.clientId).catch(() => null) : null;
+  if (client && client.type === 'window' && !new URL(client.url).pathname.startsWith(scope.pathname + 'editor/')) {
+    const reload = client.navigate(client.url.split('#')[0]).catch(() => {});
+    try { event.waitUntil(reload); } catch (_) {}
+  }
+  return fetch(new URL('site-version.json', scope), { cache: 'no-store' }).catch(() => null);
+}
+
+// Everything below is job 1, completely unchanged from before Phase 4 —
+// only ever reached once routeFetch() above has confirmed full offline
+// mode either isn't active or has nothing cached for this particular
+// request.
+function respondDefault(event) {
   const url = new URL(event.request.url);
   const isPrecached = PRECACHE_URLS.some((p) => url.pathname.endsWith('/' + p) || url.pathname === '/' + p);
 
+  // Network-first for page navigations: try the real page, and only fall
+  // back to the cached offline.html if the network request actually fails.
+  //
+  // For every other request that matches something we precached (dark/light
+  // theme images, offline-laws.json, the MathJax vendor bundle + its fonts;
+  // our own code is network-first, below): cache-first, revalidating in the
+  // background.
+  // Serve the cached copy immediately if there is one — no network round
+  // trip in the way at all — then still kick off a real fetch to refresh the
+  // cache for next time. Previously this was network-first-with-cache-
+  // fallback, which meant every one of these requests waited for the
+  // network call to actually finish failing before falling back — with no
+  // connection, that's not instant, it's however long Chrome takes to give
+  // up on the request (5-10s in practice), which is why the theme images and
+  // MathJax's fonts visibly stalled instead of appearing immediately. Since
+  // PRECACHE_URLS is already versioned by CACHE_NAME (bumped on any change
+  // per the comment above), cache-first can't serve something stale forever
+  // — a version bump always repopulates it on the next install.
   if (event.request.mode === 'navigate') {
-    event.respondWith(
-      fetch(event.request).catch(() => caches.match(OFFLINE_URL))
+    // Resolving respondWith() with undefined (offline.html missing from the
+    // cache) is what Chrome shows as ERR_FAILED, so keep a bare fallback.
+    return fetch(event.request).catch(() =>
+      caches.match(OFFLINE_URL, { ignoreVary: true }).then((cached) => cached ? withScopeBase(cached) : new Response(
+        '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+        + '<title>Offline</title><p style="font-family:sans-serif;padding:2em">You are offline. Reconnect and reload.</p>',
+        { status: 503, headers: { 'Content-Type': 'text/html; charset=utf-8' } }
+      ))
     );
-    return;
+  }
+
+  // Our own code among the precached files: network-first. Cache-first
+  // served the copy from before an edit or a deploy for one load (new HTML,
+  // old style.css: an unstyled page until a second reload), and the purge
+  // that clears it only runs on a version change. The deployed index.html
+  // loads hashed bundles instead, so this only costs a request where the
+  // plain files are loaded: offline.html (offline, so the cache answers)
+  // and a local copy of the site.
+  const path = url.pathname.slice(new URL(self.registration.scope).pathname.length);
+  if (url.origin === self.location.origin && OWN_PRECACHED.includes(path)) {
+    return networkFirst(event.request);
   }
 
   if (isPrecached) {
-    event.respondWith(
-      caches.match(event.request).then((cached) => {
-        const revalidate = fetch(event.request).then((response) => {
-          if (response && response.ok) {
-            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, response.clone()));
-          }
-          return response;
-        }).catch(() => cached);
-        // Cache hit: return it now, let the network call finish in the
-        // background purely to refresh the cache. Cache miss (e.g. this
-        // one entry failed during precache — see the .catch on cache.add
-        // in 'install' above): fall through to that same network call,
-        // which still falls back to whatever's cached if it fails.
-        return cached || revalidate;
-      })
-    );
+    // ignoreVary: the precache request (Accept: */*) and the page's own
+    // request (e.g. Accept: text/css) differ in headers, so a server that
+    // sends `Vary: Accept` would otherwise make every lookup here miss.
+    return caches.match(event.request, { ignoreVary: true }).then((cached) => {
+      const revalidate = fetch(event.request).then((response) => {
+        if (response && response.ok) {
+          // Clone synchronously, right here, before any async work — if
+          // this were deferred until inside caches.open().then(...), the
+          // response returned below could already be locked/streaming to
+          // the page by the time clone() runs, throwing "Response body
+          // is already used".
+          const responseToCache = response.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, responseToCache));
+        }
+        return response;
+      }).catch(() => cached);
+      // Cache hit: return it now, let the network call finish in the
+      // background purely to refresh the cache. Cache miss (e.g. this
+      // one entry failed during precache — see the .catch on cache.add
+      // in 'install' above): fall through to that same network call,
+      // which still falls back to whatever's cached if it fails.
+      return cached || revalidate;
+    });
   }
-});
+
+  // Not a navigation, not precached: the normal network fetch, except that
+  // our own files are always re-checked with the server, as Netlify's
+  // default header ("max-age=0, must-revalidate", see _headers) already
+  // makes the browser do. A server without that header (a local preview)
+  // left the browser free to reuse a file for minutes after it changed, and
+  // a reload only re-checks the page itself. Hashed bundles and the folders
+  // _headers caches on purpose are left as they are, and so is a request
+  // that already chose its own cache mode (site-version.json's no-store).
+  if (url.origin === self.location.origin && event.request.method === 'GET'
+      && event.request.cache === 'default' && !LONG_CACHED.test(path)) {
+    return fetch(new Request(event.request, { cache: 'no-cache' }));
+  }
+  return fetch(event.request);
+}
+
+// The precached files that are ours rather than vendor art/fonts (see
+// respondDefault), and the paths _headers lets browsers keep without asking.
+const OWN_PRECACHED = ['css/style.css', 'js/course-config.js', 'js/banner-manager.js', 'js/themes.js'];
+const LONG_CACHED = /^(vendor|images|favicon|js\/bundle|css\/bundle)\//;
+const NETWORK_FIRST_TIMEOUT = 3000;
+
+// Fresh from the server (re-checked, an unchanged file is an empty 304),
+// stored for offline use; the cached copy when the network fails or hasn't
+// answered within NETWORK_FIRST_TIMEOUT (a dead connection can take 5-10 s
+// to fail, see above).
+function networkFirst(request) {
+  const network = fetch(new Request(request, { cache: 'no-cache' })).then((response) => {
+    if (response && response.ok) {
+      const copy = response.clone();
+      caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
+    }
+    return response;
+  });
+  const cached = () => caches.match(request, { ignoreVary: true });
+  const timeout = new Promise((resolve) => setTimeout(resolve, NETWORK_FIRST_TIMEOUT));
+  return Promise.race([network.catch(() => null), timeout]).then((response) => {
+    if (response && response.ok) return response;
+    return cached().then((hit) => hit || network);
+  });
+}
+
+// offline.html is served at whatever URL failed to load, not at
+// /offline.html — so a reload of e.g. /editor/ with no connection would
+// resolve its relative css/style.css, js/themes.js, images/offline/*.webp,
+// course/offline-laws.json and MathJax font URLs against /editor/, none of
+// which are cached, and the page came up completely unstyled. Pinning a
+// <base> to this worker's scope (where sw.js, offline.html and everything
+// in PRECACHE_URLS live) makes them resolve to the precached copies no
+// matter which page was being loaded. location.reload() ("Try again" and
+// the 'online' listener) is unaffected — it reloads the document URL, not
+// the base.
+async function withScopeBase(response) {
+  const html = await response.text();
+  const base = '<base href="' + self.registration.scope + '">';
+  const patched = /<head\b[^>]*>/i.test(html)
+    ? html.replace(/<head\b[^>]*>/i, (tag) => tag + base)
+    : base + html;
+  return new Response(patched, {
+    status: 200,
+    headers: { 'Content-Type': 'text/html; charset=utf-8' },
+  });
+}
 
 // ── Push notifications (forum @mentions) ──
 // This is the part that makes notifications work even with the site fully
@@ -179,6 +549,35 @@ self.addEventListener('fetch', (event) => {
 // running in its own background thread. The actual send happens server-side
 // (post-message.ts's sendMentionPushNotifications, via the Web Push
 // protocol + VAPID), this is only the "show something when it arrives" half.
+
+// Settings > Notifications > "Go silent" (js/settings.js) mirrors its
+// effective state into this same IndexedDB database/store/key — this is
+// the read side. Can't just check localStorage: a service worker has no
+// access to it at all, and this event in particular is the one case where
+// there might not even be a page open to read it from anyway. Name/store/
+// key must stay in sync with js/settings.js's NOTIF_MUTE_DB_NAME/
+// NOTIF_MUTE_STORE. Resolves false (not muted) on any failure — an
+// unreadable flag should never be the reason a real mention silently never
+// shows up.
+function readNotifMuteFlag() {
+  return new Promise((resolve) => {
+    try {
+      const req = indexedDB.open('flux-notif-mute', 1);
+      req.onupgradeneeded = () => { req.result.createObjectStore('flags'); };
+      req.onsuccess = () => {
+        const db = req.result;
+        try {
+          const tx = db.transaction('flags', 'readonly');
+          const getReq = tx.objectStore('flags').get('muted');
+          getReq.onsuccess = () => { resolve(!!getReq.result); db.close(); };
+          getReq.onerror = () => { resolve(false); db.close(); };
+        } catch (e) { resolve(false); db.close(); }
+      };
+      req.onerror = () => resolve(false);
+    } catch (e) { resolve(false); }
+  });
+}
+
 self.addEventListener('push', (event) => {
   let data = {};
   try { data = event.data ? event.data.json() : {}; } catch (e) { /* malformed payload — show a generic notification below */ }
@@ -199,7 +598,12 @@ self.addEventListener('push', (event) => {
     tag: data.problem_key ? `forum-${data.problem_key}` : 'forum-global',
     data,
   };
-  event.waitUntil(self.registration.showNotification(title, options));
+  event.waitUntil(
+    readNotifMuteFlag().then((muted) => {
+      if (muted) return; // Go silent is on — skip showing anything
+      return self.registration.showNotification(title, options);
+    })
+  );
 });
 
 // Tapping the notification. Two cases: a tab is already open (focus it and

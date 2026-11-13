@@ -1,0 +1,152 @@
+/* ═══════════════════════════════════════════════════════════════════
+   store.js  ·  Where solutions are read from and written to
+   ───────────────────────────────────────────────────────────────────
+   THIS IS THE ONLY FILE THAT TALKS TO "THE SERVER".
+
+   OFFLINE STAND-IN for editor/store.js: same methods, but everything
+   lives in this browser's localStorage instead of the database. Swap
+   which of the two files editor/index.html loads to use it — handy for
+   layout work, demos, or trying the editor before the Supabase side of
+   a course is set up. Nothing is shared with anyone else.
+
+   A stored row looks exactly like the planned table row:
+     { problem_key, solution, figure: { tikz, captions, steps[] },
+       status: 'draft' | 'published', author, updated_at }
+   `steps` holds the compiled SVGs; the practice site shows those and
+   never runs TikZJax.
+   ─────────────────────────────────────────────────────────────────── */
+
+const SolutionStore = (function () {
+  'use strict';
+
+  const KEY = STORAGE_PREFIX + '-editor-server-mock';
+  const LAG = 250; // ms — a touch of latency, so the UI is honest about being async
+
+  function read() {
+    try { return JSON.parse(localStorage.getItem(KEY) || '{}') || {}; } catch (e) { return {}; }
+  }
+  function write(all) { localStorage.setItem(KEY, JSON.stringify(all)); }
+  const wait = (v) => new Promise((res) => setTimeout(() => res(v), LAG));
+
+  /** Who the stored key belongs to. The real version asks the server, which
+      looks the key's hash up in the editors table and returns that name. */
+  async function whoami() {
+    // null -> the UI just says "editor"; full access, as there is no one
+    // else here to protect anything from.
+    return wait({ id: null, name: null, level: 4 });
+  }
+
+  /** Every problem_key that has a row, with its status — one call at load,
+      so the list can show what is published without fetching every row.
+      One solution per problem here, so `rows` is the same entries again. */
+  async function index() {
+    const all = read();
+    const out = {};
+    Object.keys(all).forEach((k) => {
+      const s = all[k].share;
+      out[k] = { problem_key: k, status: all[k].status, is_default: all[k].status === 'published',
+        updated_at: all[k].updated_at, share: s ? { for: s.for, design: s.design } : null };
+    });
+    return wait({ index: out, rows: Object.values(out) });
+  }
+
+  async function list(problemKey) {
+    const row = read()[problemKey];
+    return wait(row ? [row] : []);
+  }
+
+  /** One full row, or null when nothing is stored for this problem. */
+  async function get(problemKey) {
+    return wait(read()[problemKey] || null);
+  }
+
+  /** Create or overwrite a row. expectedUpdatedAt guards against the other
+      editor having saved in the meantime (the real version does this check
+      in SQL and returns 409). */
+  async function save(problemKey, payload, expectedUpdatedAt) {
+    const all = read();
+    const cur = all[problemKey];
+    if (cur && expectedUpdatedAt && cur.updated_at !== expectedUpdatedAt) {
+      const err = new Error('Someone else saved this problem while you were editing it.');
+      err.conflict = true; err.current = cur;
+      return wait(Promise.reject(err));
+    }
+    const row = {
+      problem_key: problemKey,
+      solution: payload.solution,
+      figure: payload.figure,
+      status: payload.status,
+      // As on the server: publishing sets the credit, a draft keeps it;
+      // saved_by would be this key's owner (there is none here).
+      author: payload.status === 'published' ? (payload.author || null) : (cur ? cur.author : null),
+      author_link: null,
+      saved_by: null,
+      updated_at: new Date().toISOString(),
+      share: cur ? cur.share || null : null,   // a draft save never touches the card
+    };
+    // A publish stores its card with it, as on the server (minus the
+    // picture, which would fill localStorage).
+    if (payload.status === 'published' && payload.share) {
+      const s = payload.share;
+      row.share = { image: null, title: s.title, description: s.description, for: row.updated_at, design: s.design };
+    }
+    all[problemKey] = row;
+    write(all);
+    return wait(row);
+  }
+
+  /** Only the credit of an existing row, as the server's set-credit. */
+  async function setCredit(problemKey, author, expectedUpdatedAt) {
+    const all = read();
+    const cur = all[problemKey];
+    if (!cur) return wait(Promise.reject(new Error('Nothing is stored for this problem.')));
+    if (expectedUpdatedAt && cur.updated_at !== expectedUpdatedAt) {
+      const err = new Error('Someone else saved this problem while you were editing it.');
+      err.conflict = true; err.current = cur;
+      return wait(Promise.reject(err));
+    }
+    const was = cur.updated_at;
+    Object.assign(cur, { author: author || null, author_link: null, saved_by: null, updated_at: new Date().toISOString() });
+    if (cur.share && cur.share.for === was) cur.share.for = cur.updated_at;   // the card doesn't show the credit
+    write(all);
+    return wait(cur);
+  }
+
+  /** As the server's share-card, minus the picture (it would fill
+      localStorage): only the link text and what it was drawn from. */
+  async function shareCard(problemKey, card) {
+    const all = read();
+    const cur = all[problemKey];
+    if (!cur || cur.status !== 'published' || cur.updated_at !== card.for) {
+      const err = new Error('the solution was saved again or unpublished meanwhile');
+      err.stale = true;
+      return wait(Promise.reject(err));
+    }
+    cur.share = { image: null, title: card.title, description: card.description, for: card.for, design: card.design };
+    write(all);
+    return wait(cur.share);
+  }
+
+  /** Remove the row entirely (the problem goes back to "nothing stored"). */
+  async function remove(problemKey) {
+    const all = read();
+    delete all[problemKey];
+    write(all);
+    return wait(true);
+  }
+
+  /** Everything, for the JSON backup button and Check all. */
+  async function exportAll() { return wait(read()); }
+  async function exportRows() { return wait({ rows: Object.values(read()) }); }
+
+  async function editors() { return wait([]); }
+
+  // Several solutions per problem and reviews need the database.
+  const unavailable = async () => { throw new Error('Not available without the database.'); };
+
+  return {
+    whoami, editors, index, get, list, save, setCredit, setDefault: unavailable, shareCard, remove,
+    reviews: async () => wait([]), approve: unavailable, reject: unavailable,
+    exportRows, exportAll, createEditor: unavailable, isMock: true,
+  };
+})();

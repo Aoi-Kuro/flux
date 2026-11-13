@@ -13,9 +13,19 @@
 // Section/subsection data itself lives in course/manual.json (same
 // fetch-based pattern splash.js uses for course/splashes.json) rather than
 // inline here, so the actual copy can be edited without touching any code.
-// It's currently filled with lorem ipsum as placeholders; swap the `html`
-// fields in that file for real copy whenever it's ready — this module
-// doesn't need to change either way.
+//
+// What a page's `html` can use besides plain HTML:
+//   {{quizSize}}, {{cumulativePrev}}, {{cumulativeCurrent}}, {{quiz1}}…
+//     {{brandName}}: this course's numbers, quiz names and site name (see manualFillTokens below);
+//   <a href="#" data-goto="page-id">  a link to another manual page;
+//   .manual-mock  an inert copy of a real screen, built from the site's own
+//     classes (css/manual.css), with .manual-n numbered dots;
+//   .manual-answer-demo  a live answer field graded by the real checker;
+//   .manual-fig-demo  real redrawn figures with their play buttons, from
+//     <span class="manual-fig-demo-fig" data-fig="…">: a problem image's path,
+//     or images/manual/<name> for the manual's own drawings
+//     (tools/figures/manual.py → course/figures/manual.js);
+//   plus the older live widgets below (avatar, LaTeX, splash, themes, GitHub).
 
 let MANUAL_SECTIONS = null;
 
@@ -55,6 +65,8 @@ async function loadManualData() {
   } catch (e) {
     MANUAL_SECTIONS = MANUAL_FALLBACK_SECTIONS;
   }
+  // Only defined inside Safe Exam Browser (js/lockdown-session.js).
+  if (typeof lockdownManualSections === 'function') MANUAL_SECTIONS = lockdownManualSections(MANUAL_SECTIONS);
   return MANUAL_SECTIONS;
 }
 
@@ -79,30 +91,68 @@ const MANUAL_HOSTS = [
     isVisible: el => el.classList.contains('visible'),
     hide:      el => el.classList.remove('visible', 'fading-out'),
     show:      el => el.classList.add('visible'),
+    scrollY: 0,
   },
   {
     id: 'statsScreen',
     isVisible: el => el.classList.contains('visible'),
     hide:      el => el.classList.remove('visible', 'fading-out'),
     show:      el => el.classList.add('visible'),
+    scrollY: 0,
   },
   {
     id: 'reviewScreen',
     isVisible: el => el.classList.contains('visible'),
     hide:      el => el.classList.remove('visible', 'fading-out'),
     show:      el => el.classList.add('visible'),
+    scrollY: 0,
   },
   {
     id: 'forumScreen',
     isVisible: el => el.classList.contains('visible'),
     hide:      el => el.classList.remove('visible', 'fading-out'),
     show:      el => el.classList.add('visible'),
+    scrollY: 0,
+  },
+  {
+    // Missing until now — SETTINGS_HOSTS (js/settings.js) already lists
+    // 'manualScreen' as a valid host, so Manual -> Settings worked, but the
+    // reverse (Settings -> Manual) didn't: openManualScreen() found no
+    // matching host, fell back to treating the (already-hidden) landing
+    // screen as the host, and never actually hid Settings. Manual became
+    // .visible but sat behind Settings (looked like it "didn't open"), and
+    // closing Settings then revealed the landing screen underneath while
+    // Manual's now-unhidden content sat stacked below it in normal page
+    // flow (looked "appended to the bottom of the main page").
+    id: 'settingsScreen',
+    isVisible: el => el.classList.contains('visible'),
+    hide:      el => el.classList.remove('visible', 'fading-out'),
+    show:      el => el.classList.add('visible'),
+    scrollY: 0,
   },
   {
     id: 'choicePage',
     isVisible: el => !el.classList.contains('hidden'),
     hide:      el => el.classList.add('hidden'),
     show:      el => el.classList.remove('hidden', 'fading-out'),
+    scrollY: 0,
+  },
+  {
+    // js/license.js — the manual button is reachable from it too.
+    id: 'licenseScreen',
+    isVisible: el => el.classList.contains('visible'),
+    hide:      el => el.classList.remove('visible', 'fading-out'),
+    show:      el => el.classList.add('visible'),
+    scrollY: 0,
+  },
+  {
+    // js/solutions.js — reachable from the Solution screen too. Without
+    // this entry it stayed showing, stacked under the screen opened over it.
+    id: 'solutionScreen',
+    isVisible: el => el.classList.contains('visible'),
+    hide:      el => el.classList.remove('visible', 'fading-out'),
+    show:      el => el.classList.add('visible'),
+    scrollY: 0,
   },
 ];
 
@@ -112,10 +162,19 @@ const MANUAL_HOSTS = [
 // know whether to restore that screen or fall back to the landing screen.
 let manualHostId = null;
 
-// There's no in-screen ✕ Close button anymore — the manual button doubles
-// as the close control, same as tapping the site logo (which routes through
-// goToMainMenu() -> closeManualScreen(true) instead). This is what the
-// manual button's onclick actually calls now.
+// Mirrors FORUM_FAB_HOSTS' own host.scrollY (js/forum.js) — the host being
+// swapped out is a normal in-flow page, so hiding it leaves window.scrollY
+// wherever it was, which would otherwise land the Manual screen (or, on
+// close, the restored host) at whatever offset the *other* screen happened
+// to be scrolled to. Landing itself isn't in MANUAL_HOSTS (it's the
+// fallback, not a host entry), so its own return offset is tracked here
+// instead of on a host object.
+let manualLandingScrollY = 0;
+
+// The header's ✕ and a second tap on the manual button both close the
+// manual back to wherever it was opened from (the site logo instead routes
+// through goToMainMenu() -> closeManualScreen(true)). This is what the
+// manual button's onclick calls.
 function toggleManualScreen() {
   const manual = document.getElementById('manualScreen');
   if (manual && manual.classList.contains('visible')) {
@@ -125,7 +184,9 @@ function toggleManualScreen() {
   }
 }
 
-async function openManualScreen() {
+// pageId: open straight on that page (e.g. the ⓘ beside each answer field
+// opens 'quizzes-scoring'); left out, the manual opens with nothing picked.
+async function openManualScreen(pageId) {
   const landing = document.getElementById('landingScreen');
   const manual  = document.getElementById('manualScreen');
   if (!landing || !manual) return;
@@ -143,6 +204,13 @@ async function openManualScreen() {
   const hostEl = hostEntry ? document.getElementById(hostEntry.id) : landing;
   manualHostId = hostEntry ? hostEntry.id : null;
 
+  // Capture wherever the host page is currently scrolled to before hiding
+  // it, then start the Manual screen itself at the top — same convention
+  // as FORUM_FAB_HOSTS (js/forum.js) and the attempt-review sub-screen
+  // (js/stats.js), just applied to Manual too.
+  const scrollY = typeof captureScreenScroll === 'function' ? captureScreenScroll() : (window.scrollY || 0);
+  if (hostEntry) hostEntry.scrollY = scrollY; else manualLandingScrollY = scrollY;
+
   hostEl.classList.add('fading-out');
   setTimeout(async () => {
     if (hostEntry) {
@@ -152,6 +220,8 @@ async function openManualScreen() {
       hostEl.classList.remove('fading-out');
     }
     manual.classList.add('visible');
+    if (typeof scrollScreenToTop === 'function') scrollScreenToTop();
+    else window.scrollTo(0, 0);
     // Fresh open every time: nothing expanded, nothing selected, right pane
     // empty — same "reset filters on open" call as openStatsScreen makes,
     // rather than carrying over whatever was left open from a previous visit.
@@ -161,6 +231,11 @@ async function openManualScreen() {
     if (!MANUAL_SECTIONS) {
       renderManualLoading();
       await manualDataReady;
+    }
+    const pageSection = pageId && MANUAL_SECTIONS.find(sec => sec.subsections.some(sub => sub.id === pageId));
+    if (pageSection) {
+      manualExpandedSections.add(pageSection.id);
+      manualActiveSubsectionId = pageId;
     }
     renderManualSidebar();
     renderManualContent();
@@ -179,7 +254,6 @@ function closeManualScreen(forceLanding) {
   if (!landing || !manual) return;
 
   manual.classList.add('fading-out');
-  manualFigDemoClearIntervals();
   setTimeout(() => {
     manual.classList.remove('visible', 'fading-out');
 
@@ -187,7 +261,7 @@ function closeManualScreen(forceLanding) {
     manualHostId = null;
 
     if (forceLanding && typeof exitAppOrChoiceToLanding === 'function') {
-      // Also unwinds solve-all/mistakes state the same way leaving that
+      // Also unwinds solve-all state the same way leaving that
       // screen normally does, if appPage was the host underneath — not
       // just "hide manual, show landing" — see exitAppOrChoiceToLanding()
       // in quiz-engine.js.
@@ -199,13 +273,20 @@ function closeManualScreen(forceLanding) {
     if (hostId) {
       const host = MANUAL_HOSTS.find(h => h.id === hostId);
       const hostEl = host && document.getElementById(hostId);
-      if (host && hostEl) { host.show(hostEl); return; }
+      if (host && hostEl) {
+        host.show(hostEl);
+        if (typeof restoreScreenScroll === 'function') restoreScreenScroll(host.scrollY);
+        else window.scrollTo(0, host.scrollY || 0);
+        return;
+      }
     }
 
     // Original behavior: opened from the landing screen itself.
     landing.classList.remove('hidden');
     if (typeof showNewSplash === 'function') showNewSplash();
     if (typeof setFieldLinesVisible === 'function') setFieldLinesVisible(true);
+    if (typeof restoreScreenScroll === 'function') restoreScreenScroll(manualLandingScrollY);
+    else window.scrollTo(0, manualLandingScrollY || 0);
   }, 280);
 }
 
@@ -213,7 +294,6 @@ function closeManualScreen(forceLanding) {
 function renderManualLoading() {
   const sidebar = document.getElementById('manualSidebar');
   const content = document.getElementById('manualContent');
-  manualFigDemoClearIntervals();
   if (sidebar) sidebar.innerHTML = `<div class="manual-loading">Loading…</div>`;
   if (content) content.innerHTML = `
     <div class="manual-placeholder">
@@ -232,12 +312,31 @@ function toggleManualSection(sectionId) {
   renderManualSidebar();
 }
 
-function selectManualSubsection(sectionId, subId) {
+// fromContent: opened by a link or the Previous / Next buttons inside the
+// page, which can sit far down a long page, so the new page's top is
+// brought into view. The sidebar keeps its own scroll position as before.
+function selectManualSubsection(sectionId, subId, fromContent) {
   manualExpandedSections.add(sectionId);
   manualActiveSubsectionId = subId;
   renderManualSidebar();
   renderManualContent();
+  if (fromContent) {
+    const content = document.getElementById('manualContent');
+    // 72px: clear of the fixed top bar.
+    const y = content ? content.getBoundingClientRect().top + window.scrollY - 72 : 0;
+    if (window.scrollY > y) window.scrollTo(0, Math.max(0, y));
+  }
 }
+
+// <a data-goto="page-id"> inside a page opens that page.
+document.getElementById('manualContent')?.addEventListener('click', (e) => {
+  const link = e.target.closest('[data-goto]');
+  if (!link || !MANUAL_SECTIONS) return;
+  e.preventDefault();
+  const id = link.getAttribute('data-goto');
+  const section = MANUAL_SECTIONS.find(s => s.subsections.some(sub => sub.id === id));
+  if (section) selectManualSubsection(section.id, id, true);
+});
 
 function renderManualSidebar() {
   const sidebar = document.getElementById('manualSidebar');
@@ -272,7 +371,6 @@ function renderManualContent() {
   if (!content || !MANUAL_SECTIONS) return;
 
   if (!manualActiveSubsectionId) {
-    manualFigDemoClearIntervals();
     content.innerHTML = `
       <div class="manual-placeholder">
         <div class="manual-placeholder-icon">📖</div>
@@ -282,21 +380,29 @@ function renderManualContent() {
     return;
   }
 
-  let found = null;
-  for (const section of MANUAL_SECTIONS) {
-    const sub = section.subsections.find(s => s.id === manualActiveSubsectionId);
-    if (sub) { found = { section, sub }; break; }
-  }
-  if (!found) { manualActiveSubsectionId = null; renderManualContent(); return; }
+  // Every page in reading order, for the Previous / Next buttons.
+  const pages = MANUAL_SECTIONS.flatMap(section => section.subsections.map(sub => ({ section, sub })));
+  const i = pages.findIndex(x => x.sub.id === manualActiveSubsectionId);
+  if (i < 0) { manualActiveSubsectionId = null; renderManualContent(); return; }
+  const found = pages[i];
+
+  const pagerBtn = (x, label, cls) => x ? `
+      <button type="button" class="manual-pager-btn ${cls}" onclick="selectManualSubsection('${x.section.id}','${x.sub.id}',true)">
+        <small>${label}</small><span>${x.sub.title}</span>
+      </button>` : '';
 
   content.innerHTML = `
     <div class="manual-content-eyebrow">${found.section.icon} ${found.section.title}</div>
     <h2 class="manual-content-title">${found.sub.title}</h2>
-    <div class="manual-content-body">${found.sub.html}</div>
+    <div class="manual-content-body">${manualFillTokens(found.sub.html)}</div>
+    <div class="manual-pager">${pagerBtn(pages[i - 1], '← Previous', 'prev')}${pagerBtn(pages[i + 1], 'Next →', 'next')}</div>
   `;
 
-  if (typeof renderMathIn === 'function') renderMathIn(content);
-  manualFigDemoInitAll(content);
+  // The answer demo typesets its own preview, so it starts once the page's
+  // math is done and MathJax never works on the same nodes twice.
+  Promise.resolve(typeof renderMathIn === 'function' ? renderMathIn(content) : null)
+    .then(() => manualAnswerDemoInitAll(content));
+  manualFigureDemoInitAll(content);
   manualAvatarDemoInitAll(content);
   manualLatexDemoInitAll(content);
   manualSplashDemoInitAll(content);
@@ -304,7 +410,7 @@ function renderManualContent() {
   manualGithubDemoInitAll(content);
 }
 
-// ── Live GitHub repo card (About the project / Feedback & Contact pages) ──
+// ── Live GitHub repo card (About the project / Feedback & contact pages) ──
 // Pulls basic stats for the flux repo straight from the public GitHub REST
 // API. Both manual pages that embed this widget share one fetch through
 // _manualGithubDataPromise, so opening the manual only ever costs a single
@@ -424,6 +530,10 @@ async function manualGithubDemoRender(demo) {
 // (window.pickSplashText, exposed by splash.js), it just renders into its
 // own element instead of #splashText so tapping it here never touches the
 // real badge sitting behind the manual overlay.
+//
+// The pool has a deliberately blank splash. It shows here too, as on the
+// main screen (the badge hides itself when empty), which is why the whole
+// .manual-splash-demo-preview box is the tap target rather than the badge.
 function manualSplashDemoInitAll(container) {
   if (!container) return;
   container.querySelectorAll('.manual-splash-demo-preview .mc-splash').forEach(el => {
@@ -431,14 +541,16 @@ function manualSplashDemoInitAll(container) {
   });
 }
 
+// el: the tapped box (or anything else inside the demo).
 function manualSplashDemoReroll(el) {
-  manualSplashDemoRender(el);
+  const badge = el.closest('.manual-splash-demo')?.querySelector('.mc-splash');
+  if (badge) manualSplashDemoRender(badge);
 }
 
 function manualSplashDemoRender(el) {
   if (typeof window.pickSplashText !== 'function') return;
   const text = window.pickSplashText();
-  if (!text) return;
+  if (typeof text !== 'string') return;   // null: splashes.json not loaded yet
   el.textContent = text;
   // Restart the bounce animation from scratch, same trick showNewSplash()
   // itself uses on the real badge.
@@ -447,94 +559,112 @@ function manualSplashDemoRender(el) {
   el.style.animation = '';
 }
 
-// ── Figure theme demo (used inline on the "Random 6 mode" and "Solve them
-// all mode" manual pages) ──
-// Purely a manual illustration: retheming this preview only ever touches
-// the two elements below (data-theme/data-mode on .manual-fig-demo-preview),
-// never body[data-theme] or .light — the real toggle/palette panel outside
-// the manual is completely untouched by tapping these.
-//
-// On top of the manual toggle/swatches, each demo also auto-cycles through
-// the color presets on its own (day/night is never touched by the auto
-// cycle — only the color theme) so a passive reader still sees it restyle
-// without having to click anything. Any manual swatch click pauses that
-// demo's auto-cycle for a bit so it doesn't yank the color back out from
-// under the person right after they picked one.
-const MANUAL_FIG_DEMO_THEMES = ['default', 'nord', 'sakura', 'cyber', 'forest', 'solar'];
-const MANUAL_FIG_DEMO_CYCLE_MS = 5000;
-const MANUAL_FIG_DEMO_PAUSE_MS = 30000;
-
-// Interval ids for whatever demos are currently on screen — cleared and
-// rebuilt every time the manual content re-renders (new subsection, or the
-// manual screen closing) so nothing keeps ticking against detached nodes.
-let manualFigDemoIntervals = [];
-
-function manualFigDemoClearIntervals() {
-  manualFigDemoIntervals.forEach(id => clearInterval(id));
-  manualFigDemoIntervals = [];
+// ── Course numbers in the copy ──
+// {{quizSize}} etc. in course/manual.json become this course's own values
+// (js/course-config.js, course/quizzes/quizzes.js), so the same pages fit
+// every course: a PHYS 161 reader sees "Random 7", a PHYS 162 one "Random 6".
+// An unknown {{name}} is left as typed.
+function manualFillTokens(html) {
+  const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const vals = {};
+  if (typeof BRAND_NAME !== 'undefined') vals.brandName = esc(BRAND_NAME);
+  if (typeof QUIZ_SIZE !== 'undefined') {
+    vals.quizSize = QUIZ_SIZE;
+    vals.cumulativePrev = QUIZ_CUMULATIVE_PREV_COUNT;
+    vals.cumulativeCurrent = QUIZ_SIZE - QUIZ_CUMULATIVE_PREV_COUNT;
+  }
+  if (typeof QUIZZES !== 'undefined') {
+    QUIZZES.forEach((q, i) => { vals['quiz' + (i + 1)] = esc(q.name || `Quiz #${i + 1}`); });
+  }
+  return html.replace(/\{\{(\w+)\}\}/g, (m, key) => (key in vals ? String(vals[key]) : m));
 }
 
-function manualFigDemoApplyTheme(demo, theme) {
-  const preview = demo.querySelector('.manual-fig-demo-preview');
-  if (preview) preview.setAttribute('data-theme', theme);
-  const swatches = demo.querySelectorAll('.manual-fig-demo-swatch');
-  swatches.forEach((s, i) => s.classList.toggle('active', MANUAL_FIG_DEMO_THEMES[i] === theme));
-}
+// ── Live answer field (used inline on the "Entering answers" manual page) ──
+// Not a reimplementation: the field is read, previewed and graded by the
+// same functions the quiz cards use (answerPreview, gradeAnswer,
+// answerFeedbackHtml in js/answer-check.js), against a made-up problem
+// whose accepted answer comes from the demo's data-answer / data-units.
+// The preview sits in the page under the field instead of floating on
+// <body> like the real one, but it is the same box (.answer-preview).
+const MANUAL_ANSWER_DEMO_DEBOUNCE_MS = 250;
 
-// Sets every demo in the freshly-rendered content to match whatever theme
-// and day/night mode is actually active on the real site right now, then
-// kicks off each one's auto-cycle. Called once per content render rather
-// than on manual-open, since a subsection swap re-creates these nodes.
-function manualFigDemoInitAll(container) {
-  manualFigDemoClearIntervals();
+function manualAnswerDemoInitAll(container) {
   if (!container) return;
-  const demos = container.querySelectorAll('.manual-fig-demo');
-  if (!demos.length) return;
-
-  const realTheme = (typeof getColorTheme === 'function') ? getColorTheme() : 'default';
-  const initTheme = MANUAL_FIG_DEMO_THEMES.includes(realTheme) ? realTheme : 'default';
-  const realMode = document.body.classList.contains('light') ? 'light' : 'dark';
-
-  demos.forEach(demo => {
-    const preview = demo.querySelector('.manual-fig-demo-preview');
-    if (preview) preview.setAttribute('data-mode', realMode);
-    const toggleBtn = demo.querySelector('.manual-fig-demo-toggle');
-    if (toggleBtn) toggleBtn.textContent = realMode === 'dark' ? '🌙 Night' : '☀️ Day';
-    manualFigDemoApplyTheme(demo, initTheme);
-    demo._manualFigPausedUntil = 0;
-
-    const intervalId = setInterval(() => {
-      if (Date.now() < (demo._manualFigPausedUntil || 0)) return;
-      const curPreview = demo.querySelector('.manual-fig-demo-preview');
-      if (!curPreview) return;
-      const cur = curPreview.getAttribute('data-theme') || 'default';
-      const idx = MANUAL_FIG_DEMO_THEMES.indexOf(cur);
-      const next = MANUAL_FIG_DEMO_THEMES[(idx + 1) % MANUAL_FIG_DEMO_THEMES.length];
-      manualFigDemoApplyTheme(demo, next);
-    }, MANUAL_FIG_DEMO_CYCLE_MS);
-    manualFigDemoIntervals.push(intervalId);
+  container.querySelectorAll('.manual-answer-demo').forEach(demo => {
+    if (demo.dataset.ready) return;          // a page switched away and back mid-typeset
+    demo.dataset.ready = '1';
+    const input = demo.querySelector('.answer-input');
+    if (!input) return;
+    input.addEventListener('input', () => {
+      clearTimeout(demo._manualAnswerDemoTimer);
+      demo._manualAnswerDemoTimer = setTimeout(() => manualAnswerDemoRender(demo), MANUAL_ANSWER_DEMO_DEBOUNCE_MS);
+    });
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') manualAnswerDemoRender(demo); });
+    manualAnswerDemoRender(demo);
   });
 }
 
-function manualFigDemoToggleMode(btn) {
-  const preview = btn.closest('.manual-fig-demo')?.querySelector('.manual-fig-demo-preview');
-  if (!preview) return;
-  const next = preview.getAttribute('data-mode') === 'dark' ? 'light' : 'dark';
-  preview.setAttribute('data-mode', next);
-  btn.textContent = next === 'dark' ? '🌙 Night' : '☀️ Day';
+function manualAnswerDemoRender(demo) {
+  const input = demo.querySelector('.answer-input');
+  const preview = demo.querySelector('.answer-preview');
+  const fb = demo.querySelector('.feedback');
+  if (!input || !preview || !fb) return;
+  if (typeof gradeAnswer !== 'function' || typeof answerPreview !== 'function') {
+    fb.className = 'feedback show';
+    fb.textContent = 'The answer checker hasn’t loaded yet. Reopen this page in a moment.';
+    return;
+  }
+  let units = [];
+  try { units = JSON.parse(demo.dataset.units || '[]'); } catch (e) { /* no units */ }
+  const p = { answer: Number(demo.dataset.answer), units };
+  const text = input.value;
+
+  // What the real field shows under itself while you type.
+  const r = answerPreview(text);
+  if (window.MathJax && MathJax.typesetClear) { try { MathJax.typesetClear([preview]); } catch (e) { /* ignore */ } }
+  preview.hidden = !r;
+  if (r) {
+    preview.classList.toggle('error', !r.ok);
+    preview.textContent = r.ok ? `\\(${r.latex}\\)`
+      : (typeof PTAnswer !== 'undefined' ? PTAnswer.message(r.error, ANSWER_MESSAGES) : r.error);
+    if (r.ok && typeof renderMathIn === 'function') renderMathIn(preview);
+  }
+
+  // What Check answers would say.
+  if (!text.trim()) {
+    fb.className = 'feedback';
+    fb.innerHTML = '';
+    if (typeof markAnswerInput === 'function') markAnswerInput(input, null);
+    return;
+  }
+  const res = gradeAnswer(text, p);
+  fb.className = 'feedback show ' + (res.pts === 1 ? 'correct-fb' : res.pts === 0.9 ? 'partial-fb' : 'wrong-fb');
+  fb.innerHTML = answerFeedbackHtml(res, p, true);
+  if (typeof markAnswerInput === 'function') markAnswerInput(input, res.pts);
 }
 
-function manualFigDemoSetTheme(btn, theme) {
-  const demo = btn.closest('.manual-fig-demo');
-  if (!demo) return;
-  // A manual pick pauses this demo's own auto-cycle for a while rather than
-  // stopping it forever — it resumes on its own after the pause elapses.
-  demo._manualFigPausedUntil = Date.now() + MANUAL_FIG_DEMO_PAUSE_MS;
-  manualFigDemoApplyTheme(demo, theme);
+// ── Live figures (used inline on the "Figures & animations" manual page) ──
+// Not a reimplementation: each placeholder becomes the problem's own redrawn
+// drawing (redrawnFigure in js/figure-style.js) with the real player
+// (attachFigureAnimation in js/figure-anim.js), so it plays, keeps the speed
+// and shares the one-at-a-time limit exactly like a figure in a quiz. Shown
+// redrawn even while Settings › Study › Redrawn figures is off: the page is
+// about them. A placeholder, not an <img>, so the original isn't downloaded.
+function manualFigureDemoInitAll(container) {
+  if (!container) return;
+  container.querySelectorAll('.manual-fig-demo-fig[data-fig]').forEach(ph => {
+    const svg = typeof redrawnFigure === 'function' ? redrawnFigure(ph.dataset.fig, ph.dataset.alt) : null;
+    if (!svg) {
+      ph.textContent = 'This figure hasn’t loaded yet. Reopen this page in a moment.';
+      return;
+    }
+    ph.replaceWith(svg);
+    if (typeof attachFigureAnimation === 'function') attachFigureAnimation(svg);
+  });
 }
 
 // ── Theme gallery (used inline on the "Themes & fonts" manual page) ──
-// Unlike the fig-demo swatches above, these windows aren't an isolated
+// These windows aren't an isolated
 // preview — clicking one applies that color theme to the whole site via
 // themes.js, same as picking it from the palette panel. Day/night mode is
 // untouched; only the color theme changes. The highlighted window always

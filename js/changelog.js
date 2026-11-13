@@ -12,18 +12,33 @@ function toggleChangelog() {
 // ── Field lines on/off toggle ─────────────────────────────────────────────
 let fieldLinesEnabled = true;
 
-function toggleFieldLines() {
-  fieldLinesEnabled = !fieldLinesEnabled;
+// Flips the flag for the ⚡ button below (toggleFieldLines) — session-only,
+// this doesn't touch the persisted Display setting (js/settings.js's
+// 'hideFieldLinesByDefault'), which controls only what state a fresh
+// session starts in, not what this one is doing right now. See
+// toggleFieldLines() just below for why the two intentionally don't sync.
+// Nothing to do with the overlay canvas itself here: drawFieldLines()
+// (further down, inside the IIFE) unconditionally clears it as the very
+// first thing it does on every animation frame, so a stale set of lines
+// never outlives more than one frame regardless of how this flag changed.
+function setFieldLinesEnabled(enabled) {
+  fieldLinesEnabled = enabled;
   const btn = document.getElementById('fieldLinesToggle');
   if (btn) {
     btn.classList.toggle('off', !fieldLinesEnabled);
     btn.title = fieldLinesEnabled ? 'Hide field lines' : 'Show field lines';
   }
-  // Immediately clear overlay when turning off
-  if (!fieldLinesEnabled) {
-    const oc = overlay.getContext('2d');
-    oc.clearRect(0, 0, overlay.width, overlay.height);
-  }
+}
+window.setFieldLinesEnabled = setFieldLinesEnabled;
+
+function toggleFieldLines() {
+  setFieldLinesEnabled(!fieldLinesEnabled);
+  // Session-only — deliberately does NOT write back to Settings > Display's
+  // 'hideFieldLinesByDefault' anymore. That setting only decides what state
+  // a fresh visit starts in; flipping this button just changes what's
+  // happening for the rest of *this* session, so turning field lines back
+  // on here for a look doesn't silently overwrite someone's "hide by
+  // default" preference for next time.
 }
 
 // ── Version indent levels ────────────────────────────────────────────────────
@@ -46,10 +61,13 @@ function computeLevels(changelog) {
 // Each CHANGELOG entry has a `scope`: 0 = shown for every course, or a
 // course's own COURSE_CHANGELOG_SCOPE id (js/course-config.js) = shown only
 // for that course. When one or more consecutive entries are hidden this
-// way between two visible ones, a "…updates for another course…" gap row
-// is shown in their place instead of just silently closing the space —
-// never at the very start or end of the list, only strictly between two
-// visible entries the reader would otherwise wonder about.
+// way between two visible ones, a clickable "⋯ N updates for another
+// course ⋯" gap button is shown in their place — hover swaps its text to
+// "tap to reveal anyway" and gives it a distinct look (dashed pill, not a
+// real row) so it never reads as an actual changelog entry. Clicking it
+// reveals ONLY that specific run of hidden entries, in place, leaving any
+// other gaps elsewhere in the list untouched. Never shown at the very
+// start or end of the list, only strictly between two visible entries.
 function renderChangelog() {
   const list = document.getElementById('changelogList');
   if (!list || typeof CHANGELOG === 'undefined') return;
@@ -62,35 +80,16 @@ function renderChangelog() {
   const levels   = computeLevels(CHANGELOG);
   const indentPx = [0, 22, 44];
   const frag     = document.createDocumentFragment();
-  let prevMajor  = -1;
-  let hiddenSinceLastVisible = false;
   let renderedAny = false;
   let latestVisibleVersion = null;
 
-  CHANGELOG.forEach((entry, i) => {
-    if (!isVisible(entry)) {
-      hiddenSinceLastVisible = true;
-      return;
-    }
+  // Accumulates the current run of hidden entries as its OWN fragment +
+  // row count, so each gap's "N updates" count and reveal action are
+  // scoped to just that run — not a single flag shared across the whole
+  // list. null while not inside a hidden run.
+  let hiddenRun = null;
 
-    if (hiddenSinceLastVisible && renderedAny) {
-      const gap = document.createElement('div');
-      gap.className = 'changelog-gap';
-      gap.textContent = '⋯ updates for another course ⋯';
-      frag.appendChild(gap);
-    }
-    hiddenSinceLastVisible = false;
-
-    const [maj] = entry.version.split('.').map(Number);
-    const level = levels[i];
-
-    if (level === 0 && prevMajor !== -1) {
-      const sep = document.createElement('div');
-      sep.className = 'changelog-sep';
-      frag.appendChild(sep);
-    }
-    prevMajor = maj;
-
+  function buildRow(entry, level) {
     const row = document.createElement('div');
     row.className = `changelog-row level-${level}`;
     row.style.paddingLeft = indentPx[level] + 'px';
@@ -109,10 +108,86 @@ function renderChangelog() {
     note.textContent = entry.note;
     row.appendChild(note);
 
-    frag.appendChild(row);
-    renderedAny = true;
-    if (latestVisibleVersion === null) latestVisibleVersion = entry.version;
+    return row;
+  }
+
+  // The line marks where one major version ends: under its X.0.0 row(s),
+  // above the newest entry of the major before it (13.0.0 | line | 12.5.1).
+  const majorOf = (i) => Number(CHANGELOG[i].version.split('.')[0]);
+  function maybeSep(i) {
+    if (i > 0 && majorOf(i) !== majorOf(i - 1)) {
+      const sep = document.createElement('div');
+      sep.className = 'changelog-sep';
+      return sep;
+    }
+    return null;
+  }
+
+  // Turns the just-finished hidden run into a gap button + a hidden
+  // (display:none) container holding its actual rows, appended to the
+  // main fragment. Dropped entirely if nothing visible has rendered yet
+  // (a hidden run at the very top of the list has no "gap" to represent).
+  function flushHiddenRun() {
+    if (!hiddenRun) return;
+    if (renderedAny) {
+      const wrap = hiddenRun.wrap; // starts collapsed
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'changelog-gap';
+      const n = hiddenRun.count;
+      const restLabel = `⋯ ${n} update${n === 1 ? '' : 's'} for another course ⋯`;
+      btn.title = 'Click to reveal these updates anyway';
+
+      const restSpan = document.createElement('span');
+      restSpan.className = 'changelog-gap-label changelog-gap-label-rest';
+      restSpan.textContent = restLabel;
+      const hoverSpan = document.createElement('span');
+      hoverSpan.className = 'changelog-gap-label changelog-gap-label-hover';
+      hoverSpan.textContent = '⋯ tap to reveal anyway ⋯';
+      btn.appendChild(restSpan);
+      btn.appendChild(hoverSpan);
+
+      btn.addEventListener('click', () => {
+        wrap.style.display = '';
+        btn.remove(); // one-shot — this specific gap only, nothing else changes
+      }, { once: true });
+
+      frag.appendChild(btn);
+      frag.appendChild(wrap);
+    }
+    hiddenRun = null;
+  }
+
+  CHANGELOG.forEach((entry, i) => {
+    const level = levels[i];
+    const visible = isVisible(entry);
+
+    if (visible) {
+      flushHiddenRun();
+
+      const sep = maybeSep(i);
+      if (sep) frag.appendChild(sep);
+
+      frag.appendChild(buildRow(entry, level));
+      renderedAny = true;
+      if (latestVisibleVersion === null) latestVisibleVersion = entry.version;
+    } else {
+      if (!hiddenRun) {
+        const wrap = document.createElement('div');
+        wrap.className = 'changelog-hidden-group';
+        wrap.style.display = 'none';
+        hiddenRun = { wrap, count: 0 };
+      }
+      const sep = maybeSep(i);
+      if (sep) hiddenRun.wrap.appendChild(sep);
+
+      hiddenRun.wrap.appendChild(buildRow(entry, level));
+      hiddenRun.count++;
+    }
   });
+  // A hidden run reaching all the way to the end of the list is dropped
+  // (hiddenRun left un-flushed) — same "never at the very end" rule as
+  // the top-of-list case above.
 
   list.appendChild(frag);
 
@@ -127,9 +202,11 @@ function renderChangelog() {
 }
 
 // ── Electric field simulation ─────────────────────────────────────────────────
-// Dipole model: the changelog button is a fixed +charge, the mouse cursor is a
-// −charge. Field lines leave the button and curve into the cursor, matching a
-// standard two-charge dipole field pattern instead of two like charges repelling.
+// Two like (+) charges repelling: the changelog button and the mouse cursor
+// are both fixed +charges, so field lines diverge away from both rather than
+// curving from one into the other. (Used to randomly show a dipole variant
+// instead — one +charge, one −charge — but that's been cut; always the same-
+// charge repelling pattern now.)
 (function () {
   // ── Device pixel ratio ───────────────────────────────────────────────────
   // Read once; on resize events we re-read it so zooming is handled too.
@@ -155,15 +232,16 @@ function renderChangelog() {
   let smoothCX = -9999, smoothCY = -9999;
 
   // ── Charge polarity ────────────────────────────────────────────────────────
-  // The button is always the fixed +charge. The cursor's sign is a 50/50 coin
-  // flip decided once per page load: sometimes it's a dipole (lines curve from
-  // button into cursor), sometimes it's two like charges repelling (lines
-  // diverge away from both). Field math below handles both cases uniformly.
-  const cursorIsPositive = Math.random() < 0.5;
+  // Both the button and the cursor are always +charges (see header comment —
+  // the dipole variant that used to appear on a 50/50 coin flip is gone).
+  // Kept as a named constant, not a literal `1`/`true`, purely so the sign
+  // shows up by name everywhere it's used below (btnCharge/curCharge,
+  // drawSign calls).
+  const cursorIsPositive = true;
 
   // ── Overlay canvas (field lines) ─────────────────────────────────────────
   const overlay = document.createElement('canvas');
-  overlay.style.cssText = 'position:fixed;top:0;left:0;pointer-events:none;z-index:9998;';
+  overlay.style.cssText = 'position:fixed;top:0;left:0;pointer-events:none;z-index:9990;visibility:hidden;'; // stays below #update-banner/#bug-report-banner/#theme-nudge-banner (9997-9999) — see their CSS comment
   document.body.appendChild(overlay);
 
   function resizeOverlay() {
@@ -383,27 +461,43 @@ function renderChangelog() {
   }
 
   // ── Main draw ─────────────────────────────────────────────────────────────
+  // The overlay covers the whole screen, so clearing it costs a full-screen
+  // repaint even when nothing is on it, and that kept the GPU busy on an idle
+  // menu. It is only cleared while it holds something, and stays hidden (no
+  // layer to composite at all) the rest of the time.
+  let overlayDrawn = false;
+
+  function hideOverlay() {
+    if (!overlayDrawn) return;
+    overlayDrawn = false;
+    overlay.getContext('2d').clearRect(0, 0, overlay.width, overlay.height);
+    overlay.style.visibility = 'hidden';
+  }
+
   function drawFieldLines(dt) {
     const dpr = window.devicePixelRatio || 1;
     const oc  = overlay.getContext('2d');
 
-    // Always clear first so lines disappear as soon as conditions aren't met
-    oc.clearRect(0, 0, overlay.width, overlay.height);
-
     // Don't render if: changelog is closed, user toggled lines off,
     // or the landing screen is no longer visible (user entered the quiz).
-    if (!changelogOpen) return;
-    if (!fieldLinesEnabled) return;
-    const landing = document.getElementById('landingScreen');
-    if (landing && landing.classList.contains('hidden')) return;
+    if (!changelogOpen) return hideOverlay();
+    if (!fieldLinesEnabled) return hideOverlay();
+    if (landingHidden()) return hideOverlay();
 
-    if (cursorX < -100) return;
+    if (cursorX < -100) return hideOverlay();
 
     const btn = getButtonCenter();
-    if (!btn) return;
+    if (!btn) return hideOverlay();
 
     const dist = Math.hypot(cursorX - btn.x, cursorY - btn.y);
-    if (dist < 20) return;
+    if (dist < 20) return hideOverlay();
+
+    if (overlayDrawn) {
+      oc.clearRect(0, 0, overlay.width, overlay.height);
+    } else {
+      overlayDrawn = true;
+      overlay.style.visibility = 'visible';
+    }
 
     const lerpSpeed = 0.055;
     if (smoothCX < -100) { smoothCX = cursorX; smoothCY = cursorY; }
@@ -416,10 +510,10 @@ function renderChangelog() {
     oc.save();
     oc.scale(dpr, dpr);
 
-    // Button is always +1. Cursor is +1 or -1 per the coin flip at load time.
-    // Same sign -> repulsive (lines diverge from both). Opposite sign ->
-    // dipole (lines curve from + into -). efield()/drawLinesFromCharge()
-    // handle both uniformly based on these signs, no branching needed here.
+    // Both charges are always +1 (see "Charge polarity" above) — lines
+    // diverge away from both rather than curving from one into the other.
+    // efield()/drawLinesFromCharge() take signed charges generically, so
+    // nothing here branches on that; it's just always same-sign now.
     const btnCharge = { x: btn.x, y: btn.y, sign: 1 };
     const curCharge = { x: smoothCX, y: smoothCY, sign: cursorIsPositive ? 1 : -1 };
     drawLinesFromCharge(oc, btnCharge, btnCharge, curCharge, 13, LINE_ALPHA);
@@ -449,15 +543,52 @@ function renderChangelog() {
   // Use rAF timestamp so arrowT advances at the same real-time speed regardless
   // of display refresh rate (60 Hz, 120 Hz, 144 Hz, etc.)
   let lastTimestamp = null;
+  let lastChargeDraw = null;
+  let loopFrame = 0;
+
+  // The charge only pulses slowly, so it doesn't need every frame of a 144 Hz
+  // screen. With reduced motion it holds still and redraws once a second, so
+  // a theme change still reaches it.
+  const CHARGE_FRAME_MS = 33;
+  const CHARGE_STILL_FRAME_MS = 1000;
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+  function landingHidden() {
+    const landing = document.getElementById('landingScreen');
+    return !!landing && landing.classList.contains('hidden');
+  }
 
   function loop(timestamp) {
+    // Everything here belongs to the landing screen, so nothing runs elsewhere.
+    if (landingHidden()) {
+      hideOverlay();
+      loopFrame = 0;
+      lastTimestamp = null;
+      lastChargeDraw = null;
+      return;
+    }
     if (lastTimestamp === null) lastTimestamp = timestamp;
     const dt = Math.min(timestamp - lastTimestamp, 64); // cap at ~2 missed frames
     lastTimestamp = timestamp;
 
-    drawCharge(dt);
+    const still = reducedMotion.matches;
+    const sinceCharge = lastChargeDraw === null ? Infinity : timestamp - lastChargeDraw;
+    if (sinceCharge >= (still ? CHARGE_STILL_FRAME_MS : CHARGE_FRAME_MS)) {
+      drawCharge(still || lastChargeDraw === null ? 0 : Math.min(sinceCharge, 64));
+      lastChargeDraw = timestamp;
+    }
     drawFieldLines(dt);
-    requestAnimationFrame(loop);
+    loopFrame = requestAnimationFrame(loop);
+  }
+
+  function startLoop() {
+    if (!loopFrame && !landingHidden()) loopFrame = requestAnimationFrame(loop);
+  }
+
+  function watchLanding() {
+    startLoop();
+    const landing = document.getElementById('landingScreen');
+    if (landing) new MutationObserver(startLoop).observe(landing, { attributes: true, attributeFilter: ['class'] });
   }
 
   // ── Allow other modules to hide/show the field-lines overlay ──
@@ -465,6 +596,6 @@ function renderChangelog() {
     overlay.style.display = visible ? '' : 'none';
   };
 
-  document.addEventListener('DOMContentLoaded', () => { renderChangelog(); requestAnimationFrame(loop); });
-  if (document.readyState !== 'loading') { renderChangelog(); requestAnimationFrame(loop); }
+  document.addEventListener('DOMContentLoaded', () => { renderChangelog(); watchLanding(); });
+  if (document.readyState !== 'loading') { renderChangelog(); watchLanding(); }
 })();

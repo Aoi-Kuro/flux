@@ -2,9 +2,12 @@
 // Pushes any locally-queued (synced:false) attempts and pulls the full
 // current server list back down in one round trip, via the
 // sync-quiz-attempts Edge Function. Called: on every stats panel open, right
-// after recording a new attempt, right after a delete, and on a 10s
-// background timer for the whole session (not just while stats is open —
-// see startAttemptsSyncPolling below). No visible button for any of this —
+// after recording a new attempt, right after a delete, whenever a Realtime
+// Broadcast ping says something changed (see _ensureAttemptsRealtime below —
+// this is what replaced the old blind 10s-forever poll), and on a slow
+// fallback timer for the whole session (not just while stats is open — see
+// startAttemptsSyncPolling below) as a safety net in case a ping is ever
+// missed. No visible button for any of this —
 // status is conveyed only by the dot next to "Attempt log" (green pulse =
 // confirmed up to date, gray pulse = syncing/queued, static red = last
 // attempt failed and stays that way until a retry succeeds, hidden = no
@@ -12,6 +15,7 @@
 // machine this dot shares with the Forum & Site panel's dot.
 
 let _attemptsSyncing = false;
+let _attemptsLastSyncAt = 0;    // when syncAttempts() last went to the server, whatever triggered it
 let _lastSyncFailed = false;
 
 // Hashes currently being deleted server-side (deleteAttemptOnServer, below).
@@ -91,28 +95,189 @@ function _updateAttemptsSyncDot(syncing) {
   }
   dot.style.display = '';
 
+  if (siteSyncPaused()) {
+    _settleLiveDot(dot, 'syncing', 'Sync is paused for now. Your attempts are saved on this device.');
+    return;
+  }
   if (syncing) {
     _settleLiveDot(dot, 'syncing', 'Syncing…');
     return;
   }
   if (_lastSyncFailed) {
-    _settleLiveDot(dot, 'error', "Couldn't sync — will retry automatically");
+    _settleLiveDot(dot, 'error', dbProblemText() || "Couldn't sync — will retry automatically");
     return;
   }
   const upToDate = loadStats().every(a => a.synced);
   if (upToDate) {
-    _settleLiveDot(dot, 'ok', 'Synced and up to date');
+    _settleLiveDot(dot, 'ok', 'Synced');
   } else {
     _settleLiveDot(dot, 'syncing', 'Sync pending…');
+  }
+}
+
+// ── Realtime wake-up ─────────────────────────────────────────────────────
+// quiz_attempts holds another identity's answers, so unlike js/forum.js's
+// shared channel (which subscribes directly to the already-public
+// forum_messages table), we can't just open this table to Postgres Changes
+// without exposing everyone's history to everyone. Instead a DB trigger
+// (superbase/migrations/003_attempts_realtime_broadcast.sql) sends a tiny,
+// content-free "something changed" ping to a channel named after this
+// identity's identity_id, the moment ANY device syncs a change for it. This
+// listens for that ping and, on one, runs the exact same secure
+// sync-quiz-attempts round trip as before — just on demand instead of every
+// 10 seconds regardless. identity_id itself is learned from the sync
+// response below (already resolved server-side, so this costs nothing
+// extra) rather than stored — cheap to relearn on each page load, and it
+// means a nickname change/drop can't leave this pointed at a stale channel.
+let _attemptsIdentityId = null;
+let _attemptsRealtimeChannel = null;
+let _attemptsRealtimeEverConnected = false;
+let _attemptsRealtimeLive = false; // channel SUBSCRIBED right now: the fallback poll slows to "poll.attempts_live"
+let _attemptsBroadcastDebounce = null;
+
+function _onAttemptsBroadcast() {
+  // A multi-attempt push fires this once per row, and our own push echoes
+  // back to us too (we're subscribed to our own identity's channel) — a
+  // short debounce coalesces all of that into one syncAttempts() call
+  // instead of several back-to-back ones.
+  if (_attemptsBroadcastDebounce) clearTimeout(_attemptsBroadcastDebounce);
+  _attemptsBroadcastDebounce = setTimeout(() => {
+    _attemptsBroadcastDebounce = null;
+    syncAttempts();
+    // js/stats.js's total/my quiz-count dials are driven by RPCs, not a
+    // table Realtime can subscribe to directly — piggyback on this ping
+    // instead of giving that panel a channel of its own.
+    document.dispatchEvent(new Event('attempts-data-changed'));
+  }, 3000);
+}
+
+function _ensureAttemptsRealtime(identityId) {
+  if (siteOff('realtime')) return; // site-version.json "off": the fallback poll carries it alone
+  if (!identityId || identityId === _attemptsIdentityId) return; // already on the right channel (or nothing to subscribe to yet)
+  _teardownAttemptsRealtime();
+  _attemptsIdentityId = identityId;
+  const client = (typeof getForumClient === 'function') ? getForumClient() : null;
+  if (!client) return;
+  const channel = client
+    .channel('attempts:' + identityId)
+    .on('broadcast', { event: 'changed' }, _onAttemptsBroadcast);
+  _attemptsRealtimeChannel = channel;
+  channel.subscribe((status) => {
+    // A channel already replaced by _teardownAttemptsRealtime reports its
+    // own CLOSED late; it must not mark the current one as down.
+    if (channel !== _attemptsRealtimeChannel) return;
+    _attemptsRealtimeLive = status === 'SUBSCRIBED';
+    if (status === 'SUBSCRIBED') {
+      // Reconnected after actually dropping (not the first connect,
+      // already covered by this sync's own immediate call) — something
+      // could have changed while we were gone, so catch up now rather
+      // than wait for the next ping or the slow fallback timer. This
+      // also naturally settles the dot to a fresh ok/error result,
+      // rather than leaving it on whatever it showed before the drop.
+      if (_attemptsRealtimeEverConnected) syncAttempts();
+      _attemptsRealtimeEverConnected = true;
+      return;
+    }
+    // CHANNEL_ERROR / TIMED_OUT / CLOSED after having been up — the
+    // socket dropped for a reason that might have nothing to do with an
+    // actual sync attempt failing (server restart, brief network blip),
+    // so without this the dot would just sit on stale "green" until
+    // something else happens to fail or the 3-minute fallback tick
+    // fires. Surface it immediately instead.
+    if (_attemptsRealtimeEverConnected) {
+      _lastSyncFailed = true;
+      _updateAttemptsSyncDot(false);
+    }
+  });
+}
+
+function _teardownAttemptsRealtime() {
+  if (_attemptsRealtimeChannel) {
+    const client = (typeof getForumClient === 'function') ? getForumClient() : null;
+    if (client) client.removeChannel(_attemptsRealtimeChannel);
+  }
+  _attemptsRealtimeChannel = null;
+  _attemptsRealtimeEverConnected = false;
+  _attemptsRealtimeLive = false;
+  _attemptsIdentityId = null;
+}
+
+// ── Connectivity-aware dots ──────────────────────────────────────────────
+// navigator.onLine flips the moment the OS itself reports the network is
+// down — far faster than waiting for an in-flight request to time out, or
+// for the 3-minute fallback tick. Covers all three live dots this project
+// has (Attempt log, Forum & Site panel, Solve-All), since none of them are
+// meaningful to show as "synced" while genuinely offline regardless of
+// which one's own channel happens to notice first.
+window.addEventListener('offline', () => {
+  _lastSyncFailed = true;
+  _updateAttemptsSyncDot(false);
+  const sfpDot = document.getElementById('sfpLiveDot');
+  if (sfpDot && typeof _settleLiveDot === 'function') _settleLiveDot(sfpDot, 'error', "Offline — will retry automatically");
+  if (typeof _setSolveAllSyncDot === 'function' && typeof _saSyncActive !== 'undefined' && _saSyncActive) _setSolveAllSyncDot('red');
+});
+
+// Re-checks every live sync surface immediately, rather than waiting on
+// each one's own fallback poll — shared by the real 'online' event below
+// and by endOfflineMode() (js/offline-mode.js), since turning offline mode
+// off doesn't touch navigator.onLine (the connection never actually
+// changed), so the 'online' event alone never fires for that case.
+//
+// Background tabs skip it. 'online' reaches every open tab at the same
+// instant (a laptop waking, Wi-Fi coming back), so with many tabs open each
+// one used to run the full set at once: one device sent ~290 requests in 3
+// seconds this way (Supabase logs, 2026-10-17 18:24). A hidden tab loses
+// nothing by waiting: the visibilitychange listeners in this file, js/stats.js
+// and js/solve-all-sync.js re-sync when it is looked at again, once their
+// last sync is older than their fallback interval.
+function reconnectAllLiveSync() {
+  if (document.hidden) return;
+  syncAttempts();
+  if (typeof pollStatsPanel === 'function' && document.getElementById('sfpLiveDot')) pollStatsPanel();
+  if (typeof _saSyncActive !== 'undefined' && _saSyncActive && typeof _saSyncRoundTrip === 'function') {
+    _saSyncRoundTrip(_saSyncActive.quizNum, _saSyncActive.cumulative, false);
+  }
+}
+
+window.addEventListener('online', () => {
+  // Don't just flip back to green optimistically — actually re-check each
+  // thing that's currently relevant, so every dot reflects a real, current
+  // result the instant connectivity returns rather than a guess.
+  reconnectAllLiveSync();
+});
+
+// SHA-256 of "hash:score" for each attempt, sorted and joined with "\n".
+// The score is in it so a score corrected in the database (a regrade)
+// still reads as a change. Must match attemptsFingerprint() in
+// superbase/edge-functions/sync-quiz-attempts.ts exactly. null where
+// crypto.subtle is missing (plain http://): the request then goes without a
+// fingerprint and gets the full list, as before.
+async function attemptsFingerprint(attempts) {
+  try {
+    const src = [...new Set(attempts.filter(a => a && a.hash).map(a => `${a.hash}:${Number(a.score)}`))].sort().join('\n');
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(src));
+    return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+  } catch (e) {
+    return null;
   }
 }
 
 async function syncAttempts() {
   if (_attemptsSyncing) return; // already in flight — the caller's own next open/click will pick up the result
   const identityName = (typeof getForumNickname === 'function') ? getForumNickname() : '';
-  if (!identityName) return; // nothing to sync to yet — quiz start already gates on this, but stats can still be opened without ever starting one
+  if (!identityName) {
+    _teardownAttemptsRealtime(); // no identity to sync to (or listen for) anymore
+    return; // nothing to sync to yet — quiz start already gates on this, but stats can still be opened without ever starting one
+  }
+  // site-version.json "sync_paused": new attempts stay queued (synced:false)
+  // and go up on the first sync after it is lifted (see the listener below).
+  if (siteSyncPaused()) { _updateAttemptsSyncDot(false); return; }
+  _attemptsLastSyncAt = Date.now();
 
-  const deviceId = (typeof getForumDeviceId === 'function') ? getForumDeviceId() : null;
+  const deviceId =(typeof getForumDeviceId === 'function') ? getForumDeviceId() : null;
+  const deviceSecret = (typeof getForumDeviceSecret === 'function') ? getForumDeviceSecret() : null;
+  const deviceToken = (typeof getDeviceToken === 'function') ? getDeviceToken() : null;
+  const identityToken = (typeof getIdentityToken === 'function') ? getIdentityToken() : null;
   if (!deviceId || typeof SUPABASE_URL === 'undefined' || typeof SUPABASE_PUBLISHABLE_KEY === 'undefined') return;
 
   _attemptsSyncing = true;
@@ -134,8 +299,13 @@ async function syncAttempts() {
         entered_unit: x.entered_unit,
         points: x.points
       })),
+      locked: a.locked === true,
       attempted_at: a.date
     }));
+    // Every attempt this device will hold once the push lands (synced ones
+    // plus the pending ones above). The server answers "unchanged" when its
+    // stored list matches, instead of resending the whole history.
+    const knownFingerprint = await attemptsFingerprint(local);
 
     // Plain fetch, not a Supabase client method — same pattern every other
     // Edge Function call in this codebase uses (callForumClaimNickname,
@@ -143,6 +313,18 @@ async function syncAttempts() {
     // supabase-js's .functions.invoke(), which isn't used anywhere else
     // here and would be an unverified assumption about what getForumClient()
     // actually wraps.
+    //
+    // AbortSignal.timeout matters more here than it looks: without it, a
+    // request that goes out right as the network drops can sit "pending"
+    // for close to a minute before the browser itself gives up and rejects
+    // it — and since _attemptsSyncing stays true that whole time, EVERY
+    // other call to this function (including the 'online' handler's own
+    // reconnect attempt, above) just silently no-ops until that original
+    // hung request finally settles. That's what made this dot/sync visibly
+    // slower to recover than the stats panel's (which has no such
+    // single-flight guard to get stuck behind). 10s is generous for a
+    // small JSON round trip but short enough that "offline" gets
+    // discovered promptly either way.
     const res = await fetch(`${SUPABASE_URL}/functions/v1/sync-quiz-attempts`, {
       method: 'POST',
       headers: {
@@ -150,10 +332,30 @@ async function syncAttempts() {
         'apikey': SUPABASE_PUBLISHABLE_KEY,
         'Authorization': `Bearer ${SUPABASE_PUBLISHABLE_KEY}`,
       },
-      body: JSON.stringify({ device_id: deviceId, attempts: pending }),
+      body: JSON.stringify({ device_id: deviceId, device_secret: deviceSecret, device_token: deviceToken || undefined, identity_token: identityToken || undefined, attempts: pending, known_fingerprint: knownFingerprint || undefined }),
+      signal: AbortSignal.timeout(10000),
     });
     const data = await res.json().catch(() => null);
+    if (typeof applyDeviceToken === 'function') applyDeviceToken(data);
     if (!res.ok || !data || !data.ok) throw new Error((data && data.error) || 'sync_failed');
+
+    // The server's list matches this device's, so nothing is downloaded.
+    // Only attempts it lists in `confirmed` (read back from the database
+    // after the write) become synced; anything else stays queued and is
+    // sent again next time, exactly as on the full path below. Re-read from
+    // storage for the same reason as there: an attempt recorded while the
+    // request was in flight must not be overwritten.
+    if (data.unchanged) {
+      const confirmed = new Set(Array.isArray(data.confirmed) ? data.confirmed : []);
+      const localNow = loadStats();
+      let marked = false;
+      localNow.forEach(a => { if (!a.synced && confirmed.has(a.hash)) { a.synced = true; marked = true; } });
+      if (marked) saveStats(localNow);
+      _lastSyncFailed = false;
+      renderStats();
+      if (data.identity_id) _ensureAttemptsRealtime(data.identity_id);
+      return;
+    }
 
     // The server's list is now authoritative — rebuild the local cache from
     // it entirely (this is also the "corrupted local attempt gets reloaded
@@ -171,6 +373,7 @@ async function syncAttempts() {
         score: row.score,
         maxScore: row.max_score,
         answers: row.answers || [],
+        locked: row.locked === true,
         synced: true
       }));
     // Anything still local-only after a successful round trip is kept ONLY
@@ -200,51 +403,80 @@ async function syncAttempts() {
     saveStats(merged);
     _lastSyncFailed = false;
     renderStats();
+    if (data.identity_id) _ensureAttemptsRealtime(data.identity_id);
   } catch (err) {
     console.error('Attempt sync error:', err);
     _lastSyncFailed = true;
+    // The success path above re-renders via renderStats() so a just-synced
+    // attempt's badge updates immediately — this path never did the same,
+    // so a failure (offline, connection lost mid-request) left the table
+    // showing whatever was last painted instead of the current synced:false
+    // state, even though the underlying data was always correct. This is
+    // exactly the "not synced" caption not showing up while offline.
+    renderStats();
   } finally {
     _attemptsSyncing = false;
     _setSyncButtonState('idle');
   }
 }
 
-// ── Background re-sync, for the whole session ──────────────────────────────
-// Runs continuously once the page loads — same "always ticking, not tied to
-// one screen" pattern as forum.js's own unread poll (startForumPolling) —
-// rather than only while the stats screen happens to be open. This is what
-// makes a delete on *another* device actually disappear here on its own:
-// previously the fix only covered the deleting device racing its own
-// button; a second, already-synced device had no route back to the server
-// at all until it happened to open the stats screen (or someone hit a hard
-// refresh). Each tick is a cheap no-op if there's no claimed identity yet
-// (syncAttempts() itself gates on that first), so there's no cost to
-// leaving this running everywhere.
-const ATTEMPTS_SYNC_POLL_MS = 10000;
+// ── Background safety net, for the whole session ────────────────────────────
+// Realtime (_ensureAttemptsRealtime above) handles the normal case now —
+// this interval only exists to catch a ping that genuinely got missed
+// (e.g. the socket was down and even the reconnect catch-up didn't fire for
+// some reason), so it can run far less often than the old blind 10s poll
+// did. Still runs continuously once the page loads — same "not tied to one
+// screen" reasoning as before — since it's a once-every-few-minutes no-op
+// rather than a real cost. Each tick is also a cheap no-op if there's no
+// claimed identity yet (syncAttempts() itself gates on that first).
+// Interval: site-version.json "poll.attempts" (js/site-config.js), 45 s by
+// default to match the stats panel's own fallback poll — it was 180s, which
+// is what left attempts stuck for ~90s on average after reconnecting.
+// While the Realtime channel is connected it slows to "poll.attempts_live",
+// 5 min by default: a connected channel catches up by itself on reconnect
+// and the tab catches up on return (visibilitychange below), so all that's
+// left to cover is a ping lost while the channel looked healthy. At 45 s
+// every visible tab was ~35 of the ~60 edge calls a minute at peak
+// (Supabase logs, 2026-11-01 18:52).
 let _attemptsSyncPollTimer = null;
 
 function startAttemptsSyncPolling() {
   stopAttemptsSyncPolling();
-  _attemptsSyncPollTimer = setInterval(() => {
+  _attemptsSyncPollTimer = startSitePoll('attempts', () => {
     if (document.hidden) return; // resumes on visibilitychange below instead
     // isStatsIdle() (js/stats.js) only ever returns true while the stats
     // screen is open AND idle for 5+ minutes — it's always false whenever
     // the screen is closed, so this never affects the "keep syncing
     // regardless" background behavior away from the stats screen.
     if (typeof isStatsIdle === 'function' && isStatsIdle()) return;
+    const interval = _attemptsRealtimeLive ? 'attempts_live' : 'attempts';
+    if (!sitePollDue(interval, _attemptsLastSyncAt)) return; // synced since for another reason
     syncAttempts();
-  }, ATTEMPTS_SYNC_POLL_MS);
+  });
 }
 
 function stopAttemptsSyncPolling() {
-  if (_attemptsSyncPollTimer) {
-    clearInterval(_attemptsSyncPollTimer);
-    _attemptsSyncPollTimer = null;
-  }
+  _attemptsSyncPollTimer = stopSitePoll(_attemptsSyncPollTimer);
 }
 
+// Coming back to the tab re-syncs only if the tab was away longer than the
+// fallback interval: Realtime keeps delivering while it is hidden, and
+// syncing on every switch was one request per tab switch.
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && _attemptsSyncPollTimer) syncAttempts();
+  if (!document.hidden && _attemptsSyncPollTimer
+      && Date.now() - _attemptsLastSyncAt >= sitePollMs('attempts')) syncAttempts();
+});
+
+// site-version.json changed (js/site-config.js). Realtime turned off: drop
+// the channel (syncAttempts() reopens it once it's back on). Sync pause
+// lifted: catch up everywhere at once, the same as coming back online.
+document.addEventListener('site-config-changed', (e) => {
+  const { before, after } = e.detail;
+  if (after.off.includes('realtime')) _teardownAttemptsRealtime();
+  if (before.sync_paused !== after.sync_paused) {
+    _updateAttemptsSyncDot(false);
+    if (!after.sync_paused) reconnectAllLiveSync();
+  }
 });
 
 startAttemptsSyncPolling();
@@ -256,6 +488,9 @@ startAttemptsSyncPolling();
 // offline edge case in this file.
 async function deleteAttemptOnServer(hash) {
   const deviceId = (typeof getForumDeviceId === 'function') ? getForumDeviceId() : null;
+  const deviceSecret = (typeof getForumDeviceSecret === 'function') ? getForumDeviceSecret() : null;
+  const deviceToken = (typeof getDeviceToken === 'function') ? getDeviceToken() : null;
+  const identityToken = (typeof getIdentityToken === 'function') ? getIdentityToken() : null;
   if (!deviceId || typeof SUPABASE_URL === 'undefined' || typeof SUPABASE_PUBLISHABLE_KEY === 'undefined') return false;
   _pendingDeleteHashes.add(hash);
   try {
@@ -266,9 +501,10 @@ async function deleteAttemptOnServer(hash) {
         'apikey': SUPABASE_PUBLISHABLE_KEY,
         'Authorization': `Bearer ${SUPABASE_PUBLISHABLE_KEY}`,
       },
-      body: JSON.stringify({ device_id: deviceId, attempt_hash: hash }),
+      body: JSON.stringify({ device_id: deviceId, device_secret: deviceSecret, device_token: deviceToken || undefined, identity_token: identityToken || undefined, attempt_hash: hash }),
     });
     const data = await res.json().catch(() => null);
+    if (typeof applyDeviceToken === 'function') applyDeviceToken(data);
     return !!(res.ok && data && data.ok);
   } catch (e) {
     console.error('Server-side attempt delete error:', e);

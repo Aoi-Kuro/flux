@@ -1,167 +1,64 @@
-let selectedQuizNum = 1;
+// Reads a Study setting directly out of localStorage, bypassing
+// getSetting() (js/settings.js) entirely — this file's own top-level `let`
+// initializers below run immediately as this script parses, long before
+// settings.js (loaded later, via the tier-2 sequential loader) exists.
+// Same "read the raw localStorage shape early" convention already used by
+// index.html's own anti-flicker inline script; kept minimal on purpose —
+// this only ever needs to peek at a few Study keys before settings.js is available.
+function _readStudySettingRaw(key, defaultValue) {
+  try {
+    const raw = JSON.parse(localStorage.getItem('flux_settings') || 'null');
+    if (raw && raw.study && Object.prototype.hasOwnProperty.call(raw.study, key)) return raw.study[key];
+  } catch (e) { /* corrupted/foreign value — fall through to the default */ }
+  return defaultValue;
+}
+
+// The set last started (Start, in Random N or Entire Set) on this device —
+// written by startSelected().
+const LAST_QUIZ_KEY = STORAGE_PREFIX + '_last_quiz';
+
+// The set to preselect when "Select last used quiz" is on: the one in
+// LAST_QUIZ_KEY, else (nothing started since that key existed) the set of
+// the newest Random N attempt in Stats, else 1. Only available sets count.
+function _lastUsedQuizNum() {
+  const ok = (n) => (Number.isInteger(n) && QUIZZES[n - 1] && QUIZZES[n - 1].enabled ? n : null);
+  try {
+    const n = ok(parseInt(localStorage.getItem(LAST_QUIZ_KEY), 10));
+    if (n) return n;
+    const stats = JSON.parse(localStorage.getItem(STORAGE_PREFIX + '_stats_v2') || 'null');
+    let newest = null;
+    if (Array.isArray(stats)) {
+      stats.forEach((a) => {
+        if (a && ok(a.quizNum) && (!newest || new Date(a.date) > new Date(newest.date))) newest = a;
+      });
+    }
+    if (newest) return newest.quizNum;
+  } catch (e) { /* corrupted/foreign value — fall through */ }
+  return 1;
+}
+
+// Settings > Study > "Select last used quiz by default" (default on) /
+// "Default to cumulative for quiz 2+" (default off) — see
+// SETTINGS_DEFAULTS.study in js/settings.js for the Settings-tab-facing
+// copy of these same defaults.
+const _selectLastUsedQuiz  = _readStudySettingRaw('selectLastUsedQuiz', true) !== false;
+const _cumulativeDefaultOn = _readStudySettingRaw('cumulativeDefaultOn', false);
+
+let selectedQuizNum = _selectLastUsedQuiz ? _lastUsedQuizNum() : 1;
 let selectedMode    = 'quiz'; // 'quiz' | 'solveall'
-let selectedCumulativeMode = 'single'; // 'single' | 'cumulative'
+// Quiz 2+ defaults to cumulative (draws from every quiz up to and
+// including the selected one) rather than single, when that setting is on
+// — picking a later quiz number usually means wanting cumulative review,
+// not just that one quiz alone. selectQuiz() (below) still forces this
+// back to 'single' the moment quiz #1 is ever selected, same as before.
+let selectedCumulativeMode = (_cumulativeDefaultOn && selectedQuizNum >= 2) ? 'cumulative' : 'single';
 let ACTIVE_PROBLEMS = QUIZZES[selectedQuizNum - 1].problems;
 
 
-// ─── Number parser (Moodle rules) ────────────────────────────────────────────
-function parseMoodleNumber(raw) {
-  if (!raw) return NaN;
-  const s = raw.trim();
-  if (s.includes(",")) return NaN;
-  if (/^[+-]?\d+(\.\d*)?$/.test(s) || /^[+-]?\.\d+$/.test(s)) return parseFloat(s);
-  if (/[Ee]/.test(s)) {
-    if (/^[+-]?\d+(\.\d*)?[Ee][+-]?\d+$/.test(s)) return parseFloat(s);
-    return NaN;
-  }
-  const m1 = s.match(/^([+-]?\d+(\.\d*)?)\*10\^([+-]?\d+)$/);
-  if (m1) return parseFloat(m1[1]) * Math.pow(10, parseInt(m1[3], 10));
-  const m2 = s.match(/^([+-]?)10\^([+-]?\d+)$/);
-  if (m2) return (m2[1] === "-" ? -1 : 1) * Math.pow(10, parseInt(m2[2], 10));
-  return NaN;
-}
-
-function numberCorrect(userVal, expected, unitScale) {
-  const u = parseMoodleNumber(userVal);
-  if (isNaN(u)) return false;
-  const scaled = u * (unitScale === undefined ? 1 : unitScale);
-  const tol = Math.abs(expected) * 0.01 + 1e-10;
-  return Math.abs(scaled - expected) <= tol;
-}
-
-// ─── Unit algebra engine (Moodle / course rules) ──────────────────────────────
-
-// SI prefixes this course's unit boxes understand, checked longest-symbol-first.
-// "mc" / "mk" are ASCII aliases for micro (common transliteration of "мк").
-const SI_PREFIXES = [
-  { sym: "da", factor: 1e1  },
-  { sym: "mc", factor: 1e-6 },
-  { sym: "mk", factor: 1e-6 },
-  { sym: "Y",  factor: 1e24 },
-  { sym: "Z",  factor: 1e21 },
-  { sym: "E",  factor: 1e18 },
-  { sym: "P",  factor: 1e15 },
-  { sym: "T",  factor: 1e12 },
-  { sym: "G",  factor: 1e9  },
-  { sym: "M",  factor: 1e6  },
-  { sym: "k",  factor: 1e3  },
-  { sym: "h",  factor: 1e2  },
-  { sym: "d",  factor: 1e-1 },
-  { sym: "c",  factor: 1e-2 },
-  { sym: "m",  factor: 1e-3 },
-  { sym: "u",  factor: 1e-6 },
-  { sym: "n",  factor: 1e-9 },
-  { sym: "p",  factor: 1e-12 },
-  { sym: "f",  factor: 1e-15 },
-  { sym: "a",  factor: 1e-18 },
-  { sym: "z",  factor: 1e-21 },
-  { sym: "y",  factor: 1e-24 },
-];
-
-// Units a prefix is allowed to attach to. Deliberately excludes "kg" (which
-// already has "kilo" baked in — stacking a second prefix on it is ambiguous)
-// and "rad"/"turns" (counting units; not a real use case in this course).
-const PREFIXABLE_UNITS = new Set([
-  "N", "C", "m", "s", "J", "V", "A", "T", "W", "H", "Hz", "Pa", "Wb", "Ohm", "F"
-]);
-
-// Splits a raw symbol like "mT" into { base: "T", scale: 0.001 }. Exact
-// single-letter units (T, m, H, F, A, ...) are protected automatically: a
-// prefix candidate the same length as the symbol itself can never leave a
-// valid remainder, so e.g. bare "T" always stays Tesla, never "tera-nothing".
-function decomposeUnitToken(sym) {
-  for (const { sym: pfx, factor } of SI_PREFIXES) {
-    if (sym.length > pfx.length && sym.startsWith(pfx)) {
-      const rest = sym.slice(pfx.length);
-      if (PREFIXABLE_UNITS.has(rest)) return { base: rest, scale: factor };
-    }
-  }
-  return { base: sym, scale: 1 }; // no recognized prefix — treat as-is (old behavior)
-}
-
-// Some unit strings (accepted answers, or things a user pastes/types) use real
-// Unicode superscript characters, e.g. "cm²" or "s⁻¹", instead of "cm^2" /
-// "s^-1". Normalize those to caret notation up front so the rest of the
-// parser (which only understands "^N") can handle them uniformly.
-const SUPERSCRIPT_MAP = { "⁰":"0","¹":"1","²":"2","³":"3","⁴":"4","⁵":"5","⁶":"6","⁷":"7","⁸":"8","⁹":"9","⁻":"-","⁺":"+" };
-function normalizeSuperscripts(str) {
-  return str.replace(/([A-Za-z])([⁰¹²³⁴⁵⁶⁷⁸⁹⁻⁺]+)/g, (_, letter, supers) => {
-    let out = "";
-    for (const c of supers) out += SUPERSCRIPT_MAP[c];
-    return letter + "^" + out;
-  });
-}
-
-function parseUnitToMap(raw) {
-  if (!raw) return { map: new Map(), valid: true, scale: 1 };
-  let s = normalizeSuperscripts(raw.trim());
-  if (s === "" || s === "(none)" || s === "none" || s === "rad")
-    return { map: new Map(), valid: true, scale: 1 };
-  if (/[*·×⋅]/.test(s)) return { map: null, valid: false, scale: 1 };
-  const stripped = s.replace(/\^\([+-]?\d+\)/g, "");
-  if (/[()]/.test(stripped)) return { map: null, valid: false, scale: 1 };
-  s = s.replace(/\^\(([+-]?\d+)\)/g, "^$1");
-  const slashIdx = s.indexOf("/");
-  const numStr = slashIdx === -1 ? s : s.slice(0, slashIdx);
-  const denStr = slashIdx === -1 ? "" : s.slice(slashIdx + 1);
-
-  const map = new Map();
-  let scale = 1;
-  function applyTokens(tokenStr, sign) {
-    for (const tok of tokenStr.trim().split(/\s+/).filter(Boolean)) {
-      const m = tok.match(/^([A-Za-z]+)(?:\^([+-]?\d+))?$/);
-      if (!m) return false;
-      const exp = m[2] !== undefined ? parseInt(m[2], 10) : 1;
-      const { base, scale: pfxScale } = decomposeUnitToken(m[1]);
-      const signedExp = sign * exp;
-      map.set(base, (map.get(base) || 0) + signedExp);
-      scale *= Math.pow(pfxScale, signedExp);
-    }
-    return true;
-  }
-  if (applyTokens(numStr, +1) === false || applyTokens(denStr, -1) === false)
-    return { map: null, valid: false, scale: 1 };
-
-  for (const [k, v] of map) if (v === 0) map.delete(k);
-  return { map, valid: true, scale };
-}
-
-// Some problems store `answer` already expressed in a prefixed unit (e.g.
-// answer: 326.9, units:["nm"] — the stored number IS a nanometer count, not
-// meters). So the SI-prefix conversion must be *relative to whatever unit the
-// answer was actually written in* (units[0]), not an absolute conversion to
-// base SI. Typing the exact same unit as units[0] must always be a 1:1 match
-// no matter what prefix it carries; typing a different (but dimensionally
-// equivalent) prefixed unit should convert relative to that reference.
-function unitConversionFactor(userRaw, acceptedList) {
-  const list = (!acceptedList || acceptedList.length === 0) ? [""] : acceptedList;
-  const { valid: userValid, scale: userScale } = parseUnitToMap(userRaw);
-  if (!userValid) return 1; // malformed unit — don't let it corrupt the number check
-  const { valid: refValid, scale: refScale } = parseUnitToMap(list[0]);
-  if (!refValid || !refScale) return 1;
-  return userScale / refScale;
-}
-
-function serializeUnitMap(map) {
-  if (!map || map.size === 0) return "";
-  return [...map.entries()]
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([sym, exp]) => exp === 1 ? sym : `${sym}^${exp}`)
-    .join(" ");
-}
-
-function unitStatus(userRaw, acceptedList) {
-  // units:[] (empty array) means "dimensionless", same as units:[""].
-  const list = (!acceptedList || acceptedList.length === 0) ? [""] : acceptedList;
-  const { map, valid } = parseUnitToMap(userRaw);
-  if (!valid) return "invalid";
-  const canonical = serializeUnitMap(map);
-  const match = list.some(a => {
-    const { map: am, valid: av } = parseUnitToMap(a);
-    return av && serializeUnitMap(am) === canonical;
-  });
-  return match ? "ok" : "wrong";
-}
+// ─── Answer checking ──────────────────────────────────────────────────────────
+// Numbers, units, points and the live preview: js/answer-check.js (gradeAnswer,
+// splitAnswer / joinAnswer, attachAnswerPreview), on the pt-answer engine in
+// vendor/pt-answer. fmt / fmtUnit below format answers for display.
 
 function fmt(n) {
   if (n === 0) return "0";
@@ -182,9 +79,26 @@ let checked = false;
 let selectedTopics = [];
 // Per-quiz topic selections for cumulative mode: { quizIdx -> Set of topics }
 let cumulativeTopics = {};
-// Per-quiz filter type ('topic' | 'number') and number-range filter, cumulative mode only
+// Per-quiz filter type: 'none' | 'topic' | 'number' | 'type', cumulative mode only
 let cumulativeFilterMode = {};
 let cumulativeNumFilter  = {}; // quizIdx -> { incexc: 'include'|'exclude', ranges: Set<number> }
+// Per-quiz "Type" filter (attempt-status based): quizIdx -> Set of
+// 'unattempted' | 'wrong' | 'partial' | 'correct'
+let cumulativeTypeFilter = {};
+
+// The four attempt-status checks the "Type" filter offers, in display order.
+// Internal keys line up with the score classification problemPassesFilter
+// and the Stats "Problems overview" grid both already use (1 / 0.9 / other).
+// `cls` is that same grid's .score-box-* class, reused here (see
+// renderFilterConfigArea's 'type' branch) as a small colored swatch next to
+// each label — so a box's color out in the quiz/Stats views can be matched
+// straight back to the checkbox that controls it.
+const FILTER_TYPE_STATUS_OPTIONS = [
+  { key: 'unattempted', label: 'Not attempted',            cls: 'score-box-unattempted' },
+  { key: 'wrong',        label: 'Attempted wrong',          cls: 'score-box-wrong' },
+  { key: 'partial',      label: 'Attempted almost correct', cls: 'score-box-partial' },
+  { key: 'correct',      label: 'Attempted correct',        cls: 'score-box-correct' },
+];
 
 // Parses "5-6, 3, 15-19" into a Set of integers
 function parseNumRanges(raw) {
@@ -205,27 +119,148 @@ function parseNumRanges(raw) {
   return set;
 }
 
-// Whether problem p passes quizIdx's active filter (topic or number mode)
+// Lazily-built, per-batch cache of problem attempt scores for the "Type"
+// filter — invalidated (see below) at the start of every newQuiz()/
+// _filterNarrowsCurrentPool() pass instead of being rebuilt on every single
+// problemPassesFilter() call within that pass (which, across a whole
+// cumulative-mode pool, can be called hundreds of times). Reads whichever
+// of Last-attempt/Best-ever js/stats.js's own Problems-overview switch
+// (_poMode) is currently set to, so "attempted correct" etc. here means the
+// same thing it means over there — one shared notion of "correct" rather
+// than a second, independent one.
+let _typeFilterScoresCache = null;
+function _invalidateTypeFilterScoresCache() { _typeFilterScoresCache = null; }
+function _typeFilterScores() {
+  if (_typeFilterScoresCache) return _typeFilterScoresCache;
+  const useBest = typeof _poMode !== 'undefined' && _poMode === 'best';
+  _typeFilterScoresCache = useBest && typeof _buildBestProblemScores === 'function'
+    ? _buildBestProblemScores()
+    : (typeof _buildLatestProblemScores === 'function' ? _buildLatestProblemScores() : new Map());
+  return _typeFilterScoresCache;
+}
+function _problemAttemptStatus(p, quizNum) {
+  const rec = _typeFilterScores().get(`${quizNum}_${p.id}`);
+  if (!rec) return 'unattempted';
+  return rec.points === 1 ? 'correct' : rec.points === 0.9 ? 'partial' : 'wrong';
+}
+
+// Whether problem p passes quizIdx's active filter.
 function problemPassesFilter(p, quizIdx) {
-  if ((cumulativeFilterMode[quizIdx] || 'topic') === 'number') {
+  const mode = cumulativeFilterMode[quizIdx] || 'topic';
+  if (mode === 'none') return true;
+  if (mode === 'number') {
     const nf = cumulativeNumFilter[quizIdx];
     if (!nf) return true;
-    const num = parseInt(String(p.id).replace(/\D/g, ''), 10);
+    // Numbers the user types refer to the numbers they SEE (position in the
+    // quiz), not the stored id — see problemNumber() in quizzes.js.
+    const num = problemNumber(quizIdx + 1, p.id);
     const inSet = nf.ranges.has(num);
     return nf.incexc === 'exclude' ? !inSet : inSet;
+  }
+  if (mode === 'type') {
+    const sel = cumulativeTypeFilter[quizIdx];
+    if (!sel || sel.size === 0) return true;
+    return sel.has(_problemAttemptStatus(p, quizIdx + 1));
   }
   const filter = cumulativeTopics[quizIdx];
   return !filter || filter.size === 0 || filter.has(p.topic);
 }
 
-function resetFilterPreferences() {
-  if (!confirm('Reset all filter preferences? This will restore every quiz\'s topic and number filters to default and cannot be undone.')) return;
+// ── Reset button: tap-to-arm confirmation instead of a blocking confirm()
+// dialog ── First tap arms it: label swaps to "Sure?" and a red ring traces
+// out of its border over RESET_CONFIRM_MS (see _armResetConfirm/css
+// .reset-confirm-ring) as a visual countdown. A second tap while armed
+// commits the reset; letting the ring finish (no second tap) just disarms
+// back to normal — same "nothing happens unless you mean it" guarantee the
+// old confirm() gave, without stopping the page to ask.
+const RESET_CONFIRM_MS = 3000;
+let _resetConfirmArmed = false;
+let _resetConfirmTimer = null;
+
+function handleResetClick() {
+  const btn = document.getElementById('filterResetBtn');
+  if (!btn) return;
+  if (_resetConfirmArmed) {
+    _disarmResetConfirm(btn);
+    doResetFilterPreferences();
+    return;
+  }
+  _armResetConfirm(btn);
+}
+
+function _armResetConfirm(btn) {
+  _resetConfirmArmed = true;
+  btn.classList.add('confirming');
+  btn.title = 'Tap again to confirm reset';
+  const label = btn.querySelector('.filter-reset-label');
+  if (label) label.textContent = 'Sure?';
+
+  // Size the ring's rect to the button's *actual* current border box —
+  // same width/height, and the same corner radius the button's own CSS is
+  // using right now (read live via getComputedStyle rather than a
+  // hardcoded rx), inset by exactly half the stroke width so the stroke
+  // centers on the button's real edge. That's what keeps the line looking
+  // like the button's own border animating, instead of a separate,
+  // differently-sized-and-rounded shape sitting on top of it.
+  const ring = btn.querySelector('.reset-confirm-ring');
+  const rect = ring && ring.querySelector('rect');
+  if (ring && rect) {
+    const w = btn.offsetWidth, h = btn.offsetHeight;
+    const strokeW = 1.5;
+    const inset = strokeW / 2;
+    const radius = parseFloat(getComputedStyle(btn).borderTopLeftRadius) || 0;
+    ring.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    rect.setAttribute('x', inset);
+    rect.setAttribute('y', inset);
+    rect.setAttribute('width', Math.max(0, w - inset * 2));
+    rect.setAttribute('height', Math.max(0, h - inset * 2));
+    rect.setAttribute('rx', Math.max(0, radius - inset));
+    const len = rect.getTotalLength();
+    rect.style.transition = 'none';
+    rect.style.strokeDasharray = len;
+    rect.style.strokeDashoffset = 0; // fully visible outline (the "full 2π")
+    void rect.getBoundingClientRect(); // force reflow before transitioning
+    rect.style.transition = `stroke-dashoffset ${RESET_CONFIRM_MS}ms linear`;
+    // One dash the length of the whole perimeter, offset all the way around
+    // it: the visible portion recedes from the start point instead of the
+    // outline just fading, i.e. it un-draws itself back down to nothing.
+    requestAnimationFrame(() => { rect.style.strokeDashoffset = len; });
+  }
+
+  clearTimeout(_resetConfirmTimer);
+  _resetConfirmTimer = setTimeout(() => _disarmResetConfirm(btn), RESET_CONFIRM_MS);
+}
+
+function _disarmResetConfirm(btn) {
+  _resetConfirmArmed = false;
+  clearTimeout(_resetConfirmTimer);
+  _resetConfirmTimer = null;
+  // Removing "confirming" is also what hides the ring (opacity, css/
+  // style.css .reset-confirm-ring) — visibility is gated purely on that
+  // class rather than on the rect's own left-over stroke-dashoffset value,
+  // so there's no stale "fully drawn but nobody hid it" state to get stuck
+  // showing a permanent outline after the first arm/disarm cycle.
+  btn.classList.remove('confirming');
+  btn.title = 'Reset all filter preferences';
+  const label = btn.querySelector('.filter-reset-label');
+  if (label) label.textContent = '↺ Reset';
+}
+
+function doResetFilterPreferences() {
   Object.keys(localStorage).forEach(k => {
-    if (k.startsWith(STORAGE_PREFIX + '_topics_q') || k.startsWith(STORAGE_PREFIX + '_filtermode_q') || k.startsWith(STORAGE_PREFIX + '_numfilter_q')) {
+    if (k.startsWith(STORAGE_PREFIX + '_topics_q') || k.startsWith(STORAGE_PREFIX + '_filtermode_q') ||
+        k.startsWith(STORAGE_PREFIX + '_numfilter_q') || k.startsWith(STORAGE_PREFIX + '_typefilter_q')) {
       localStorage.removeItem(k);
     }
   });
-  initTopics();
+  // initTopics() clears and rebuilds #topicSelector's own children in
+  // place (same element, not a replacement one) — exactly what
+  // _animateHeightChange expects, so switching from whatever filter was
+  // showing back down to "No filter" (now much shorter — see the mode
+  // fallback above) animates smoothly instead of the container snapping
+  // straight to its new, shorter height.
+  const container = document.getElementById('topicSelector');
+  _animateHeightChange(container, () => initTopics());
 }
 
 function loadTopicsForQuiz(quizIdx) {
@@ -239,80 +274,212 @@ function loadTopicsForQuiz(quizIdx) {
   return { allTopics, sel };
 }
 
+// Loads (or defaults, all-checked, same convention as topics) this quiz's
+// saved Type-filter selection.
+function loadTypeFilterForQuiz(quizIdx) {
+  const key = STORAGE_PREFIX + '_typefilter_q' + (quizIdx + 1);
+  const allKeys = FILTER_TYPE_STATUS_OPTIONS.map(o => o.key);
+  let saved;
+  try { saved = JSON.parse(localStorage.getItem(key)); } catch(e) {}
+  let sel = Array.isArray(saved) ? saved.filter(k => allKeys.includes(k)) : [];
+  if (sel.length === 0) sel = [...allKeys];
+  return sel;
+}
+
+// Animates `el` between its pre- and post-mutation heights instead of
+// letting a fresh innerHTML swap just pop to the new size — measures the
+// real before/after heights (rather than guessing) so it holds up for any
+// combination of filter blocks (a one-line number input vs. a wrapping
+// grid of topic/type chips) without per-case tuning.
+function _animateHeightChange(el, mutateFn) {
+  if (!el) { mutateFn(); return; }
+  const startH = el.getBoundingClientRect().height;
+  mutateFn();
+  const endH = el.scrollHeight;
+  if (Math.abs(endH - startH) < 1) return; // nothing worth animating
+  el.style.overflow = 'hidden';
+  el.style.height = startH + 'px';
+  void el.offsetHeight; // force reflow so the next assignment transitions
+  el.style.transition = 'height 0.32s ease';
+  requestAnimationFrame(() => { el.style.height = endH + 'px'; });
+  const cleanup = () => {
+    el.style.transition = '';
+    el.style.height = '';
+    el.style.overflow = '';
+    el.removeEventListener('transitionend', cleanup);
+  };
+  el.addEventListener('transitionend', cleanup);
+  // Belt-and-braces cleanup in case transitionend never fires (e.g. the
+  // element got hidden/removed mid-transition).
+  setTimeout(cleanup, 400);
+}
+
+// Builds the config block for whichever filter type is currently active —
+// nothing for "No filter", topic chips, the number-range input, or the
+// Type (attempt-status) chips. Re-invoked (inside _animateHeightChange)
+// every time the 4-way switch changes; the individual chip/input change
+// handlers below patch their own state in place instead of re-calling this.
+function renderFilterConfigArea(quizIdx, area) {
+  const mode = cumulativeFilterMode[quizIdx] || 'topic';
+  area.innerHTML = '';
+  if (mode === 'none') return;
+
+  if (mode === 'topic') {
+    const { allTopics } = loadTopicsForQuiz(quizIdx);
+    const topicKey = STORAGE_PREFIX + '_topics_q' + (quizIdx + 1);
+    const block = document.createElement('div');
+    block.className = 'topic-chip-block';
+    allTopics.forEach(topic => {
+      const isChecked = cumulativeTopics[quizIdx].has(topic);
+      const lbl = document.createElement('label');
+      lbl.className = 'topic-chip' + (isChecked ? ' active' : '');
+      lbl.innerHTML = `<input type="checkbox" value="${topic}" ${isChecked ? 'checked' : ''}>${topic}`;
+      lbl.querySelector('input').addEventListener('change', e => {
+        if (e.target.checked) { cumulativeTopics[quizIdx].add(topic); lbl.classList.add('active'); }
+        else { cumulativeTopics[quizIdx].delete(topic); lbl.classList.remove('active'); }
+        localStorage.setItem(topicKey, JSON.stringify([...cumulativeTopics[quizIdx]]));
+        updateFilterActiveNote();
+      });
+      block.appendChild(lbl);
+    });
+    area.appendChild(block);
+    return;
+  }
+
+  if (mode === 'number') {
+    const numKey = STORAGE_PREFIX + '_numfilter_q' + (quizIdx + 1);
+    // Displays the raw text last typed (rangesRaw), not a string rebuilt
+    // from the parsed Set — rebuilding would flatten "5-6, 3, 15-19" into
+    // individual enumerated numbers on every switch away and back.
+    const numMeta = { incexc: cumulativeNumFilter[quizIdx]?.incexc || 'include',
+                       ranges: cumulativeNumFilter[quizIdx]?.rangesRaw || '' };
+    const block = document.createElement('div');
+    block.className = 'num-filter-block';
+    block.innerHTML = `
+      <div class="incexc-row">
+        <span class="filter-mode-option${numMeta.incexc !== 'exclude' ? ' active' : ''}" data-opt="include">Include</span>
+        <div class="mode-toggle-track small${numMeta.incexc === 'exclude' ? ' on' : ''}" id="incExcToggle_${quizIdx}"><div class="mode-toggle-knob"></div></div>
+        <span class="filter-mode-option${numMeta.incexc === 'exclude' ? ' active' : ''}" data-opt="exclude">Exclude</span>
+      </div>
+      <input type="text" class="num-filter-input" id="numRangesInput_${quizIdx}" placeholder="e.g. 5-6, 3, 15-19" value="${numMeta.ranges || ''}">`;
+    area.appendChild(block);
+    const track = block.querySelector(`#incExcToggle_${quizIdx}`);
+    const [includeLbl, excludeLbl] = block.querySelectorAll('.filter-mode-option');
+    track.addEventListener('click', () => {
+      const next = cumulativeNumFilter[quizIdx].incexc === 'exclude' ? 'include' : 'exclude';
+      cumulativeNumFilter[quizIdx].incexc = next;
+      localStorage.setItem(numKey, JSON.stringify({ incexc: next, ranges: cumulativeNumFilter[quizIdx].rangesRaw }));
+      track.classList.toggle('on', next === 'exclude');
+      includeLbl.classList.toggle('active', next !== 'exclude');
+      excludeLbl.classList.toggle('active', next === 'exclude');
+      updateFilterActiveNote();
+    });
+    block.querySelector(`#numRangesInput_${quizIdx}`).addEventListener('input', e => {
+      cumulativeNumFilter[quizIdx].rangesRaw = e.target.value;
+      cumulativeNumFilter[quizIdx].ranges = parseNumRanges(e.target.value);
+      localStorage.setItem(numKey, JSON.stringify({ incexc: cumulativeNumFilter[quizIdx].incexc, ranges: e.target.value }));
+      updateFilterActiveNote();
+    });
+    return;
+  }
+
+  if (mode === 'type') {
+    const typeKey = STORAGE_PREFIX + '_typefilter_q' + (quizIdx + 1);
+    // Three-column grid (checkbox / label / sample score-box) instead of
+    // the topic filter's wrapping chips — a fixed column layout reads
+    // better here since every row needs to line up with the others, and
+    // the third column doubles as a color key back to the score-box grid
+    // (Stats "Problems overview") and in-quiz score boxes: same classes,
+    // same colors, just a stand-in "P0" id since no real problem applies.
+    // One shared parent grid (not four independent per-row grids) is what
+    // actually keeps column 3 aligned regardless of how long each row's
+    // label text runs — each row is a `label` element kept in normal flow
+    // via `display: contents` (css/style.css .type-filter-row) so its three
+    // children slot directly into the parent's three grid columns while the
+    // label itself still toggles its checkbox on a click anywhere in the row.
+    const block = document.createElement('div');
+    block.className = 'type-filter-grid';
+    FILTER_TYPE_STATUS_OPTIONS.forEach(opt => {
+      const isChecked = cumulativeTypeFilter[quizIdx].has(opt.key);
+      const lbl = document.createElement('label');
+      lbl.className = 'type-filter-row';
+      lbl.innerHTML = `
+        <input type="checkbox" class="type-filter-checkbox" value="${opt.key}" ${isChecked ? 'checked' : ''}>
+        <span class="type-filter-label">${opt.label}</span>
+        <span class="score-box ${opt.cls} type-filter-swatch">P0</span>`;
+      lbl.querySelector('input').addEventListener('change', e => {
+        if (e.target.checked) cumulativeTypeFilter[quizIdx].add(opt.key);
+        else cumulativeTypeFilter[quizIdx].delete(opt.key);
+        localStorage.setItem(typeKey, JSON.stringify([...cumulativeTypeFilter[quizIdx]]));
+        updateFilterActiveNote();
+      });
+      block.appendChild(lbl);
+    });
+    area.appendChild(block);
+    return;
+  }
+}
+
+// Switches quizIdx's filter type (No filter / Topic / Number / Type),
+// persists it, re-syncs every button's active state, and animates the
+// config area to its new content's height instead of letting it jump.
+function setFilterMode(quizIdx, mode, tabsRow) {
+  cumulativeFilterMode[quizIdx] = mode;
+  localStorage.setItem(STORAGE_PREFIX + '_filtermode_q' + (quizIdx + 1), mode);
+  tabsRow.querySelectorAll('.filter-type-tab').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.mode === mode);
+  });
+  const area = document.getElementById(`filterConfigArea_${quizIdx}`);
+  _animateHeightChange(area, () => renderFilterConfigArea(quizIdx, area));
+  updateFilterActiveNote();
+}
+
 function buildQuizTopicBlock(container, quizIdx, label) {
-  const { allTopics, sel } = loadTopicsForQuiz(quizIdx);
+  const { sel } = loadTopicsForQuiz(quizIdx);
   cumulativeTopics[quizIdx] = new Set(sel);
+  cumulativeTypeFilter[quizIdx] = new Set(loadTypeFilterForQuiz(quizIdx));
 
-  const topicKey = STORAGE_PREFIX + '_topics_q'     + (quizIdx + 1);
-  const modeKey  = STORAGE_PREFIX + '_filtermode_q' + (quizIdx + 1);
-  const numKey   = STORAGE_PREFIX + '_numfilter_q'  + (quizIdx + 1);
+  const modeKey = STORAGE_PREFIX + '_filtermode_q' + (quizIdx + 1);
+  const numKey  = STORAGE_PREFIX + '_numfilter_q'  + (quizIdx + 1);
 
-  const mode = localStorage.getItem(modeKey) === 'number' ? 'number' : 'topic';
+  const savedMode = localStorage.getItem(modeKey);
+  // Default (no saved preference — including right after Reset, which wipes
+  // this same key) is "No filter", not "Topic": resetting should hand back
+  // the full, unfiltered pool rather than silently re-opting into one
+  // particular filter type.
+  const mode = ['none', 'topic', 'number', 'type'].includes(savedMode) ? savedMode : 'none';
   let numMeta;
   try { numMeta = JSON.parse(localStorage.getItem(numKey)); } catch(e) {}
   if (!numMeta || typeof numMeta !== 'object') numMeta = { incexc: 'include', ranges: '' };
 
   cumulativeFilterMode[quizIdx] = mode;
-  cumulativeNumFilter[quizIdx]  = { incexc: numMeta.incexc, ranges: parseNumRanges(numMeta.ranges) };
+  cumulativeNumFilter[quizIdx]  = { incexc: numMeta.incexc, ranges: parseNumRanges(numMeta.ranges), rangesRaw: numMeta.ranges || '' };
 
   const header = document.createElement('div');
   header.className = 'topic-selector-header';
   header.textContent = label;
   container.appendChild(header);
 
-  // ── Filter-type toggle: Topic vs Number ──
-  const modeRow = document.createElement('div');
-  modeRow.className = 'filter-mode-row';
-  modeRow.innerHTML = `
-    <span class="filter-mode-option${mode === 'topic' ? ' active' : ''}">Topic</span>
-    <div class="mode-toggle-track small${mode === 'number' ? ' on' : ''}" id="filterModeToggle_${quizIdx}"><div class="mode-toggle-knob"></div></div>
-    <span class="filter-mode-option${mode === 'number' ? ' active' : ''}">Number</span>
-  `;
-  container.appendChild(modeRow);
-  modeRow.querySelector(`#filterModeToggle_${quizIdx}`).addEventListener('click', () => {
-    localStorage.setItem(modeKey, mode === 'topic' ? 'number' : 'topic');
-    initTopics();
+  // ── Filter-type tabs: No filter / Topic / Number / Type ──
+  const tabsRow = document.createElement('div');
+  tabsRow.className = 'filter-type-tabs';
+  tabsRow.innerHTML = [
+    { key: 'none',   label: 'No filter' },
+    { key: 'topic',  label: 'Topic' },
+    { key: 'number', label: 'Number' },
+    { key: 'type',   label: 'Type' },
+  ].map(t => `<button type="button" class="filter-type-tab${mode === t.key ? ' active' : ''}" data-mode="${t.key}">${t.label}</button>`).join('');
+  container.appendChild(tabsRow);
+  tabsRow.querySelectorAll('.filter-type-tab').forEach(btn => {
+    btn.addEventListener('click', () => setFilterMode(quizIdx, btn.dataset.mode, tabsRow));
   });
 
-  // ── Topic chips ──
-  const topicBlock = document.createElement('div');
-  topicBlock.className = 'topic-chip-block' + (mode === 'number' ? ' filter-dimmed' : '');
-  allTopics.forEach(topic => {
-    const isChecked = cumulativeTopics[quizIdx].has(topic);
-    const lbl = document.createElement('label');
-    lbl.className = 'topic-chip' + (isChecked ? ' active' : '');
-    lbl.innerHTML = `<input type="checkbox" value="${topic}" ${isChecked ? 'checked' : ''}>${topic}`;
-    lbl.querySelector('input').addEventListener('change', e => {
-      if (e.target.checked) { cumulativeTopics[quizIdx].add(topic); lbl.classList.add('active'); }
-      else { cumulativeTopics[quizIdx].delete(topic); lbl.classList.remove('active'); }
-      localStorage.setItem(topicKey, JSON.stringify([...cumulativeTopics[quizIdx]]));
-    });
-    topicBlock.appendChild(lbl);
-  });
-  container.appendChild(topicBlock);
-
-  // ── Number-range filter ──
-  const numBlock = document.createElement('div');
-  numBlock.className = 'num-filter-block' + (mode === 'topic' ? ' filter-dimmed' : '');
-  numBlock.innerHTML = `
-    <div class="incexc-row">
-      <span class="filter-mode-option${numMeta.incexc !== 'exclude' ? ' active' : ''}">Include</span>
-      <div class="mode-toggle-track small${numMeta.incexc === 'exclude' ? ' on' : ''}" id="incExcToggle_${quizIdx}"><div class="mode-toggle-knob"></div></div>
-      <span class="filter-mode-option${numMeta.incexc === 'exclude' ? ' active' : ''}">Exclude</span>
-    </div>
-    <input type="text" class="num-filter-input" id="numRangesInput_${quizIdx}" placeholder="e.g. 5-6, 3, 15-19" value="${numMeta.ranges || ''}">
-  `;
-  container.appendChild(numBlock);
-  numBlock.querySelector(`#incExcToggle_${quizIdx}`).addEventListener('click', () => {
-    numMeta.incexc = numMeta.incexc === 'exclude' ? 'include' : 'exclude';
-    localStorage.setItem(numKey, JSON.stringify(numMeta));
-    initTopics();
-  });
-  numBlock.querySelector(`#numRangesInput_${quizIdx}`).addEventListener('input', e => {
-    numMeta.ranges = e.target.value;
-    cumulativeNumFilter[quizIdx].ranges = parseNumRanges(numMeta.ranges);
-    localStorage.setItem(numKey, JSON.stringify(numMeta));
-  });
+  // ── Config area for whichever tab is active ──
+  const area = document.createElement('div');
+  area.className = 'filter-config-area';
+  area.id = `filterConfigArea_${quizIdx}`;
+  container.appendChild(area);
+  renderFilterConfigArea(quizIdx, area);
 }
 
 function initTopics() {
@@ -321,15 +488,19 @@ function initTopics() {
   cumulativeTopics = {};
   cumulativeFilterMode = {};
   cumulativeNumFilter = {};
+  cumulativeTypeFilter = {};
+  _invalidateTypeFilterScoresCache();
 
   if (selectedCumulativeMode === 'cumulative' && selectedQuizNum >= 2) {
     for (let i = 0; i < selectedQuizNum; i++) {
       buildQuizTopicBlock(container, i, `Quiz #${i + 1} · ${QUIZZES[i].name}`);
     }
   } else {
-    // Single quiz mode — shares the same Topic/Number filter block (and
-    // localStorage keys) as this quiz number's slot in cumulative mode,
-    // via the same quizIdx = selectedQuizNum - 1.
+    // Single quiz mode — shares the same filter block (and localStorage
+    // keys) as this quiz number's slot in cumulative mode, via the same
+    // quizIdx = selectedQuizNum - 1. Every filter type here (No filter/
+    // Topic/Number/Type) therefore already applies identically whichever
+    // mode the quiz itself is drawn in.
     buildQuizTopicBlock(container, selectedQuizNum - 1, 'Problem Pool Filter');
   }
 }
@@ -341,6 +512,25 @@ function pickRandom(arr, n) {
     [a[i], a[j]] = [a[j], a[i]];
   }
   return a.slice(0, n);
+}
+
+// Keys (mathCacheKeyFor-style, q<quiz>_<id>) of the problems the previous
+// newQuiz() draw showed. Captured at draw time rather than re-derived from
+// `quiz` later, since a single-mode problem's key depends on
+// selectedQuizNum, which may have changed since.
+let _lastDrawnKeys = new Set();
+
+// pickRandom(), but skipping problems the previous attempt just showed
+// whenever the pool has enough others to fill all n slots. When it doesn't,
+// every unseen problem goes in and only the shortfall is topped up from the
+// just-shown ones. Plain pickRandom() with Settings > Study > "Avoid repeat
+// problems" off.
+function pickRandomAvoidingLast(arr, n) {
+  if (typeof getSetting === 'function' && getSetting('study', 'avoidRepeatProblems') === false) return pickRandom(arr, n);
+  const fresh = [], recent = [];
+  arr.forEach(p => (_lastDrawnKeys.has(mathCacheKeyFor(p)) ? recent : fresh).push(p));
+  const pick = pickRandom(fresh, n);
+  return pick.length >= n ? pick : pick.concat(pickRandom(recent, n - pick.length));
 }
 
 // Whether the active Topic/Number filter is actually excluding at least
@@ -367,7 +557,119 @@ function updateFilterActiveNote() {
   note.style.display = _filterNarrowsCurrentPool() ? '' : 'none';
 }
 
+// ─── Live quiz timer (floating "00:00" clock, bottom-right — same visual
+// slot/pattern as #stickyScore's own floating badge in Solve-All mode;
+// never shown at the same time as that one since they belong to different
+// screens) ───────────────────────────────────────────────────────────────
+// Ticks once a second from newQuiz() until checkAll() submits or the
+// person leaves the quiz screen (see exitAppOrChoiceToLanding's
+// showLanding()). Deliberately keeps its own start timestamp rather than
+// reading stats.js's private _attemptStart — the two are set within the
+// same line of newQuiz() so they never visibly drift, and this way
+// quiz-engine.js doesn't need to reach into another file's internal state
+// just to display something. Purely visual: turning it off, or it being
+// off from the start (see the Study setting in settings.js), never
+// touches the actual recorded duration.
+let _liveQuizTimerInterval = null;
+// True whenever a Random-N/cumulative timed attempt is actually in
+// progress, regardless of whether the floating clock itself is shown (the
+// 'showLiveTimer' Study setting can be off while a quiz is still very much
+// under way) — this is what the Notifications tab's "update outside quiz
+// mode" detection AND the Study tab's 50-minute auto-stop (both below) read,
+// since neither can rely on a display preference to know whether an
+// attempt is actually still running.
+let _quizTimerActive = false;
+function isQuizTimerActive() { return _quizTimerActive; }
+// How long the current timed attempt has been running (0 when none is) —
+// lets an overdue update interrupt an attempt left open for hours (see
+// maybeForceUpdateOutsideQuiz).
+let _quizTimerStartedAt = 0;
+function quizTimerRunningMs() { return _quizTimerActive ? Date.now() - _quizTimerStartedAt : 0; }
+
+// Settings > Study > "Automatically stop after 50 minutes" — scheduled
+// fresh in newQuiz() (see its own comment there) each time a new Random-N
+// attempt actually starts, and cleared here whenever that attempt ends for
+// real, same lifecycle as _quizTimerActive itself.
+let _autoStopTimer = null;
+
+// Just the floating clock's own interval + DOM visibility — no
+// attempt-tracking side effects at all. Split out from
+// startLiveQuizTimer/stopLiveQuizTimer below so the "Show live timer"
+// setting's own onchange (settings.js) can show/hide *only* the clock
+// without that ever being mistaken for the attempt itself starting or
+// ending — before this split, switching that display setting off mid-quiz
+// called the same stopLiveQuizTimer() that also means "the attempt is
+// over", which would have wrongly cleared _quizTimerActive/_autoStopTimer
+// (and could have fired an unwanted forced update-reload) just from hiding
+// a clock.
+function _clearLiveQuizTimerDisplay() {
+  if (_liveQuizTimerInterval) { clearInterval(_liveQuizTimerInterval); _liveQuizTimerInterval = null; }
+  const el = document.getElementById('liveQuizTimer');
+  if (el) el.classList.remove('visible');
+}
+function _beginLiveQuizTimerDisplay() {
+  const appPage = document.getElementById('appPage');
+  if (!appPage || !appPage.classList.contains('visible') || checked) return;
+  const el = document.getElementById('liveQuizTimer');
+  if (!el) return;
+  const startedAt = Date.now();
+  function tick() {
+    const totalSec = Math.floor((Date.now() - startedAt) / 1000);
+    document.getElementById('liveQuizTimerMin').textContent = String(Math.floor(totalSec / 60)).padStart(2, '0');
+    document.getElementById('liveQuizTimerSec').textContent = String(totalSec % 60).padStart(2, '0');
+  }
+  tick();
+  el.classList.add('visible');
+  _liveQuizTimerInterval = setInterval(tick, 1000);
+}
+// Called directly by the "Show live timer" setting's onchange (settings.js)
+// instead of startLiveQuizTimer/stopLiveQuizTimer — only ever touches the
+// clock's own visibility, never _quizTimerActive.
+function setLiveQuizTimerDisplayEnabled(enabled) {
+  _clearLiveQuizTimerDisplay();
+  if (enabled && _quizTimerActive) _beginLiveQuizTimerDisplay();
+}
+
+function startLiveQuizTimer() {
+  stopLiveQuizTimer(); // defensive: never leave a second interval/timer running if this somehow gets called twice in a row
+  _quizTimerActive = true;
+  _quizTimerStartedAt = Date.now();
+  // Semantic attempt lifecycle for lightweight UI that must exist only in
+  // Random N mode (e.g. top-bar clock/battery). This is deliberately not
+  // tied to whether the optional floating timer is visually enabled.
+  window.dispatchEvent(new CustomEvent('quiztimer:activechange', { detail: { active: true } }));
+  if (typeof getSetting === 'function' && getSetting('study', 'showLiveTimer') === false) return;
+  // Also callable directly from the Study-tab toggle's onchange (settings.js)
+  // when it's flipped back on mid-session — _beginLiveQuizTimerDisplay()'s
+  // own guard is what stops that from popping the clock up while sitting on
+  // the landing screen or anywhere else that isn't an active, unchecked
+  // attempt.
+  _beginLiveQuizTimerDisplay();
+}
+function stopLiveQuizTimer() {
+  const wasActive = _quizTimerActive;
+  _quizTimerActive = false;
+  if (wasActive) {
+    window.dispatchEvent(new CustomEvent('quiztimer:activechange', { detail: { active: false } }));
+  }
+  _clearLiveQuizTimerDisplay();
+  if (_autoStopTimer) { clearTimeout(_autoStopTimer); _autoStopTimer = null; }
+  // Only fire this when the call represents an attempt that was genuinely
+  // running actually ending — startLiveQuizTimer() itself calls this
+  // defensively before every new attempt starts, and that call must never
+  // be mistaken for "the quiz just ended": at that exact instant
+  // _quizTimerActive is transiently false right before being set true
+  // again for the new attempt, and without this guard a pending update
+  // would force a reload at the exact moment a fresh quiz begins.
+  if (wasActive && typeof maybeForceUpdateOutsideQuiz === 'function') maybeForceUpdateOutsideQuiz();
+}
+
 function newQuiz() {
+  // A fresh draw should reflect any attempt just recorded (checkAll()) —
+  // e.g. a "Not attempted" Type-filter pool shrinking now that the
+  // previous round's problems have a status. Cheap: just clears the cache,
+  // the first problemPassesFilter() call below rebuilds it once.
+  _invalidateTypeFilterScoresCache();
   if (selectedCumulativeMode === 'cumulative' && selectedQuizNum >= 2) {
     let prevPool = [];
     for (let i = 0; i < selectedQuizNum - 1; i++) {
@@ -380,19 +682,24 @@ function newQuiz() {
     currPool = currPool.map(p => ({ ...p, _quizNum: selectedQuizNum }));
 
     if (prevPool.length === 0) prevPool = [];
-    const prevPick = pickRandom(prevPool, QUIZ_CUMULATIVE_PREV_COUNT);
-    const currPick = pickRandom(currPool, QUIZ_SIZE - QUIZ_CUMULATIVE_PREV_COUNT);
+    const prevPick = pickRandomAvoidingLast(prevPool, QUIZ_CUMULATIVE_PREV_COUNT);
+    const currPick = pickRandomAvoidingLast(currPool, QUIZ_SIZE - QUIZ_CUMULATIVE_PREV_COUNT);
     quiz = pickRandom([...prevPick, ...currPick], QUIZ_SIZE);
   } else {
     let pool = ACTIVE_PROBLEMS.filter(p => problemPassesFilter(p, selectedQuizNum - 1));
     if (pool.length === 0) pool = ACTIVE_PROBLEMS;
-    quiz = pickRandom(pool, Math.min(QUIZ_SIZE, pool.length));
+    // Final shuffle so topped-up repeats aren't always at the end.
+    quiz = pickRandom(pickRandomAvoidingLast(pool, Math.min(QUIZ_SIZE, pool.length)), QUIZ_SIZE);
   }
+  _lastDrawnKeys = new Set(quiz.map(mathCacheKeyFor));
+  _attemptStartedAt = Date.now();
 
   checked = false;
   document.getElementById("resultPanel").classList.remove("show");
+  document.getElementById("recentAttemptsPanel").classList.remove("show");
+  document.getElementById("attemptTopicsPanel").classList.remove("show");
   document.getElementById("checkBtn").disabled = false;
-  document.getElementById("resultMaxScore").textContent = `final score / ${quiz.length}`;
+  document.getElementById("resultMaxScore").textContent = "Final Score";
   updateFilterActiveNote();
   render();
   // Mirrors the reveal in checkAll() — new attempt, nothing checked yet,
@@ -406,45 +713,69 @@ function newQuiz() {
   if (typeof stopForumProblemCountsPolling === 'function') stopForumProblemCountsPolling();
   // ── Stats: start timer for this attempt (Random 6 mode only) ──
   if (typeof startAttemptTimer !== 'undefined') startAttemptTimer();
+  // ── Floating live clock (see its own comment above for details/settings gate) ──
+  startLiveQuizTimer();
+  // ── Settings > Study > "Automatically stop after 50 minutes" ──
+  // Scheduled fresh for every new attempt; stopLiveQuizTimer() (called from
+  // checkAll() on submit, and from exitAppOrChoiceToLanding's showLanding()
+  // on leaving mid-quiz) always clears this, so it can never fire against
+  // an attempt that already ended one way or another.
+  if (typeof getSetting === 'function' && getSetting('study', 'autoStopAt50Min') === true) {
+    _autoStopTimer = setTimeout(() => { if (!checked) checkAll(); }, 50 * 60 * 1000);
+  }
 }
 
 function render() {
   const container = document.getElementById("quizContainer");
   container.innerHTML = "";
+  // Settings > Study > "Hide problem topic while active" reads this class
+  // (see css/settings.css) — reset on every fresh render so a new attempt
+  // always starts hidden again (per that setting) rather than staying
+  // revealed from the previous attempt's checkAll().
+  container.classList.remove('results-shown');
   quiz.forEach((p, i) => {
     const isCumulative = selectedCumulativeMode === 'cumulative' && p._quizNum != null;
-    const numDisplay   = isCumulative ? `${p.id} · Quiz #${p._quizNum}` : p.id;
+    const pLabel       = problemLabel(p._quizNum || selectedQuizNum, p.id);
+    const numDisplay   = isCumulative ? `${pLabel} · Quiz #${p._quizNum}` : pLabel;
     const card = document.createElement("div");
     card.className = "problem-card";
     card.id = "card-" + i;
     card.innerHTML = `
       <div class="card-header">
         <span class="problem-num">${numDisplay}</span>
+        ${typeof handoutButtonHtml === 'function' ? handoutButtonHtml(p._quizNum || selectedQuizNum) : ''}
         <span class="problem-topic">${p.topic}</span>
+        ${typeof problemFlagHtml === 'function' ? problemFlagHtml(p._quizNum || selectedQuizNum, p.id) : ''}
       </div>
       <div class="problem-text">${p.text}</div>
       <div class="answer-row">
-        <span class="answer-label">Value =</span>
-        <input class="answer-input" id="ans-${i}" type="text" placeholder="e.g. 3.2e-8" autocomplete="off" spellcheck="false">
-        <span class="sep">·</span>
-        <input class="unit-input" id="unit-${i}" type="text" placeholder="e.g. N/C" autocomplete="off" spellcheck="false">
+        ${answerInputHtml(`ans-${i}`)}
       </div>
-      <div class="feedback" id="fb-${i}"></div>
-      <div class="card-check-row" id="forum-row-${i}" style="display:none;">
-        <button class="forum-problem-btn" id="rq-forum-btn-${i}" title="Forum thread for ${p.id}"
+      <div class="card-result"><div class="feedback" id="fb-${i}"></div></div>
+      <div class="card-check-row rq-locked" id="forum-row-${i}" style="display:none;">
+        <button class="forum-problem-btn" id="rq-forum-btn-${i}" title="Forum thread for ${pLabel}"
           onclick="openForumForProblem(${p._quizNum || selectedQuizNum}, '${p.id}')">
-          💬 <span id="rq-forum-total-${i}"></span>
+          💬 <span class="forum-tab-label">Discuss</span> <span id="rq-forum-total-${i}"></span>
           <span class="forum-problem-btn-badge" id="rq-forum-badge-${i}" style="display:none;"></span>
           <span class="forum-problem-btn-at" id="rq-forum-at-${i}" style="display:none;">@</span>
         </button>
+        <!-- While the row is .rq-locked (until checkAll() shows scores) the
+             forum button is hidden and this one is shown but disabled, so
+             in Random quiz a solution is only ever reachable after scores
+             are shown. js/solutions.js hides it unless this problem has a
+             published solution, and the locked row with it. -->
+        <button class="solution-btn" data-quiz="${p._quizNum || selectedQuizNum}" data-problem="${p.id}" style="display:none;"
+          disabled title="Available after Check answers"
+          onclick="openSolution(${p._quizNum || selectedQuizNum}, '${p.id}')">📘 Solution</button>
+        ${typeof mistakeButtonHtml === 'function' ? mistakeButtonHtml(p._quizNum || selectedQuizNum, p.id) : ''}
       </div>
     `;
+    if (typeof placeCardParts === 'function') placeCardParts(card);
     container.appendChild(card);
 
-    card.querySelector(`#ans-${i}`).addEventListener("keydown", e => {
-      if (e.key === "Enter") document.getElementById(`unit-${i}`).focus();
-    });
-    card.querySelector(`#unit-${i}`).addEventListener("keydown", e => {
+    const ansInput = card.querySelector(`#ans-${i}`);
+    attachAnswerPreview(ansInput);
+    ansInput.addEventListener("keydown", e => {
       if (e.key === "Enter") {
         const next = document.getElementById(`ans-${i+1}`);
         if (next) next.focus(); else checkAll();
@@ -452,6 +783,11 @@ function render() {
     });
   });
   renderMathIn(container);
+
+  // Show 📘 on the problems that have a published solution (the index may
+  // still be loading on first paint; solutions.js calls this again when it
+  // arrives).
+  if (typeof refreshSolutionButtons === 'function') refreshSolutionButtons();
 }
 
 function checkAll() {
@@ -465,67 +801,83 @@ function checkAll() {
 
   quiz.forEach((p, i) => {
     const ansEl  = document.getElementById("ans-"  + i);
-    const unitEl = document.getElementById("unit-" + i);
     const card   = document.getElementById("card-" + i);
     const fb     = document.getElementById("fb-"   + i);
 
-    const numOk  = numberCorrect(ansEl.value, p.answer, unitConversionFactor(unitEl.value, p.units));
-    const uStat  = unitStatus(unitEl.value, p.units);
-    const unitOk = uStat === "ok";
-    const pts    = numOk ? (unitOk ? 1 : 0.9) : 0;
-    totalPts    += pts;
+    const res = gradeAnswer(ansEl.value, p);
+    const pts = res.pts;
+    totalPts += pts;
 
-    ansEl.classList.add(numOk ? "correct-input" : "wrong-input");
-
-    if (numOk) {
-      unitEl.classList.add(unitOk ? "correct-unit" : "partial-unit");
-    } else {
-      unitEl.classList.add("wrong-unit");
-    }
+    // Lock the field: what stays on screen is what was graded and saved
+    // (render() builds fresh fields for the next quiz).
+    ansEl.disabled = true;
+    markAnswerInput(ansEl, pts);
 
     if      (pts === 1)   card.classList.add("correct");
     else if (pts === 0.9) card.classList.add("partial");
     else                  card.classList.add("wrong");
 
     const forumRow = document.getElementById("forum-row-" + i);
-    if (forumRow) forumRow.style.display = "";
-
-    fb.classList.add("show");
-    if (pts === 1) {
-      fb.classList.add("correct-fb");
-      fb.innerHTML = `✓ Correct <span class="pts-badge pts-full">+1 pt</span>`;
-    } else if (pts === 0.9) {
-      fb.classList.add("partial-fb");
-      const unitHint = uStat === "invalid"
-        ? `unit format invalid — use spaces to multiply, e.g. <strong>${fmtUnit(p.units)}</strong>`
-        : `unit should be <strong>${fmtUnit(p.units)}</strong>`;
-      fb.innerHTML = `✓ Value correct, but ${unitHint} <span class="pts-badge pts-partial">+0.9 pt</span>`;
-    } else {
-      fb.classList.add("wrong-fb");
-      fb.innerHTML = `✗ Expected ≈ <strong>${fmt(p.answer)}</strong> ${fmtUnit(p.units)} <span class="pts-badge pts-zero">+0 pt</span>`;
+    if (forumRow) {
+      forumRow.classList.remove("rq-locked");
+      forumRow.style.display = "";
+      const solBtn = forumRow.querySelector(".solution-btn");
+      if (solBtn) {
+        solBtn.disabled = false;
+        solBtn.title = "Worked solution for " + problemLabel(p._quizNum || selectedQuizNum, p.id);
+      }
     }
 
-    breakdown.push({ id: p.id, pts });
+    fb.classList.add("show", pts === 1 ? "correct-fb" : pts === 0.9 ? "partial-fb" : "wrong-fb");
+    fb.innerHTML = answerFeedbackHtml(res, p, true);
+    if (typeof showMistakeHit === 'function') showMistakeHit(fb, ansEl.value, p, p._quizNum || selectedQuizNum, true);
+
+    breakdown.push({ id: p.id, pts, quizNum: p._quizNum || selectedQuizNum });
+    const stored = splitAnswer(ansEl.value);
     answers.push({
       problem_id: p.id,
       quiz_num: p._quizNum || selectedQuizNum,
-      entered_value: ansEl.value,
-      entered_unit: unitEl.value,
+      entered_value: stored.value,
+      entered_unit: stored.unit,
       points: pts
     });
   });
 
   const panel = document.getElementById("resultPanel");
   const disp  = Number.isInteger(totalPts) ? totalPts : totalPts.toFixed(1);
-  document.getElementById("resultScore").textContent = disp;
-  document.getElementById("resultBreakdown").innerHTML =
+  // Read once, here — stopAttemptTimer() zeroes its internal start time on
+  // read, so this same value is threaded through to recordAttemptFromQuiz()
+  // below rather than having it call stopAttemptTimer() a second time
+  // (which would just get 0 back).
+  const attemptDurationSec = (typeof stopAttemptTimer === 'function') ? stopAttemptTimer() : 0;
+  stopLiveQuizTimer(); // final duration is now frozen on the result panel — the floating clock has nothing left to count
+  document.getElementById("resultScore").innerHTML =
+    `<span class="result-score-num">${disp}</span><span class="result-score-den">/${quiz.length}</span>`
+    + `<span class="result-duration">${formatAttemptDuration(attemptDurationSec)}</span>`;
+  const breakdownShowToggle = new Set(breakdown.map(b => b.quizNum)).size > 1;
+  const resultBreakdownEl = document.getElementById("resultBreakdown");
+  resultBreakdownEl.classList.remove('show-q'); // fresh attempt always starts pinned to P, not whatever the last attempt was left on
+  resultBreakdownEl.innerHTML =
     breakdown.map(b => {
-      const cls = b.pts === 1 ? "c" : b.pts === 0.9 ? "p" : "w";
-      const sym = b.pts === 1 ? "✓" : b.pts === 0.9 ? "½" : "✗";
-      return `<span class="${cls}">${b.id}</span> ${sym}`;
-    }).join("&nbsp;&nbsp;");
+      const cls = b.pts === 1 ? "score-box-correct" : b.pts === 0.9 ? "score-box-partial" : "score-box-wrong";
+      return `<span class="score-box ${cls}" title="${b.pts} pt">${pqChipInner(b.id, b.quizNum)}</span>`;
+    }).join("")
+    + pqToggleButton(breakdownShowToggle);
   panel.classList.add("show");
   panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  // Settings > Study > "Hide problem topic while active" — scores are now
+  // shown, so every card's topic label (top-right, see css/settings.css)
+  // comes back regardless of that setting; render()/newQuiz() removes this
+  // class again for the next fresh attempt.
+  document.getElementById("quizContainer").classList.add('results-shown');
+  // Settings > Study > "Full screen for Random N" — leave fullscreen the
+  // instant scores are revealed, same moment the topic labels above come
+  // back. Only acts if the browser is actually in fullscreen right now (a
+  // person who exited it manually mid-quiz, e.g. with Esc, isn't put back
+  // into it just to immediately leave again).
+  if (document.fullscreenElement) {
+    document.exitFullscreen().catch(() => {});
+  }
   // ── Forum: FAB and per-problem "Discuss" buttons only make sense once
   // there's something to discuss — see syncForumFabVisibility() in
   // forum.js, which now hides the FAB during a plain Random 6 attempt but
@@ -546,15 +898,147 @@ function checkAll() {
       Number.isInteger(totalPts) ? totalPts : parseFloat(totalPts.toFixed(1)),
       quiz.length,
       selectedCumulativeMode,
-      answers
+      answers,
+      attemptDurationSec
     );
   }
+}
+
+// ─── P⇄Q toggle (cumulative-mode result rows) ──────────────────────────────
+// Builds a chip's inner markup with both labels present (see the .pq-label
+// CSS rules in style.css for why both are always rendered rather than
+// swapped via JS) — one row's worth of chips share a single .pq-toggle-btn,
+// added by the caller only when that row actually mixes more than one
+// quiz (a row where every chip is already the same quiz has nothing
+// useful to toggle to).
+function pqChipInner(problemId, quizNum) {
+  return `<span class="pq-label pq-label-p">${problemLabel(quizNum, problemId)}</span><span class="pq-label pq-label-q">Q${quizNum}</span>`;
+}
+function togglePQRow(btn) {
+  const row = btn.closest('.pq-row');
+  if (row) row.classList.toggle('show-q');
+}
+// Always renders the button, even for a single-quiz row — a real toggle
+// when showToggle is true, a visibly disabled (low-opacity, unclickable)
+// placeholder otherwise, so the control's position stays consistent
+// between cumulative and single-quiz rows instead of the row's width
+// jumping depending on which kind of attempt it was.
+function pqToggleButton(showToggle) {
+  return showToggle
+    ? `<button type="button" class="pq-toggle-btn" onclick="togglePQRow(this)">P⇄Q</button>`
+    : `<button type="button" class="pq-toggle-btn" disabled title="Only one quiz in this attempt">P⇄Q</button>`;
+}
+// "21 min 41 s" with each number in a larger accent-colored span and its
+// unit in a smaller muted one — mirrors the big-number/small-denominator
+// styling already used for the score itself, one size step down. Omits
+// the "min" pair entirely under a minute rather than always showing
+// "0 min", since that reads as noise on short attempts.
+function formatAttemptDuration(totalSeconds) {
+  const m = Math.floor(totalSeconds / 60);
+  const s = totalSeconds % 60;
+  const pair = (n, unit) => `<span class="result-duration-num">${n}</span><span class="result-duration-unit">${unit}</span>`;
+  return (m > 0 ? pair(m, 'min') : '') + pair(s, 's');
+}
+
+// ─── Recent attempts mini-panel (last 5, shown under the result panel) ─────
+// recordAttemptFromQuiz() (js/stats.js) is async — its localStorage save
+// only actually lands after an `await crypto.subtle.digest(...)` call, so
+// the freshly-finished attempt is NOT yet in loadStats() synchronously
+// right here in checkAll(). renderRecentAttemptsMini() is instead called
+// from onAttemptRecorded(), a hook stats.js fires right after it saves —
+// see that file. Calling it once here too would just flash a version of
+// the list missing the attempt that was literally just taken.
+function onAttemptRecorded() {
+  renderRecentAttemptsMini();
+  renderAttemptTopicsMini();
+}
+
+// ─── "Topics in this attempt" (under "Last attempts") ──────────────────────
+// The topics that appeared in the attempt just recorded (up to QUIZ_SIZE),
+// each with the same rows as the Stats screen's Topics card — average with
+// its interval, best, hover details — over all history, this attempt
+// included. No quiz grouping. Rows come from topicRowsForAttemptHtml()
+// (js/stats.js); same timing as the panel above (see onAttemptRecorded).
+function renderAttemptTopicsMini() {
+  const panel = document.getElementById('attemptTopicsPanel');
+  const list  = document.getElementById('attemptTopicsList');
+  if (!panel || !list || typeof loadStats !== 'function' || typeof topicRowsForAttemptHtml !== 'function') return;
+  const latest = loadStats().slice(-1)[0];          // append-ordered: the one just recorded
+  const rows = topicRowsForAttemptHtml(latest);
+  if (!rows) { panel.classList.remove('show'); return; }
+  const legend = document.getElementById('attemptTopicsLegend');
+  if (legend && typeof TP_LEGEND_HTML !== 'undefined') legend.innerHTML = TP_LEGEND_HTML;
+  list.innerHTML = `<div class="tp-group">${rows}</div>`;
+  panel.classList.add('show');
+}
+
+function renderRecentAttemptsMini() {
+  const panel = document.getElementById('recentAttemptsPanel');
+  const list  = document.getElementById('recentAttemptsList');
+  if (!panel || !list || typeof loadStats !== 'function') return;
+
+  // Most recent 5 across every quiz/mode — loadStats() is append-ordered
+  // (oldest first), so the tail is the newest.
+  const recent = loadStats().slice(-5).reverse();
+
+  if (recent.length === 0) {
+    list.innerHTML = '<div class="recent-attempts-empty">No previous attempts yet.</div>';
+  } else {
+    list.innerHTML = recent.map(a => {
+      const dateStr = new Date(a.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' });
+      const timeStr = new Date(a.date).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+      const scoreStr = Number.isInteger(a.score) ? a.score : a.score.toFixed(1);
+      // Only worth a toggle if this attempt actually mixed problems from
+      // more than one quiz (cumulative mode) — a single-quiz attempt has
+      // nothing to switch to, so it keeps the plain P-only chip it always had.
+      const rowShowToggle = new Set((a.answers || []).map(ans => ans.quiz_num || a.quizNum)).size > 1;
+      const boxes = (a.answers || []).map(ans => {
+        const cls = ans.points === 1 ? 'score-box-correct' : ans.points === 0.9 ? 'score-box-partial' : 'score-box-wrong';
+        const problemId = String(ans.problem_id || '').replace(/'/g, "\\'");
+        const qNum = ans.quiz_num || a.quizNum;
+        return `<span class="score-box score-box-sm ${cls} recent-attempt-problem" title="Open ${problemLabel(qNum, ans.problem_id)} forum" role="button" tabindex="0" onclick="openForumForProblem(${qNum}, '${problemId}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click();}">${pqChipInner(ans.problem_id, qNum)}</span>`;
+      }).join('') + pqToggleButton(rowShowToggle);
+      return `
+        <div class="recent-attempt-row">
+          <span class="recent-attempt-meta">
+            <span class="score">${scoreStr}/${a.maxScore}</span> · Q${a.quizNum} · ${dateStr} · ${timeStr}
+          </span>
+          <span class="recent-attempt-boxes pq-row">${boxes}</span>
+        </div>`;
+    }).join('');
+  }
+
+  panel.classList.add('show');
+}
+
+// Safely leaves the active quiz screen and lands on the full Stats screen —
+// openStatsScreen() (js/stats.js) assumes it's being called from the
+// landing screen (it only fades *that* out), so appPage needs to be hidden
+// here first or the quiz would keep showing underneath it. Mirrors the
+// "leaving appPage" half of goToMainMenu()'s fromApp branch, just without
+// the "go to landing" second half.
+function openFullStatsFromQuiz() {
+  const appPage = document.getElementById('appPage');
+  if (!appPage.classList.contains('visible')) {
+    if (typeof openStatsScreen === 'function') openStatsScreen();
+    return;
+  }
+  appPage.classList.add('fading-out');
+  setTimeout(() => {
+    appPage.classList.remove('visible', 'fading-out');
+    if (typeof stopForumProblemCountsPolling === 'function') stopForumProblemCountsPolling();
+    if (typeof openStatsScreen === 'function') openStatsScreen();
+  }, 280);
 }
 
 // ─── Solve-all mode ──────────────────────────────────────────────────────────
 let solveAllProblems = [];
 let solveAllChecked = new Map(); // index -> 'correct' | 'partial' | 'wrong' | 'revealed'
 let solveAllLocked  = new Set();
+// Revealed cards whose answer was hidden again ("Hide correct answer").
+// Only how the card looks on this page: not saved or synced, so a reload
+// shows the answer again.
+let solveAllAnswerHidden = new Set();
 let solveAllAnswers = {};        // problemId -> { ans, unit } — persisted typed answers
 
 // Problem ids (P1, P2, ...) are only unique *within* a quiz, not across
@@ -600,19 +1084,21 @@ function buildSolveAllSnapshot() {
     const p = solveAllProblems[idx];
     if (!p) return;
     checkedById[p.id] = status;
-    // Save the typed answer text so it persists across reloads
-    const ansEl  = document.getElementById('sa-ans-'  + idx);
-    const unitEl = document.getElementById('sa-unit-' + idx);
-    if (ansEl || unitEl) {
-      answersById[p.id] = {
-        ans:  ansEl  ? ansEl.value  : '',
-        unit: unitEl ? unitEl.value : ''
-      };
+    // Save the typed answer text so it persists across reloads, in the
+    // {ans, unit} shape progress always had (split from the one field)
+    const ansEl = document.getElementById('sa-ans-' + idx);
+    if (ansEl) {
+      const { value, unit } = splitAnswer(ansEl.value);
+      answersById[p.id] = { ans: value, unit };
+    } else if (solveAllAnswers[p.id]) {
+      // Card not rendered yet (cards stream in in batches): send the saved
+      // answer, so the server copy doesn't lose it and the merge
+      // (mergeSolveAllSnapshots, js/solve-all-sync.js) sees every answer.
+      answersById[p.id] = solveAllAnswers[p.id];
     }
   });
   const lockedIds = [...solveAllLocked].map(idx => solveAllProblems[idx]?.id).filter(Boolean);
   return {
-    order: solveAllProblems.map(p => p.id),
     checkedById,
     lockedIds,
     answersById
@@ -628,14 +1114,20 @@ function applySolveAllMerge(serverSnapshot) {
   const merged = mergeSolveAllSnapshots(buildSolveAllSnapshot(), serverSnapshot);
 
   solveAllAnswers = { ...solveAllAnswers, ...merged.answersById };
-  const lockedIdSet = new Set(merged.lockedIds);
-
+  // An answer the merge dropped (the other side's status won and it had no
+  // answer) must not survive here either, or the card would show it again.
+  Object.keys(merged.checkedById).forEach(id => {
+    if (!(id in merged.answersById)) delete solveAllAnswers[id];
+  });
   solveAllProblems.forEach((p, idx) => {
     const newStatus = merged.checkedById[p.id];
     if (!newStatus || newStatus === solveAllChecked.get(idx)) return;
 
     solveAllChecked.set(idx, newStatus);
-    if (lockedIdSet.has(p.id)) solveAllLocked.add(idx);
+    // Only a solved card is locked. lockedIds can still list problems an
+    // older build locked when their answer was revealed; those stay open.
+    if (newStatus === 'correct') solveAllLocked.add(idx);
+    else solveAllLocked.delete(idx);
 
     // Only touch the DOM if this card has actually been rendered — if not,
     // renderSolveAll's own batch loop will read solveAllChecked at draw
@@ -644,13 +1136,74 @@ function applySolveAllMerge(serverSnapshot) {
     if (!card) return;
     resetCardVisuals(idx);
     restoreSolveAllCard(idx, p, newStatus, solveAllAnswers[p.id]);
-    if (newStatus === 'correct' || newStatus === 'revealed') {
-      document.getElementById('sa-btnrow-' + idx)?.querySelectorAll('.btn-retry, .btn-see-answer').forEach(el => el.remove());
+    if (newStatus === 'correct') {
+      card.querySelectorAll('.btn-retry, .btn-see-answer').forEach(el => el.remove());
     }
   });
 
+  // The other device may still carry an old-checker "correct" (see
+  // regradeSolveAllState below); it is re-checked before anything is saved
+  // or pushed, so the merge can't bring it back.
+  regradeSolveAllState();
+
   updateStickyScore();
   saveSolveAllProgress();
+}
+
+// ─── Re-check of old-checker results ──────────────────────────────────────
+// Until 2026-10-17 an answer counted as correct within |expected| × 1% +
+// 1e-10. That absolute 1e-10 floor let almost any small number through on
+// the problems below, whose answers are all under 1e-8 (e.g. 1.934e-19
+// passed for 6.5178e-13). On these problems only, a saved 'correct' or
+// 'partial' is checked again with the current checker and becomes 'wrong'
+// (unlocked, so it can be retried) when its value is out of tolerance.
+// Only a definite miss is downgraded: an answer that wasn't saved, doesn't
+// parse, or has a unit the checker can't read is left as it is. Every
+// device runs this on open and after each merge, so they all reach the same
+// result and the union merge (js/solve-all-sync.js) can't restore it.
+const SA_REGRADE_PROBLEMS = { 2: ['P19', 'P20'], 3: ['P5i', 'P6i'], 4: ['P45', 'P50', 'P64', 'P68'] };
+
+function _saFailsRegrade(p, answer) {
+  if (!answer || !String(answer.ans || '').trim()) return false;
+  const res = gradeAnswer(joinAnswer(answer.ans, answer.unit), p);
+  if (res.unitStatus === 'invalid') return false;
+  if (!PTAnswer.validateAnswer(res.value, ANSWER_TYPE).ok) return false;
+  return !res.valueOk;
+}
+
+/** Downgrades failed old-checker results in the open session (state and
+    any rendered cards). Returns true if anything changed; the caller saves. */
+function regradeSolveAllState() {
+  const ids = SA_REGRADE_PROBLEMS[selectedQuizNum];
+  if (!ids) return false;
+  let changed = false;
+  solveAllProblems.forEach((p, idx) => {
+    if (!ids.includes(p.id)) return;
+    const status = solveAllChecked.get(idx);
+    if (status !== 'correct' && status !== 'partial') return;
+    // A rendered card's field is what gets saved, so judge that; otherwise
+    // the saved answer.
+    const ansEl = document.getElementById('sa-ans-' + idx);
+    let answer = solveAllAnswers[p.id];
+    if (ansEl) {
+      const { value, unit } = splitAnswer(ansEl.value);
+      answer = { ans: value, unit };
+    }
+    if (!_saFailsRegrade(p, answer)) return;
+
+    solveAllChecked.set(idx, 'wrong');
+    solveAllLocked.delete(idx);
+    solveAllAnswers[p.id] = answer;
+    changed = true;
+
+    const card = document.getElementById('sa-card-' + idx);
+    if (!card) return;   // drawn later from solveAllChecked, as 'wrong'
+    resetCardVisuals(idx);
+    restoreSolveAllCard(idx, p, 'wrong', answer);
+    const btn = document.getElementById('sa-check-btn-' + idx);
+    if (btn) btn.classList.remove('checked');
+  });
+  return changed;
 }
 
 // Zeroes the live in-memory progress (and any already-rendered cards) back
@@ -666,12 +1219,13 @@ function applySolveAllReset() {
     const card = document.getElementById('sa-card-' + idx);
     if (!card) return;
     resetCardVisuals(idx);
-    document.getElementById('sa-btnrow-' + idx)?.querySelectorAll('.btn-retry, .btn-see-answer').forEach(el => el.remove());
+    card.querySelectorAll('.btn-retry, .btn-see-answer').forEach(el => el.remove());
     const btn = document.getElementById('sa-check-btn-' + idx);
     if (btn) { btn.textContent = 'Check'; btn.classList.remove('checked'); btn.disabled = false; }
   });
   solveAllChecked = new Map();
   solveAllLocked  = new Set();
+  solveAllAnswerHidden = new Set();
   solveAllAnswers = {};
   updateStickyScore();
   saveSolveAllProgress();
@@ -689,23 +1243,33 @@ function clearSolveAllProgress() {
   localStorage.removeItem(saStorageKey());
 }
 
+// "Random order" button's sample line: three distinct problem numbers,
+// reshuffled ~2.5 times a second while the Choose-the-order page is up.
+let _randomOrderSampleTimer = null;
+function _startRandomOrderSample() {
+  const el = document.getElementById('randomOrderSample');
+  if (!el) return;
+  const all = ACTIVE_PROBLEMS.map(p => problemNumber(selectedQuizNum, p.id));
+  const slot = `width:${String(Math.max(...all)).length}ch`;
+  function tick() {
+    if (document.getElementById('choicePage').classList.contains('hidden')) {
+      clearInterval(_randomOrderSampleTimer);
+      _randomOrderSampleTimer = null;
+      return;
+    }
+    const nums = pickRandom(all, 3);
+    el.innerHTML = '(' + nums.map(v => `<span class="order-choice-num" style="${slot}">${v}</span>`).join(', ') + '...)';
+  }
+  clearInterval(_randomOrderSampleTimer);
+  tick();
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  _randomOrderSampleTimer = setInterval(tick, 400);
+}
+
 function openSolveAllModal() {
-  const n = ACTIVE_PROBLEMS.length;
-  const saved = loadSolveAllProgress();
-  // Support both new (checkedById) and old (checked array) storage formats
-  const hasSaved = saved && (
-    (saved.checkedById && Object.keys(saved.checkedById).length > 0) ||
-    (saved.checked && saved.checked.length > 0)
-  );
-  document.getElementById('solveAllModalDesc').textContent =
-    `All ${n} problems will be shown at once. Choose how you'd like them ordered.`;
-  document.getElementById('solveAllOrderedLabel').textContent = `1 → ${n}`;
-  const progressHint = hasSaved ? 'progress kept' : 'ordered';
-  const shuffleHint  = hasSaved ? 'progress kept' : 'random order';
-  document.getElementById('solveAllOrderedSub').textContent = progressHint;
-  document.getElementById('solveAllShuffledSub').textContent = shuffleHint;
-  document.getElementById('solveAllResumeRow').style.display = hasSaved ? '' : 'none';
+  setChoiceView('order');
   fadeInScreen(document.getElementById('choicePage'), 380);
+  _startRandomOrderSample(); // after fadeInScreen un-hides the page, or tick() stops at once
 }
 
 function closeSolveAllModal() {
@@ -728,26 +1292,22 @@ function _startSolveAllCore(order) {
   const pool  = [...ACTIVE_PROBLEMS];
   const saved = loadSolveAllProgress();
 
-  if (order === 'resume' && saved && saved.order) {
-    // Restore exact saved order
-    const idMap = new Map(pool.map(p => [p.id, p]));
-    solveAllProblems = saved.order.map(id => idMap.get(id)).filter(Boolean);
-    const savedIds = new Set(saved.order);
-    pool.forEach(p => { if (!savedIds.has(p.id)) solveAllProblems.push(p); });
-  } else {
-    // Fresh order (1→N or shuffled)
-    solveAllProblems = [...pool];
-    if (order === 'unordered') {
-      for (let i = solveAllProblems.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [solveAllProblems[i], solveAllProblems[j]] = [solveAllProblems[j], solveAllProblems[i]];
-      }
+  // The card order is never stored or synced — it is decided locally every
+  // time Solve-All opens: 'ordered' = the quiz's own order (1→N), 'unordered'
+  // = a fresh shuffle each time. Progress is keyed by problem id, so it is
+  // applied below regardless of the order chosen.
+  solveAllProblems = [...pool];
+  if (order === 'unordered') {
+    for (let i = solveAllProblems.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [solveAllProblems[i], solveAllProblems[j]] = [solveAllProblems[j], solveAllProblems[i]];
     }
   }
 
   // Apply saved progress by problem ID (order-independent)
   solveAllChecked = new Map();
   solveAllLocked  = new Set();
+  solveAllAnswerHidden = new Set();
   solveAllAnswers = saved && saved.answersById ? { ...saved.answersById } : {};
   if (saved) {
     // Build ID-based maps from whatever format was saved
@@ -768,19 +1328,22 @@ function _startSolveAllCore(order) {
 
     solveAllProblems.forEach((p, idx) => {
       if (checkedById[p.id]) solveAllChecked.set(idx, checkedById[p.id]);
-      if (lockedIdSet.has(p.id)) solveAllLocked.add(idx);
+      // Revealed problems used to be locked too; now only solved ones are.
+      if (lockedIdSet.has(p.id) && checkedById[p.id] === 'correct') solveAllLocked.add(idx);
     });
+    // Before any card is drawn; saved (and pushed by the sync below) with
+    // the rest of the progress.
+    regradeSolveAllState();
   }
 
   // Hide normal quiz UI
   document.querySelector('main').style.display = 'none';
   document.querySelector('.actions').style.display = 'none';
-  document.querySelector('.topic-selector').style.display = 'none';
+  document.querySelector('.topic-selector-wrap').style.display = 'none';
   document.getElementById('resultPanel').style.display = 'none';
-  document.getElementById('guideMain').style.display = 'none';
-  document.querySelector('.quiz-top-row').style.display = 'none';
+  document.getElementById('recentAttemptsPanel').style.display = 'none';
+  document.getElementById('attemptTopicsPanel').style.display = 'none';
   document.querySelector('header').style.display = 'none';
-  document.getElementById('filterResetRow').style.display = 'none';
 
   // Show solve-all mode
   const modeEl = document.getElementById('solveAllMode');
@@ -809,18 +1372,18 @@ function _startSolveAllCore(order) {
 function _exitSolveAllScreenDom() {
   document.querySelector('main').style.display = '';
   document.querySelector('.actions').style.display = '';
-  document.querySelector('.topic-selector').style.display = '';
+  document.querySelector('.topic-selector-wrap').style.display = '';
   document.getElementById('resultPanel').style.display = '';
-  document.getElementById('guideMain').style.display = '';
-  document.querySelector('.quiz-top-row').style.display = '';
+  document.getElementById('recentAttemptsPanel').style.display = '';
+  document.getElementById('attemptTopicsPanel').style.display = '';
   document.querySelector('header').style.display = '';
-  document.getElementById('filterResetRow').style.display = '';
 
   document.getElementById('solveAllMode').classList.remove('active');
   document.getElementById('stickyScore').classList.remove('visible');
 
   solveAllChecked = new Map();
   solveAllLocked  = new Set();
+  solveAllAnswerHidden = new Set();
   solveAllProblems = [];
   solveAllAnswers = {};
   updateStickyScore();
@@ -892,7 +1455,7 @@ function resetSolveAll() {
 }
 
 // solveAllChecked: index -> 'correct' | 'partial' | 'wrong' | 'revealed'
-// solveAllLocked:  Set of indices permanently locked (answer was revealed)
+// solveAllLocked:  Set of indices locked for good (solved correctly)
 
 function renderSolveAll() {
   const container = document.getElementById('solveAllContainer');
@@ -912,50 +1475,80 @@ function renderSolveAll() {
       subEl.classList.toggle('show', hasUncached);
     }
     runWithLoadingScreen(screen, container, () => buildSolveAllCards(container), cacheTypesetBatch)
-      .then(persistMathCacheStyles);
-  });
-}
-
-// Manual "Rerender Equations" action: forces every problem in the current
-// Solve-All set to be re-typeset from scratch, discarding (and then
-// replacing) whatever's in the persistent render cache for them. This is
-// a lighter fix than clearing the whole cache — it only touches the set
-// that's actually on screen — and reuses the exact same loading-screen /
-// chunked-typesetting pipeline as a normal open, so the familiar loading
-// bar plays and answered/checked progress is restored afterward exactly
-// as it is on any other rebuild (see buildSolveAllCards).
-function rerenderSolveAllEquations() {
-  const btn = document.querySelector('.btn-rerender-eqs');
-  if (btn) btn.disabled = true;
-
-  initMathCache().then(() => {
-    for (const p of solveAllProblems) deleteCachedMathHTML(mathCacheKeyFor(p));
-
-    const container = document.getElementById('solveAllContainer');
-    const screen = document.getElementById('solveAllLoadingScreen');
-    const subEl  = document.getElementById('solveAllLoadingSub');
-    // Every card is a guaranteed cache miss now, so this pass always
-    // re-typesets the full set — show the "first time" hint accordingly.
-    if (subEl) subEl.classList.add('show');
-
-    runWithLoadingScreen(screen, container, () => buildSolveAllCards(container), cacheTypesetBatch)
-      .then(persistMathCacheStyles)
-      .finally(() => { if (btn) btn.disabled = false; });
+      .then(finalizeFreshMathCache)
+      .then(() => { if (typeof prepareCardMotion === 'function') prepareCardMotion(container); });
   });
 }
 
 // Called after each batch of cards actually gets typeset by MathJax (i.e.
-// excluding cards restored from cache). Captures the fresh output so the
-// next time solve-all is opened — even after a reload — these same cards
-// can skip MathJax entirely.
-function cacheTypesetBatch(batch) {
+// excluding cards restored from cache). Captures the fresh output — HTML
+// plus the exact CSS rules it needs (extractCssForHtml), as one bundle —
+// so the next time solve-all is opened, even after a reload, these same
+// cards can skip MathJax entirely and still render correctly on their
+// own. See math-cache.js's file header for why HTML and CSS are stored
+// together rather than through a separate shared stylesheet.
+//
+// Async, and every write below is awaited (not fire-and-forget):
+// storeCachedMathHTML returns its IndexedDB write's own promise,
+// resolving only once that transaction's oncomplete actually fires —
+// i.e. once the browser considers it durably committed, not just handed
+// off. renderMathInBatches awaits this function before starting the next
+// batch, so a reload can't land between "this batch looked done" and
+// "its write actually finished" — the remaining risk is only ever
+// whatever's still in the very batch the user interrupted mid-typeset,
+// which was never cached at all and just re-typesets cleanly next time.
+//
+// Also records each card in _freshlyCachedThisRender so
+// finalizeFreshMathCache can double-check it once the whole render is
+// done (see that function for why).
+let _freshlyCachedThisRender = [];
+
+// The problem, and its cache key, that each Solve-All card was built for.
+// Typesetting runs a batch at a time, asynchronously: by the time a batch is
+// cached, Solve-All may already have been reopened for another quiz, and
+// solveAllProblems[i] / selectedQuizNum then describe a different problem.
+// Looking them up that late stored one quiz's cards under another quiz's
+// keys, with a matching text hash, so those problems later showed the wrong
+// text from the cache.
+const _saCardSource = new WeakMap();
+
+async function cacheTypesetBatch(batch) {
   for (const card of batch) {
-    const idx = card.id.replace('sa-card-', '');
-    const p = solveAllProblems[idx];
-    if (!p) continue;
+    const src = _saCardSource.get(card);
+    if (!src) continue;
     const textEl = card.querySelector('.problem-text');
     if (!textEl) continue;
-    storeCachedMathHTML(mathCacheKeyFor(p), mathCacheHashOf(p.text), textEl.innerHTML);
+    // Figures go into the cache as their original <img> (js/figure-style.js
+    // swaps in the redrawn SVG on display), so a cached card never keeps a
+    // drawing that a later export has changed.
+    const html = typeof figuresAsOriginal === 'function' ? figuresAsOriginal(textEl.innerHTML) : textEl.innerHTML;
+    const css = extractCssForHtml(html);
+    await storeCachedMathHTML(src.key, mathCacheHashOf(src.p.text), html, css);
+    _freshlyCachedThisRender.push(src);
+  }
+}
+
+// Safety net, run once after the whole card-building pass finishes (see
+// renderSolveAll). extractCssForHtml is called
+// per-batch, immediately after that batch's own typesetting — real
+// testing found that MathJax's dynamic stylesheet can still lag a frame
+// behind at that exact point even with the frame tick renderMathInBatches
+// now inserts first, so a card can end up cached with only some (or
+// none) of the CSS rules it actually needs. By the time the *entire*
+// render is finished, that stylesheet is unambiguously complete and
+// stable — so re-running extraction here, against the final state, and
+// overwriting anything that was captured incompletely, closes the gap
+// for good regardless of exactly where the per-batch timing lands.
+async function finalizeFreshMathCache() {
+  const entries = _freshlyCachedThisRender;
+  _freshlyCachedThisRender = [];
+  for (const { p, key } of entries) {
+    const existing = getCachedMathHTML(key, p.text);
+    if (!existing) continue; // text changed again already, or something else invalidated it — skip
+    const css = extractCssForHtml(existing.html);
+    if (css && css !== existing.css) {
+      await storeCachedMathHTML(key, mathCacheHashOf(p.text), existing.html, css);
+    }
   }
 }
 
@@ -965,7 +1558,15 @@ function cacheTypesetBatch(batch) {
 // animation (see runWithLoadingScreen in math-render.js for why that
 // matters). Returns a promise so the caller can wait for it to finish.
 function buildSolveAllCards(container, batchSize = 12) {
+  if (typeof releaseCardMotion === 'function') releaseCardMotion(container);
   container.innerHTML = '';
+
+  // Every card restored from cache carries its own CSS bundled with its
+  // HTML (see math-cache.js) — collect those snippets as we go and keep
+  // injecting the running union after each batch, so cards already on
+  // screen always have the rules they need by the time they're visible,
+  // without waiting for the whole set to finish building.
+  const restoredCss = [];
 
   return new Promise((resolve, reject) => {
     let i = 0;
@@ -981,40 +1582,56 @@ function buildSolveAllCards(container, batchSize = 12) {
           const card = document.createElement('div');
           card.className = 'problem-card';
           card.id = 'sa-card-' + i;
+          _saCardSource.set(card, { p, key: mathCacheKeyFor(p) });
 
           // If this exact problem text was already typeset in a previous
-          // visit, reuse that HTML directly and skip MathJax for this card
-          // entirely (see math-cache.js). A 'mj-cached' card whose text
-          // hasn't changed since caching needs no re-typesetting; if the
-          // text has changed, getCachedMathHTML returns null and we fall
-          // back to the normal raw-text path below.
-          const cachedText = getCachedMathHTML(mathCacheKeyFor(p), p.text);
-          if (cachedText !== null) card.classList.add('mj-cached');
+          // visit, reuse that HTML+CSS bundle directly and skip MathJax
+          // for this card entirely (see math-cache.js). A 'mj-cached'
+          // card whose text hasn't changed since caching needs no
+          // re-typesetting; if the text has changed, getCachedMathHTML
+          // returns null and we fall back to the normal raw-text path
+          // below (MathJax will typeset it and cacheTypesetBatch will
+          // capture a fresh bundle for it).
+          const cached = getCachedMathHTML(mathCacheKeyFor(p), p.text);
+          if (cached !== null) {
+            card.classList.add('mj-cached');
+            if (cached.css) restoredCss.push(cached.css);
+          }
 
           card.innerHTML = `
             <div class="card-header">
-              <span class="problem-num">${p.id}</span>
+              <span class="problem-num">${problemLabel(p._quizNum || selectedQuizNum, p.id)}</span>
+              ${typeof handoutButtonHtml === 'function' ? handoutButtonHtml(p._quizNum || selectedQuizNum) : ''}
               <span class="problem-topic">${p.topic}</span>
+              ${typeof problemFlagHtml === 'function' ? problemFlagHtml(p._quizNum || selectedQuizNum, p.id) : ''}
             </div>
-            <div class="problem-text">${cachedText !== null ? cachedText : p.text}</div>
+            <div class="problem-text">${cached !== null ? cached.html : p.text}</div>
             <div class="answer-row">
-              <span class="answer-label">Value =</span>
-              <input class="answer-input" id="sa-ans-${i}" type="text" placeholder="e.g. 3.2e-8" autocomplete="off" spellcheck="false">
-              <span class="sep">·</span>
-              <input class="unit-input" id="sa-unit-${i}" type="text" placeholder="e.g. N/C" autocomplete="off" spellcheck="false">
+              ${answerInputHtml(`sa-ans-${i}`)}
             </div>
-            <div class="feedback" id="sa-fb-${i}"></div>
+            <div class="card-result">
+              <div class="feedback" id="sa-fb-${i}"></div>
+              <div class="card-fold"><div class="card-fold-text"></div></div>
+            </div>
             <div class="card-check-row" id="sa-btnrow-${i}">
-              <button class="forum-problem-btn" id="sa-forum-btn-${i}" title="Forum thread for ${p.id}"
+              <button class="forum-problem-btn" id="sa-forum-btn-${i}" title="Forum thread for ${problemLabel(p._quizNum || selectedQuizNum, p.id)}"
                 onclick="openForumForProblem(${p._quizNum || selectedQuizNum}, '${p.id}')">
-                💬 <span id="sa-forum-total-${i}"></span>
+                💬 <span class="forum-tab-label">Discuss</span> <span id="sa-forum-total-${i}"></span>
                 <span class="forum-problem-btn-badge" id="sa-forum-badge-${i}" style="display:none;"></span>
                 <span class="forum-problem-btn-at" id="sa-forum-at-${i}" style="display:none;">@</span>
               </button>
+              <!-- Solve-them-all is the "work through it with help" mode, so
+                   the solution is available from the start (unlike Random
+                   quiz, where it only appears once scores are revealed). -->
+              <button class="solution-btn" data-quiz="${p._quizNum || selectedQuizNum}" data-problem="${p.id}" style="display:none;"
+                title="Worked solution for ${problemLabel(p._quizNum || selectedQuizNum, p.id)}"
+                onclick="openSolution(${p._quizNum || selectedQuizNum}, '${p.id}')">📘 Solution</button>
+              ${typeof mistakeButtonHtml === 'function' ? mistakeButtonHtml(p._quizNum || selectedQuizNum, p.id) : ''}
               <button class="check-problem-btn" id="sa-check-btn-${i}" onclick="checkSingleProblem(${i})">Check</button>
             </div>
           `;
 
+          if (typeof placeCardParts === 'function') placeCardParts(card);
           frag.appendChild(card);
 
           // `i` is declared once, outside this for-loop, and shared across
@@ -1024,10 +1641,9 @@ function buildSolveAllCards(container, batchSize = 12) {
           // Enter is actually pressed, not this card's own index. Capture
           // it per-iteration so each card's listener checks itself.
           const idx = i;
-          card.querySelector(`#sa-ans-${i}`).addEventListener('keydown', e => {
-            if (e.key === 'Enter') { e.preventDefault(); document.getElementById(`sa-unit-${idx}`).focus(); }
-          });
-          card.querySelector(`#sa-unit-${i}`).addEventListener('keydown', e => {
+          const ansInput = card.querySelector(`#sa-ans-${i}`);
+          attachAnswerPreview(ansInput);
+          ansInput.addEventListener('keydown', e => {
             if (e.key === 'Enter') { e.preventDefault(); checkSingleProblem(idx); }
           });
         }
@@ -1037,6 +1653,15 @@ function buildSolveAllCards(container, batchSize = 12) {
         // document.getElementById, which only finds nodes that are
         // actually in the document (not ones still sitting in a fragment).
         container.appendChild(frag);
+        // Same pass the Random-quiz render() does, once per batch so the
+        // 📘 buttons appear as cards stream in.
+        if (typeof refreshSolutionButtons === 'function') refreshSolutionButtons();
+
+        // Cheap dedup-by-selector pass over whatever's been restored so
+        // far (see injectRestoredStyles) — cards from this and every
+        // earlier batch this build are covered before the browser gets a
+        // chance to paint them without their glyph rules.
+        if (restoredCss.length) injectRestoredStyles(restoredCss);
 
         for (let j = batchStart; j < end; j++) {
           const p = solveAllProblems[j];
@@ -1061,121 +1686,108 @@ function buildSolveAllCards(container, batchSize = 12) {
 function restoreSolveAllCard(i, p, status, savedAnswer) {
   const card   = document.getElementById('sa-card-' + i);
   const ansEl  = document.getElementById('sa-ans-' + i);
-  const unitEl = document.getElementById('sa-unit-' + i);
   const fb     = document.getElementById('sa-fb-' + i);
   const btn    = document.getElementById('sa-check-btn-' + i);
   const btnRow = document.getElementById('sa-btnrow-' + i);
+  // Saved as {ans, unit}; the field shows them together
+  const saved = savedAnswer ? joinAnswer(savedAnswer.ans, savedAnswer.unit) : '';
 
   fb.classList.add('show');
 
   if (status === 'correct') {
     card.classList.add('correct');
     // Restore typed answer; fall back to correct answer if missing
-    ansEl.value  = savedAnswer ? savedAnswer.ans  : fmt(p.answer);
-    unitEl.value = savedAnswer ? savedAnswer.unit : fmtUnit(p.units);
-    ansEl.disabled = unitEl.disabled = true;
-    ansEl.classList.add('correct-input');
-    unitEl.classList.add('correct-unit');
+    ansEl.value = savedAnswer ? saved : expectedAnswerText(p);
+    ansEl.disabled = true;
+    markAnswerInput(ansEl, 1);
     fb.classList.add('correct-fb');
     fb.innerHTML = `✓ Correct <span class="pts-badge pts-full">+1 pt</span>`;
     btn.textContent = '✓ Correct'; btn.classList.add('checked'); btn.disabled = true;
 
   } else if (status === 'partial') {
     card.classList.add('partial');
-    ansEl.value  = savedAnswer ? savedAnswer.ans  : '';
-    unitEl.value = savedAnswer ? savedAnswer.unit : '';
-    ansEl.disabled = unitEl.disabled = false;
-    ansEl.classList.add('correct-input');
-    unitEl.classList.add('partial-unit');
+    ansEl.value = saved;
+    ansEl.disabled = false;
+    markAnswerInput(ansEl, 0.9);
     fb.classList.add('partial-fb');
     fb.innerHTML = `✓ Value correct, but unit needs fixing <span class="pts-badge pts-partial">+0.9 pt</span>`;
-    btn.textContent = '↺ Try again'; btn.disabled = false;
-    if (!btnRow.querySelector('.btn-see-answer')) {
-      const seeBtn = document.createElement('button');
-      seeBtn.className = 'btn-see-answer'; seeBtn.textContent = 'See correct answer';
-      seeBtn.onclick = () => revealAnswer(i);
-      btnRow.insertBefore(seeBtn, btn);
-    }
+    btn.textContent = '↺ Retry'; btn.disabled = false;
+    syncSeeAnswerButton(i);
 
   } else if (status === 'wrong') {
     card.classList.add('wrong');
-    ansEl.value  = savedAnswer ? savedAnswer.ans  : '';
-    unitEl.value = savedAnswer ? savedAnswer.unit : '';
-    ansEl.disabled = unitEl.disabled = false;
-    ansEl.classList.add('wrong-input');
-    unitEl.classList.add('wrong-unit');
+    ansEl.value = saved;
+    ansEl.disabled = false;
+    markAnswerInput(ansEl, 0);
     fb.classList.add('wrong-fb');
     fb.innerHTML = `✗ Wrong answer <span class="pts-badge pts-zero">+0 pt</span>`;
-    btn.textContent = '↺ Try again'; btn.disabled = false;
-    if (!btnRow.querySelector('.btn-see-answer')) {
-      const seeBtn = document.createElement('button');
-      seeBtn.className = 'btn-see-answer'; seeBtn.textContent = 'See correct answer';
-      seeBtn.onclick = () => revealAnswer(i);
-      btnRow.insertBefore(seeBtn, btn);
-    }
+    if (typeof showMistakeHit === 'function') showMistakeHit(fb, saved, p, p._quizNum || selectedQuizNum);
+    btn.textContent = '↺ Retry'; btn.disabled = false;
+    syncSeeAnswerButton(i);
 
   } else if (status === 'revealed') {
+    // Answer seen but not solved yet: still open to try again (revealAnswer).
     card.classList.add('wrong');
-    ansEl.value = fmt(p.answer); unitEl.value = fmtUnit(p.units);
-    ansEl.disabled = unitEl.disabled = true;
-    ansEl.classList.add('wrong-input'); unitEl.classList.add('wrong-unit');
+    ansEl.value = saved;
+    ansEl.disabled = false;
+    markAnswerInput(ansEl, 0);
     fb.classList.add('wrong-fb');
-    fb.innerHTML = `👁 Answer revealed — no points awarded <span class="pts-badge pts-zero">+0 pt</span>`;
-    btn.textContent = '✗ Revealed'; btn.classList.add('checked'); btn.disabled = true;
+    fb.innerHTML = solveAllAnswerHidden.has(i) ? hiddenAnswerFeedbackHtml() : revealedFeedbackHtml(p);
+    if (typeof showMistakeHit === 'function') showMistakeHit(fb, saved, p, p._quizNum || selectedQuizNum);
+    btn.textContent = '↺ Retry'; btn.classList.remove('checked'); btn.disabled = false;
+    syncSeeAnswerButton(i);
   }
+  syncCardFold(i);
 }
 
 function resetCardVisuals(i) {
   const card   = document.getElementById('sa-card-' + i);
   const ansEl  = document.getElementById('sa-ans-' + i);
-  const unitEl = document.getElementById('sa-unit-' + i);
   const fb     = document.getElementById('sa-fb-' + i);
 
   card.classList.remove('correct', 'partial', 'wrong');
-  ansEl.classList.remove('correct-input', 'partial-input', 'wrong-input');
-  unitEl.classList.remove('correct-unit', 'partial-unit', 'wrong-unit');
+  markAnswerInput(ansEl, null);
   fb.classList.remove('show', 'correct-fb', 'partial-fb', 'wrong-fb');
   fb.innerHTML = '';
-  ansEl.disabled  = false;
-  unitEl.disabled = false;
-  ansEl.value  = '';
-  unitEl.value = '';
+  if (typeof clearMistakeHit === 'function') clearMistakeHit(card);
+  if (typeof clearCardResult === 'function') clearCardResult(card);
+  ansEl.disabled = false;
+  ansEl.value = '';
+}
+
+// A wrong answer in Solve them all briefly lights up the card's
+// "📘 Solution" button (css/solutions.css, .solution-btn-hint), a nudge
+// toward it. Nothing when the problem has no solution (button hidden).
+function hintSolutionButton(row) {
+  const sol = row && row.querySelector('.solution-btn');
+  if (!sol || sol.style.display === 'none') return;
+  sol.classList.remove('solution-btn-hint');
+  void sol.offsetWidth;                 // restart it on a second wrong answer
+  sol.classList.add('solution-btn-hint');
 }
 
 function checkSingleProblem(i) {
-  // Permanently locked (answer was revealed)
+  // Solved already: locked for good
   if (solveAllLocked.has(i)) return;
+  const wasRevealed = solveAllChecked.get(i) === 'revealed';
 
   const p      = solveAllProblems[i];
   const card   = document.getElementById('sa-card-' + i);
   const ansEl  = document.getElementById('sa-ans-' + i);
-  const unitEl = document.getElementById('sa-unit-' + i);
   const fb     = document.getElementById('sa-fb-' + i);
   const btn    = document.getElementById('sa-check-btn-' + i);
   const btnRow = document.getElementById('sa-btnrow-' + i);
 
-  const numOk  = numberCorrect(ansEl.value, p.answer, unitConversionFactor(unitEl.value, p.units));
-  const uStat  = unitStatus(unitEl.value, p.units);
-  const unitOk = uStat === 'ok';
-  const pts    = numOk ? (unitOk ? 1 : 0.9) : 0;
+  const res = gradeAnswer(ansEl.value, p);
+  const pts = res.pts;
 
   // Reset previous styling before re-applying
   card.classList.remove('correct', 'partial', 'wrong');
-  ansEl.classList.remove('correct-input', 'partial-input', 'wrong-input');
-  unitEl.classList.remove('correct-unit', 'partial-unit', 'wrong-unit');
   fb.classList.remove('correct-fb', 'partial-fb', 'wrong-fb');
 
-  // Disable inputs while showing result
-  ansEl.disabled  = true;
-  unitEl.disabled = true;
-
-  // Style inputs
-  ansEl.classList.add(numOk ? 'correct-input' : 'wrong-input');
-  if (numOk) {
-    unitEl.classList.add(unitOk ? 'correct-unit' : 'partial-unit');
-  } else {
-    unitEl.classList.add('wrong-unit');
-  }
+  // Disable the field while showing the result, and style it
+  ansEl.disabled = true;
+  markAnswerInput(ansEl, pts);
 
   // Card border
   if      (pts === 1)   card.classList.add('correct');
@@ -1196,41 +1808,53 @@ function checkSingleProblem(i) {
     btn.textContent = '✓ Correct';
     btn.classList.add('checked');
     btn.disabled = true;
+    if (typeof flashCheckResult === 'function') flashCheckResult(btn, 'right');
     // Remove any old retry/see-answer buttons
-    btnRow.querySelectorAll('.btn-retry, .btn-see-answer').forEach(el => el.remove());
+    card.querySelectorAll('.btn-retry').forEach(el => el.remove());
+    removeSeeButton(card);
+    smoothCardChange(card, () => {
+      if (typeof clearMistakeHit === 'function') clearMistakeHit(card);
+      syncCardFold(i);
+    });
 
   } else {
     // ── Wrong or partial: allow retry ──────────────────────────────────────
     const resultType = pts === 0.9 ? 'partial' : 'wrong';
-    solveAllChecked.set(i, resultType);
+    // Once its answer has been seen a problem stays 'revealed' until it is
+    // solved: that status outranks wrong and partial in the cross-device
+    // merge (_saStatusRank, js/solve-all-sync.js), so going back to them
+    // would only be undone by the next sync.
+    solveAllChecked.set(i, wasRevealed ? 'revealed' : resultType);
+    if (resultType === 'wrong' && typeof flashCheckResult === 'function') flashCheckResult(btn, 'wrong');
+    const hintsMistake = typeof mistakeWillHint === 'function' && mistakeWillHint(ansEl.value, p, p._quizNum || selectedQuizNum);
+    if (resultType === 'wrong' && !hintsMistake) hintSolutionButton(btnRow);
 
-    if (pts === 0.9) {
-      fb.classList.add('partial-fb');
-      const unitHint = uStat === 'invalid'
-        ? `unit format invalid — use spaces to multiply, e.g. <strong>${fmtUnit(p.units)}</strong>`
-        : `unit should be <strong>${fmtUnit(p.units)}</strong>`;
-      fb.innerHTML = `✓ Value correct, but ${unitHint} <span class="pts-badge pts-partial">+0.9 pt</span>`;
-    } else {
-      fb.classList.add('wrong-fb');
-      fb.innerHTML = `✗ Wrong answer <span class="pts-badge pts-zero">+0 pt</span>`;
+    // Settings > Study > "Reveal wrong answer instantly" — a genuinely
+    // wrong answer (not partial-credit unit slip-ups, which still get a
+    // real shot at just fixing the unit) skips straight to revealAnswer(i)
+    // instead of the manual "See correct answer" step below.
+    if (!wasRevealed && resultType === 'wrong' && typeof getSetting === 'function' && getSetting('study', 'revealWrongInstantly') === true) {
+      revealAnswer(i);
+      return;
     }
+
+    fb.classList.add(pts === 0.9 ? 'partial-fb' : 'wrong-fb');
+    // The answer is no secret any more once revealed: a wrong one shows
+    // it, unless it was hidden again.
+    fb.innerHTML = answerFeedbackHtml(res, p, wasRevealed && !solveAllAnswerHidden.has(i));
 
     // Update check button label but keep it active for retry
-    btn.textContent = '↺ Try again';
+    btn.textContent = '↺ Retry';
     btn.classList.remove('checked');
     btn.disabled = false;
-    // Re-enable inputs for retry
-    ansEl.disabled  = false;
-    unitEl.disabled = false;
+    // Re-enable the field for retry
+    ansEl.disabled = false;
 
-    // Add "See correct answer" button if not already there
-    if (!btnRow.querySelector('.btn-see-answer')) {
-      const seeBtn = document.createElement('button');
-      seeBtn.className = 'btn-see-answer';
-      seeBtn.textContent = 'See correct answer';
-      seeBtn.onclick = () => revealAnswer(i);
-      btnRow.insertBefore(seeBtn, btn);
-    }
+    syncSeeAnswerButton(i);
+    smoothCardChange(card, () => {
+      if (typeof showMistakeHit === 'function') showMistakeHit(fb, ansEl.value, p, p._quizNum || selectedQuizNum, true);
+      syncCardFold(i);
+    });
   }
 
   updateStickyScore();
@@ -1238,45 +1862,104 @@ function checkSingleProblem(i) {
   if (typeof broadcastSolveAllChange === 'function') broadcastSolveAllChange();
 }
 
+// The feedback line of a card whose answer was revealed, and of one whose
+// answer was hidden again.
+function revealedLineHtml(p) {
+  return `👁 Correct answer ≈ <strong>${fmt(p.answer)}</strong> ${fmtUnit(p.units)}`;
+}
+function revealedFeedbackHtml(p) {
+  return `${revealedLineHtml(p)} <span class="pts-badge pts-zero">+0 pt</span>`;
+}
+function hiddenAnswerFeedbackHtml() {
+  return `👁 Correct answer hidden <span class="pts-badge pts-zero">+0 pt</span>`;
+}
+
+// The card's answer button, added if missing: "See correct answer", or
+// "Hide correct answer" while a revealed answer is on show.
+function syncSeeAnswerButton(i) {
+  const card = document.getElementById('sa-card-' + i);
+  const btn  = document.getElementById('sa-check-btn-' + i);
+  if (!card || !btn) return;
+  let seeBtn = card.querySelector('.btn-see-answer');
+  if (!seeBtn) {
+    seeBtn = document.createElement('button');
+    seeBtn.className = 'btn-see-answer see-entering';
+    seeBtn.addEventListener('animationend', () => seeBtn.classList.remove('see-entering'), { once: true });
+    seeBtn.innerHTML = SEE_ANSWER_HTML;
+    btn.before(seeBtn);
+    placeCardParts(card);
+  }
+  const shown = solveAllChecked.get(i) === 'revealed' && !solveAllAnswerHidden.has(i);
+  const label = shown ? 'Hide correct answer' : 'See correct answer';
+  seeBtn.querySelector('.see-label').textContent = label;
+  seeBtn.title = label;
+  seeBtn.setAttribute('aria-label', label);
+  seeBtn.classList.toggle('open', shown);
+  seeBtn.onclick = () => (shown ? hideRevealedAnswer(i) : revealAnswer(i));
+}
+
+// The box under the field (Inline and Tabs): what's left to fix in the answer,
+// and the correct answer while it's on show.
+function syncCardFold(i) {
+  const card = document.getElementById('sa-card-' + i);
+  const fold = card && card.querySelector('.card-fold');
+  if (!fold) return;
+  const status = solveAllChecked.get(i);
+  const p = solveAllProblems[i];
+  const lines = [];
+  if (status && status !== 'correct') {
+    const notice = answerNoticeHtml(gradeAnswer(document.getElementById('sa-ans-' + i).value, p), p, status === 'revealed');
+    if (notice) lines.push(notice);
+    if (status === 'revealed' && !solveAllAnswerHidden.has(i)) lines.push(revealedLineHtml(p));
+  }
+  setCardFold(fold, lines.map(line => `<div>${line}</div>`).join(''));
+}
+
+// "Hide correct answer": takes the answer off the card again. The card
+// still counts as revealed; "See correct answer" brings it back.
+function hideRevealedAnswer(i) {
+  const fb = document.getElementById('sa-fb-' + i);
+  solveAllAnswerHidden.add(i);
+  const p = solveAllProblems[i];
+  if (fb) fb.innerHTML = hiddenAnswerFeedbackHtml();
+  if (typeof showMistakeHit === 'function') showMistakeHit(fb, document.getElementById('sa-ans-' + i).value, p, p._quizNum || selectedQuizNum);
+  syncSeeAnswerButton(i);
+  smoothCardChange(fb.closest('.problem-card'), () => syncCardFold(i));
+}
+
+// "See correct answer": shows the answer under the field without locking
+// the card — the worked solution is open from the start in this mode
+// anyway. The card counts as ✗ ('revealed') until it is answered
+// correctly, which then counts as ✓ like any other correct answer.
 function revealAnswer(i) {
   const p      = solveAllProblems[i];
   const card   = document.getElementById('sa-card-' + i);
   const ansEl  = document.getElementById('sa-ans-' + i);
-  const unitEl = document.getElementById('sa-unit-' + i);
   const fb     = document.getElementById('sa-fb-' + i);
   const btn    = document.getElementById('sa-check-btn-' + i);
-  const btnRow = document.getElementById('sa-btnrow-' + i);
 
-  // Lock permanently
-  solveAllLocked.add(i);
   solveAllChecked.set(i, 'revealed');
+  solveAllAnswerHidden.delete(i);
 
-  // Show the answer in the fields
-  ansEl.value    = fmt(p.answer);
-  unitEl.value   = fmtUnit(p.units);
-  ansEl.disabled  = true;
-  unitEl.disabled = true;
-
-  // Style as revealed (use wrong colour to mark it wasn't solved)
+  // Wrong colour: it isn't solved. What the student typed stays in the field.
   card.classList.remove('correct', 'partial', 'wrong');
   card.classList.add('wrong');
-  ansEl.classList.remove('correct-input', 'partial-input', 'wrong-input');
-  ansEl.classList.add('wrong-input');
-  unitEl.classList.remove('correct-unit', 'partial-unit', 'wrong-unit');
-  unitEl.classList.add('wrong-unit');
+  markAnswerInput(ansEl, 0);
+  ansEl.disabled = false;
 
-  // Feedback
   fb.classList.remove('correct-fb', 'partial-fb', 'wrong-fb');
   fb.classList.add('show', 'wrong-fb');
-  fb.innerHTML = `👁 Answer revealed — no points awarded <span class="pts-badge pts-zero">+0 pt</span>`;
+  fb.innerHTML = revealedFeedbackHtml(p);
+  if (typeof showMistakeHit === 'function') showMistakeHit(fb, ansEl.value, p, p._quizNum || selectedQuizNum);
 
-  // Lock check button
-  btn.textContent = '✗ Revealed';
-  btn.classList.add('checked');
-  btn.disabled = true;
+  btn.textContent = '↺ Retry';
+  btn.classList.remove('checked');
+  btn.disabled = false;
 
-  // Remove see-answer button
-  btnRow.querySelectorAll('.btn-retry, .btn-see-answer').forEach(el => el.remove());
+  // Now "Hide correct answer"
+  card.querySelectorAll('.btn-retry').forEach(el => el.remove());
+  syncSeeAnswerButton(i);
+  smoothCardChange(card, () => syncCardFold(i));
 
   updateStickyScore();
   saveSolveAllProgress();
@@ -1297,238 +1980,42 @@ function updateStickyScore() {
   document.getElementById('stickyCorrect').textContent = nCorrect;
   document.getElementById('stickyPartial').textContent = nPartial;
   document.getElementById('stickyWrong').textContent   = nWrong;
-
-  // Show retry-mistakes button only when there are mistakes
-  const retryBtn = document.getElementById('stickyRetryBtn');
-  retryBtn.classList.toggle('visible', nWrong > 0);
-  if (nWrong > 0) retryBtn.textContent = `📋 Quiz: wrong problems (${nWrong})`;
-}
-
-// ─── Mistakes quiz mode ───────────────────────────────────────────────────────
-let mistakesProblems  = [];
-let mistakesChecked   = new Map();
-let mistakesLocked    = new Set();
-
-function getMistakeProblems() {
-  // Collect problems that are wrong or revealed from the solve-all session
-  const bad = [];
-  for (const [idx, status] of solveAllChecked.entries()) {
-    if (status === 'wrong' || status === 'revealed' || status === 'partial') {
-      bad.push(solveAllProblems[idx]);
-    }
-  }
-  return bad;
-}
-
-function openMistakesModal() {
-  const bad = getMistakeProblems();
-  document.getElementById('mistakesModalDesc').textContent =
-    `You have ${bad.length} problem${bad.length !== 1 ? 's' : ''} to retry. Choose order.`;
-  document.getElementById('mistakesModal').classList.add('open');
-}
-
-function closeMistakesModal() {
-  document.getElementById('mistakesModal').classList.remove('open');
-}
-
-function startMistakes(order) {
-  closeMistakesModal();
-
-  mistakesProblems = getMistakeProblems();
-  if (order === 'unordered') {
-    for (let i = mistakesProblems.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [mistakesProblems[i], mistakesProblems[j]] = [mistakesProblems[j], mistakesProblems[i]];
-    }
-  }
-  mistakesChecked = new Map();
-  mistakesLocked  = new Set();
-
-  // Hide solve-all mode, keep sticky score hidden
-  document.getElementById('solveAllMode').style.display = 'none';
-  document.getElementById('stickyScore').classList.remove('visible');
-
-  // Show mistakes mode
-  document.getElementById('mistakesMode').classList.add('active');
-
-  renderMistakes();
-}
-
-function exitMistakes() {
-  document.getElementById('mistakesMode').classList.remove('active');
-  document.getElementById('mistakesMode').querySelector('#mistakesContainer').innerHTML = '';
-
-  // Restore solve-all mode
-  document.getElementById('solveAllMode').style.display = '';
-  document.getElementById('stickyScore').classList.add('visible');
-
-  mistakesProblems = [];
-  mistakesChecked  = new Map();
-  mistakesLocked   = new Set();
-}
-
-function renderMistakes() {
-  const container = document.getElementById('mistakesContainer');
-  container.innerHTML = '';
-
-  mistakesProblems.forEach((p, i) => {
-    const card = document.createElement('div');
-    card.className = 'problem-card';
-    card.id = 'mk-card-' + i;
-
-    card.innerHTML = `
-      <div class="card-header">
-        <span class="problem-num">${p.id}</span>
-        <span class="problem-topic">${p.topic}</span>
-      </div>
-      <div class="problem-text">${p.text}</div>
-      <div class="answer-row">
-        <span class="answer-label">Value =</span>
-        <input class="answer-input" id="mk-ans-${i}" type="text" placeholder="e.g. 3.2e-8" autocomplete="off" spellcheck="false">
-        <span class="sep">·</span>
-        <input class="unit-input" id="mk-unit-${i}" type="text" placeholder="e.g. N/C" autocomplete="off" spellcheck="false">
-      </div>
-      <div class="feedback" id="mk-fb-${i}"></div>
-      <div class="card-check-row" id="mk-btnrow-${i}">
-        <button class="check-problem-btn" id="mk-check-btn-${i}" onclick="checkMistakeProblem(${i})">Check</button>
-      </div>
-    `;
-
-    container.appendChild(card);
-
-    card.querySelector(`#mk-ans-${i}`).addEventListener('keydown', e => {
-      if (e.key === 'Enter') { e.preventDefault(); document.getElementById(`mk-unit-${i}`).focus(); }
-    });
-    card.querySelector(`#mk-unit-${i}`).addEventListener('keydown', e => {
-      if (e.key === 'Enter') { e.preventDefault(); checkMistakeProblem(i); }
-    });
-  });
-  renderMathIn(container);
-}
-
-function checkMistakeProblem(i) {
-  if (mistakesLocked.has(i)) return;
-
-  const p      = mistakesProblems[i];
-  const card   = document.getElementById('mk-card-' + i);
-  const ansEl  = document.getElementById('mk-ans-' + i);
-  const unitEl = document.getElementById('mk-unit-' + i);
-  const fb     = document.getElementById('mk-fb-' + i);
-  const btn    = document.getElementById('mk-check-btn-' + i);
-  const btnRow = document.getElementById('mk-btnrow-' + i);
-
-  const numOk  = numberCorrect(ansEl.value, p.answer, unitConversionFactor(unitEl.value, p.units));
-  const uStat  = unitStatus(unitEl.value, p.units);
-  const unitOk = uStat === 'ok';
-  const pts    = numOk ? (unitOk ? 1 : 0.9) : 0;
-
-  card.classList.remove('correct', 'partial', 'wrong');
-  ansEl.classList.remove('correct-input', 'partial-input', 'wrong-input');
-  unitEl.classList.remove('correct-unit', 'partial-unit', 'wrong-unit');
-  fb.classList.remove('correct-fb', 'partial-fb', 'wrong-fb');
-
-  ansEl.disabled  = true;
-  unitEl.disabled = true;
-
-  ansEl.classList.add(numOk ? 'correct-input' : 'wrong-input');
-  if (numOk) {
-    unitEl.classList.add(unitOk ? 'correct-unit' : 'partial-unit');
-  } else {
-    unitEl.classList.add('wrong-unit');
-  }
-
-  if      (pts === 1)   card.classList.add('correct');
-  else if (pts === 0.9) card.classList.add('partial');
-  else                  card.classList.add('wrong');
-
-  fb.classList.add('show');
-
-  if (pts === 1) {
-    fb.classList.add('correct-fb');
-    fb.innerHTML = `✓ Correct <span class="pts-badge pts-full">+1 pt</span>`;
-
-    mistakesChecked.set(i, 'correct');
-    mistakesLocked.add(i);
-
-    btn.textContent = '✓ Correct';
-    btn.classList.add('checked');
-    btn.disabled = true;
-    btnRow.querySelectorAll('.btn-see-answer').forEach(el => el.remove());
-
-  } else {
-    const resultType = pts === 0.9 ? 'partial' : 'wrong';
-    mistakesChecked.set(i, resultType);
-
-    if (pts === 0.9) {
-      fb.classList.add('partial-fb');
-      const unitHint = uStat === 'invalid'
-        ? `unit format invalid — use spaces to multiply, e.g. <strong>${fmtUnit(p.units)}</strong>`
-        : `unit should be <strong>${fmtUnit(p.units)}</strong>`;
-      fb.innerHTML = `✓ Value correct, but ${unitHint} <span class="pts-badge pts-partial">+0.9 pt</span>`;
-    } else {
-      fb.classList.add('wrong-fb');
-      fb.innerHTML = `✗ Wrong answer <span class="pts-badge pts-zero">+0 pt</span>`;
-    }
-
-    btn.textContent = '↺ Try again';
-    btn.classList.remove('checked');
-    btn.disabled = false;
-    ansEl.disabled  = false;
-    unitEl.disabled = false;
-
-    if (!btnRow.querySelector('.btn-see-answer')) {
-      const seeBtn = document.createElement('button');
-      seeBtn.className = 'btn-see-answer';
-      seeBtn.textContent = 'See correct answer';
-      seeBtn.onclick = () => revealMistakeAnswer(i);
-      btnRow.insertBefore(seeBtn, btn);
-    }
-  }
-}
-
-function revealMistakeAnswer(i) {
-  const p      = mistakesProblems[i];
-  const card   = document.getElementById('mk-card-' + i);
-  const ansEl  = document.getElementById('mk-ans-' + i);
-  const unitEl = document.getElementById('mk-unit-' + i);
-  const fb     = document.getElementById('mk-fb-' + i);
-  const btn    = document.getElementById('mk-check-btn-' + i);
-  const btnRow = document.getElementById('mk-btnrow-' + i);
-
-  mistakesLocked.add(i);
-  mistakesChecked.set(i, 'revealed');
-
-  ansEl.value    = fmt(p.answer);
-  unitEl.value   = fmtUnit(p.units);
-  ansEl.disabled  = true;
-  unitEl.disabled = true;
-
-  card.classList.remove('correct', 'partial', 'wrong');
-  card.classList.add('wrong');
-  ansEl.classList.remove('correct-input', 'partial-input', 'wrong-input');
-  ansEl.classList.add('wrong-input');
-  unitEl.classList.remove('correct-unit', 'partial-unit', 'wrong-unit');
-  unitEl.classList.add('wrong-unit');
-
-  fb.classList.remove('correct-fb', 'partial-fb', 'wrong-fb');
-  fb.classList.add('show', 'wrong-fb');
-  fb.innerHTML = `👁 Answer revealed — no points awarded <span class="pts-badge pts-zero">+0 pt</span>`;
-
-  btn.textContent = '✗ Revealed';
-  btn.classList.add('checked');
-  btn.disabled = true;
-
-  btnRow.querySelectorAll('.btn-see-answer').forEach(el => el.remove());
 }
 
 // ─── Theme toggle ─────────────────────────────────────────────────────────────
+// The mode the page is switching to while a crossfade (runThemeChange in
+// js/themes.js) hasn't applied it yet — the change runs a frame later, so
+// a quick second tap must flip from where the first one is heading, not
+// from the still-unchanged <body>.
+let _pendingLightMode = null;
+function _currentLightMode() {
+  return _pendingLightMode !== null ? _pendingLightMode : document.body.classList.contains('light');
+}
+
 function toggleTheme() {
-  if (window.themeFadeTick) themeFadeTick();
-  const isLight = document.body.classList.toggle('light');
-  document.getElementById('themeTrack').classList.toggle('on', isLight);
-  localStorage.setItem(STORAGE_PREFIX + '-theme', isLight ? 'light' : 'dark');
-  if (window.__applyCustomOnModeChange) window.__applyCustomOnModeChange();
-  if (window.__onModeChanged) window.__onModeChanged();
+  const isLight = !_currentLightMode();
+  _pendingLightMode = isLight;
+  const apply = () => {
+    if (_pendingLightMode === isLight) _pendingLightMode = null;
+    if (window.themeFadeTick) themeFadeTick();
+    document.body.classList.toggle('light', isLight);
+    document.getElementById('themeTrack').classList.toggle('on', isLight);
+    localStorage.setItem(STORAGE_PREFIX + '-theme', isLight ? 'light' : 'dark');
+    if (window.__applyCustomOnModeChange) window.__applyCustomOnModeChange();
+    // Day/night also flips --accent/--correct/--partial/--wrong for preset
+    // themes (not just custom, which __applyCustomOnModeChange already
+    // covers above) — recompute text-on-color contrast either way.
+    if (window.__updateOnColorVars) window.__updateOnColorVars();
+    if (window.__onModeChanged) window.__onModeChanged();
+    if (typeof settingsSyncNoteLocalChanges === 'function') settingsSyncNoteLocalChanges(); // js/settings-sync.js
+  };
+  if (window.runThemeChange) runThemeChange(apply); else apply();
+}
+
+// The 🌙 and ☀️ beside the switch: each picks its own mode (no-op if it's
+// already on) rather than flipping, so the icon you tap is what you get.
+function setThemeMode(light) {
+  if (_currentLightMode() !== light) toggleTheme();
 }
 
 // Restore saved preference
@@ -1538,38 +2025,8 @@ function toggleTheme() {
     document.getElementById('themeTrack').classList.add('on');
   }
   if (window.__applyCustomOnModeChange) window.__applyCustomOnModeChange();
+  if (window.__updateOnColorVars) window.__updateOnColorVars();
 })();
-
-// ─── Guide hint toggle (reusable for main quiz + solve-all mode) ──────────────
-// Hidden by default (see .is-collapsed in the markup) — no auto-hide timer;
-// the hint stays exactly as the user left it until they click to toggle it.
-function createHintGuide(guideEl, recallWrapEl) {
-  function hide() {
-    guideEl.classList.add('is-collapsed');
-    recallWrapEl.classList.add('visible');
-  }
-
-  function show() {
-    guideEl.classList.remove('is-collapsed');
-    recallWrapEl.classList.remove('visible');
-  }
-
-  return { hide, show };
-}
-
-const mainHintGuide = createHintGuide(
-  document.getElementById('guideMain'),
-  document.getElementById('hintRecallWrap')
-);
-const solveHintGuide = createHintGuide(
-  document.getElementById('guideSolve'),
-  document.getElementById('hintRecallWrapSolve')
-);
-
-window.hideGuideManual      = () => mainHintGuide.hide();
-window.showGuide            = () => mainHintGuide.show();
-window.hideGuideManualSolve = () => solveHintGuide.hide();
-window.showGuideSolve       = () => solveHintGuide.show();
 
 // ─── Landing screen ───────────────────────────────────────────────────────────
 function renderQuizButtons() {
@@ -1583,7 +2040,7 @@ function renderQuizButtons() {
       (n === selectedQuizNum ? ' selected' : '') +
       (!q.enabled ? ' disabled' : '');
     btn.onclick = () => selectQuiz(n);
-    btn.innerHTML = `Quiz #${n}<span class="quiz-select-name">${
+    btn.innerHTML = `Set #${n}<span class="quiz-select-name">${
       q.enabled ? q.name : 'Coming soon'
     }</span>`;
     grid.appendChild(btn);
@@ -1609,6 +2066,7 @@ function selectQuiz(n) {
   const q = QUIZZES[n - 1];
   if (!q.enabled) return; // disabled / not yet available
 
+  const prevQuizNum = selectedQuizNum;
   selectedQuizNum = n;
   ACTIVE_PROBLEMS = q.problems;
 
@@ -1621,6 +2079,8 @@ function selectQuiz(n) {
   // Show/hide cumulative switch (only for quiz 2+)
   const cWrap = document.getElementById('cumulativeSwitchWrap');
   if (cWrap) cWrap.classList.toggle('visible', n >= 2);
+  // Cumulative draws from sets 1..n (initTopics), so its label names them
+  document.getElementById('cumLabelCumulative').textContent = `📚 Sets 1–${n}`;
 
   // Reset cumulative mode to single when switching to quiz 1
   if (n === 1 && selectedCumulativeMode === 'cumulative') {
@@ -1630,11 +2090,35 @@ function selectQuiz(n) {
     document.getElementById('cumLabelCumulative').classList.remove('active');
   }
 
-  // Update titles to reflect the chosen quiz's exam name
-  const titleHtml = `${q.name} <span>Quiz</span>`;
+  // Settings > Study > "Default to cumulative for quiz 2+" — quiz #1 is
+  // always forced to 'single' above, so that setting's effect never got a
+  // chance to apply once the page had already loaded on quiz #1 (e.g.
+  // "Select last used quiz by default" off). Mirror the same default here the
+  // moment you leave quiz #1 for quiz #2+, same as what boot itself
+  // computes when the page loads directly on a 2+ quiz. Only fires on that
+  // 1 -> 2+ transition, so a manual per-quiz choice made afterwards (e.g.
+  // switching quiz 3 back to single, then over to quiz 4) is left alone.
+  if (prevQuizNum === 1 && n >= 2 && _cumulativeDefaultOn && selectedMode !== 'solveall'
+      && selectedCumulativeMode !== 'cumulative') {
+    selectedCumulativeMode = 'cumulative';
+    document.getElementById('cumulativeToggle').classList.add('on');
+    document.getElementById('cumLabelSingle').classList.remove('active');
+    document.getElementById('cumLabelCumulative').classList.add('active');
+  }
+
+  // Update titles to reflect the chosen quiz's exam name — all three
+  // title locations (landing page, Practice-mode header, Solve-All
+  // header) are separate DOM elements and each needs setting explicitly.
+  // The old `document.querySelector('header h1')` only ever reached the
+  // Practice-mode one (first <header> in document order); the Solve-All
+  // header was silently never updated at all, regardless of which quiz
+  // was selected.
+  const titleHtml = `${q.name} <span>Set</span>`;
   document.getElementById('landingTitle').innerHTML = titleHtml;
-  const headerH1 = document.querySelector('header h1');
-  if (headerH1) headerH1.innerHTML = titleHtml;
+  const quizHeaderH1 = document.querySelector('#quizHeader h1');
+  if (quizHeaderH1) quizHeaderH1.innerHTML = titleHtml;
+  const solveAllHeaderH1 = document.querySelector('#solveAllHeader h1');
+  if (solveAllHeaderH1) solveAllHeaderH1.innerHTML = titleHtml;
 }
 
 function toggleMode() {
@@ -1650,6 +2134,32 @@ function toggleMode() {
     document.getElementById('cumLabelSingle').classList.add('active');
     document.getElementById('cumLabelCumulative').classList.remove('active');
   }
+}
+
+// ─── Screen scroll helpers ───────────────────────────────────────────────────
+// Full-screen views are normal in-flow pages, so hiding one while the window
+// is scrolled leaves window.scrollY unchanged. When the replacement view is
+// shown, that old offset can therefore land the user halfway down the new
+// page. Keep the host page's exact position and explicitly start replacement
+// views at the top.
+function captureScreenScroll() {
+  return window.scrollY || window.pageYOffset || 0;
+}
+
+function scrollScreenToTop() {
+  window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+}
+
+function restoreScreenScroll(y) {
+  const top = Number.isFinite(y) ? y : 0;
+  // Wait until the restored screen is back in flow so the browser has a real
+  // document height to scroll against. Two frames also covers browsers that
+  // defer layout after a display/class change.
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      window.scrollTo({ top, left: 0, behavior: 'auto' });
+    });
+  });
 }
 
 // ─── Screen transition helpers ────────────────────────────────────────────────
@@ -1680,38 +2190,152 @@ function fadeInScreen(el, duration) {
 // so starting a quiz needs one to exist first — same identity system the
 // forum already uses (js/forum.js), not a separate account system. A
 // device that's never claimed a name sees the "Getting Started!" screen
-// first (js/forum.js openGettingStartedModal — what a nickname is, why
+// first (js/forum.js openGettingStartedModal — new or returning, plus why
 // it's needed, an FAQ), and only after tapping through that gets the
 // claim modal itself, in its 'create' mode. startSelected() only actually
 // proceeds once a name is resolved (or immediately, if one's already
-// claimed on this device).
-function startSelected() {
-  if (typeof getForumNickname === 'function' && !getForumNickname()) {
-    openGettingStartedModal(() => openForumClaimModal('create', '', () => startSelected()));
+// claimed on this device). With the database off (js/db-status.js) the name
+// is made on this device instead and registered later, and an account made
+// that way can be held here until it is renamed or the database is back:
+// offlineAccountGate, js/offline-account.js.
+function startSelected(pastGate) {
+  // getForumNickname/openGettingStartedModal/openForumClaimModal all live
+  // in js/forum.js, which (see index.html's tier-2 loader) can still be
+  // downloading when this is first tapped. The old `typeof === 'function'`
+  // guard treated "not loaded yet" as "nothing to check", so a fast enough
+  // tap skipped the registration gate entirely. Fail safe instead: if the
+  // identity system isn't here yet, wait for it and retry rather than
+  // letting the quiz start unregistered.
+  if (typeof getForumNickname !== 'function' || typeof offlineAccountGate !== 'function') {
+    setTimeout(startSelected, 50);
     return;
   }
+  // Safe Exam Browser has no identity to claim against, and its attempts
+  // reach the normal browser another way (see js/lockdown.js), so that
+  // session skips the gate.
+  if (!pastGate && !getForumNickname() && !isLockdownSession()) {
+    offlineAccountGate(() => startSelected(true));
+    return;
+  }
+  // Reached only by a tab already inside SEB: the Start button is hidden
+  // (css/lockdown-session.css), this is for anything that gets past it.
+  if (isLockdownSession() && dbOffline()) return;
+  try { localStorage.setItem(LAST_QUIZ_KEY, String(selectedQuizNum)); } catch (e) { /* private mode / quota */ }
   const landing = document.getElementById('landingScreen');
   fadeOutScreen(landing, 300, () => {
     if (selectedMode === 'solveall') {
-      openSolveAllModal();
-    } else {
+      // appPage may still be visible from a previous mode (Random 6)
+      // or a previous solve-all session — same reasoning as
+      // resetSolveAll()/handleRemoteSolveAllReset() above. #choicePage is
+      // position:fixed now (see its CSS), so this is defense in depth
+      // rather than the only thing preventing the picker from landing
+      // off-screen, but there's no reason to leave a mismatched .visible
+      // page sitting underneath it either.
       const appPage = document.getElementById('appPage');
-      appPage.classList.add('visible');
-      initTopics();
-      newQuiz();
+      appPage.classList.remove('visible', 'fading-out');
+      // Settings > Study > "Lock order" (+ its ordered/shuffled sub) —
+      // when on, skip the order-picker modal entirely and jump straight into
+      // the locked order (saved progress, if any, is applied by id either
+      // way). openSolveAllModal() itself still runs normally whenever this
+      // is off.
+      if (typeof getSetting === 'function' && getSetting('study', 'lockSolveAllOrder') === true) {
+        const lockedOrder = getSetting('study', 'solveAllLockedOrder') === 'unordered' ? 'unordered' : 'ordered';
+        appPage.classList.add('visible');
+        _startSolveAllCore(lockedOrder);
+      } else {
+        openSolveAllModal();
+      }
+    } else {
+      openQuizStart();
     }
   });
 }
 
+// A Random N attempt, once the way of taking it is settled (js/lockdown.js).
+function startRandomQuiz() {
+  const appPage = document.getElementById('appPage');
+  appPage.classList.add('visible');
+  initTopics();
+  newQuiz();
+  // Settings > Study > "Full screen for Random N" — entered the moment
+  // Random N mode actually opens; checkAll() (above) leaves it again
+  // the instant scores are revealed. Wrapped in a try/catch and a
+  // .catch() on the promise since some browsers refuse this outside a
+  // sufficiently direct user gesture, or if the person already denied
+  // it once — either way, failing silently just means staying in the
+  // normal window instead, never a broken quiz.
+  const fullscreenRandomNOn = (typeof getSetting === 'function')
+    ? getSetting('study', 'fullscreenRandomN') === true
+    : _readStudySettingRaw('fullscreenRandomN', true);
+  if (fullscreenRandomNOn) {
+    try {
+      const req = document.documentElement.requestFullscreen();
+      if (req && typeof req.catch === 'function') req.catch(() => {});
+    } catch (e) { /* Fullscreen API unavailable — just stay windowed */ }
+  }
+}
+
+// ─── "Leave this attempt?" guard ─────────────────────────────────────────────
+// The site logo, the quiz ✕ (both goToMainMenu) and "New quiz ↺" all throw
+// away an unchecked Random N/cumulative attempt. Settings > Study > "Warn
+// before leaving a quiz" asks first — but only once there's something worth
+// keeping: at least one answer typed and 30+ seconds spent.
+let _attemptStartedAt = 0;
+let _pendingLeaveAction = null;
+
+function _randomAttemptAtRisk() {
+  if (typeof getSetting === 'function' && getSetting('study', 'warnBeforeLeavingQuiz') === false) return false;
+  if (checked) return false;
+  const appPage = document.getElementById('appPage');
+  if (!appPage || !appPage.classList.contains('visible') || appPage.classList.contains('fading-out')) return false;
+  if (document.getElementById('solveAllMode').classList.contains('active')) return false;
+  if (Date.now() - _attemptStartedAt < 30 * 1000) return false;
+  return [...document.querySelectorAll('#quizContainer .answer-input')].some(el => el.value.trim() !== '');
+}
+
+function confirmLeaveRandomQuiz(proceed) {
+  if (!_randomAttemptAtRisk()) { proceed(); return; }
+  _pendingLeaveAction = proceed;
+  document.getElementById('leaveQuizModal').classList.add('open');
+}
+
+function resolveLeaveQuiz(leave) {
+  const action = _pendingLeaveAction;
+  _pendingLeaveAction = null;
+  document.getElementById('leaveQuizModal').classList.remove('open');
+  if (leave && action) action();
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && _pendingLeaveAction) resolveLeaveQuiz(false);
+});
+
+function requestNewQuiz() {
+  confirmLeaveRandomQuiz(newQuiz);
+}
+
 function goToMainMenu() {
+  confirmLeaveRandomQuiz(_goToMainMenuNow);
+}
+
+function _goToMainMenuNow() {
+  // The Solution screen sits on top of whatever it was opened from (which
+  // it hides), so it has to be checked first: none of the checks below can
+  // see it, and the landing screen used to appear with the solution still
+  // showing underneath.
+  if (typeof isSolutionScreenOpen === 'function' && isSolutionScreenOpen()) {
+    closeSolutionScreen(true);
+    return;
+  }
+
   // Forum and Stats screens used to only ever be opened from the landing
   // screen, so if either was open, closing it *was* going to the main menu —
   // nothing else could be active underneath it. That's no longer quite true
   // for the Forum: the floating Forum button (forum.js) can now open it from
-  // mid-quiz (Solve-all/Mistakes) or Stats too, hiding that screen instead of
+  // mid-quiz (Solve-all) or Stats too, hiding that screen instead of
   // landing. Tapping the main-menu logo while the Forum is open should still
   // always land you back on the landing screen either way — a distinct, more
-  // explicit "take me all the way home" than the Forum's own ✕ Close button,
+  // explicit "take me all the way home" than the Forum's own ✕ button,
   // which instead returns to wherever it was actually opened from — so this
   // passes `true` ("force landing") rather than just closing it plainly.
   const forum = document.getElementById('forumScreen');
@@ -1732,37 +2356,102 @@ function goToMainMenu() {
     return;
   }
 
+  // Checked via isSettingsScreenOpen() rather than the DOM class directly:
+  // settings.js only adds/removes 'visible' once its own open/close fade
+  // finishes (280ms later), so reading the class here could still see the
+  // stale pre-animation state for a beat. isSettingsScreenOpen() reflects
+  // the moment open/close was actually decided instead.
+  if (typeof isSettingsScreenOpen === 'function' && isSettingsScreenOpen()) {
+    closeSettingsScreen(true);
+    return;
+  }
+
+  // Checked after Manual/Settings: either can be open on top of it, and
+  // closing them with forceLanding already goes home.
+  if (typeof isLicenseScreenOpen === 'function' && isLicenseScreenOpen()) {
+    closeLicenseScreen(true);
+    return;
+  }
+
   exitAppOrChoiceToLanding();
 }
 
 // Hides whichever of appPage/choicePage is currently showing (exiting
-// solve-all/mistakes mode first if needed) and fades the landing screen back
+// solve-all mode first if needed) and fades the landing screen back
 // in. Pulled out of goToMainMenu() as its own function so forum.js can reuse
 // it too: closing the Forum via the main-menu logo (rather than its own ✕
 // button) after it was opened mid-quiz by the floating Forum button needs
 // this exact same cleanup — not just "hide forum, reveal landing" — or
-// solve-all/mistakes state would be left stale for next time.
+// solve-all state would be left stale for next time.
 function exitAppOrChoiceToLanding() {
   const appPage   = document.getElementById('appPage');
   const choice    = document.getElementById('choicePage');
   const landing   = document.getElementById('landingScreen');
+  // A solution left hidden under Settings / Manual / the forum (they close
+  // straight to here with the logo) is dropped as well — see js/solutions.js.
+  if (typeof abandonSolutionScreen === 'function') abandonSolutionScreen();
+
+  // Settings > Study > "Full screen for Random N" enters fullscreen the
+  // moment an attempt starts (see the requestFullscreen() call above) and
+  // checkAll() leaves it again once scores are revealed — but tapping the
+  // site logo to bail out *before* finishing skips checkAll() entirely, so
+  // without this the browser stayed stuck in fullscreen after landing back
+  // on the main menu. This is the one shared "go home" path both the direct
+  // logo tap and the Forum's forceLanding route funnel through, so it's
+  // covered here rather than duplicated at each call site — same reasoning
+  // as the Attempt Review cleanup just below. Only acts if fullscreen is
+  // actually active right now, same guard as checkAll()'s own exit.
+  if (document.fullscreenElement) {
+    document.exitFullscreen().catch(() => {});
+  }
+
+  // "All the way home" needs to also leave the Attempt Review screen behind,
+  // and it's not covered by anything above: openAttemptReview() (stats.js)
+  // removes Stats' own `visible` class when it opens, so by the time we get
+  // here goToMainMenu()'s stats-check is already false and this function is
+  // the only thing that runs — yet #reviewScreen itself was never touched.
+  // Its `visible` class is normally only ever removed by its own ✕
+  // (closeAttemptReview()), so tapping the site logo while reviewing an
+  // attempt left it stuck on, ready to flash back into view the next time
+  // something else (e.g. the Forum FAB's host detection in forum.js, which
+  // just reads that same class) looks at it. Same story for opening the
+  // Forum from a per-problem button while reviewing an attempt, then
+  // closing the Forum with the logo: that route lands here too
+  // (closeForumScreen's forceLanding branch), without ever going through
+  // closeAttemptReview()'s own cleanup either. Clearing it here — the one
+  // shared "go home" path both routes funnel through — covers both cases at
+  // once instead of duplicating the fix at each call site.
+  const review = document.getElementById('reviewScreen');
+  if (review && review.classList.contains('visible')) {
+    review.classList.remove('visible', 'fading-out');
+    if (typeof stopForumProblemCountsPolling === 'function') stopForumProblemCountsPolling();
+  }
 
   // Determine which screen is currently visible and fade it out
   const fromApp    = appPage.classList.contains('visible');
   const fromChoice = !choice.classList.contains('hidden');
 
   function showLanding() {
-    // Exit mistakes/solve-all mode only once appPage is hidden/faded,
-    // so the underlying quiz-mode UI never flashes into view mid-fade.
-    if (document.getElementById('mistakesMode').classList.contains('active')) {
-      exitMistakes();
-    }
+    // Exit solve-all mode only once appPage is hidden/faded, so the
+    // underlying quiz-mode UI never flashes into view mid-fade.
     if (document.getElementById('solveAllMode').classList.contains('active')) {
       exitSolveAll();
     }
     // Covers leaving a *checked* plain Random 6 attempt too — exitSolveAll()
     // above only stops the poll it itself started. Idempotent either way.
     if (typeof stopForumProblemCountsPolling === 'function') stopForumProblemCountsPolling();
+    // Covers abandoning an unchecked attempt (checkAll() already stops this
+    // on a normal submit, so this is a no-op then) — leaving the quiz
+    // screen mid-attempt shouldn't leave the floating clock's interval
+    // ticking in the background.
+    if (typeof stopLiveQuizTimer === 'function') stopLiveQuizTimer();
+    // stopLiveQuizTimer() above only re-checks a pending update when
+    // _quizTimerActive was true — which it never is for Solve-All
+    // (only a Random-6/cumulative attempt sets it), so leaving those modes
+    // silently skipped the "update anyway outside quiz mode" check
+    // entirely. This is the actual "leaving a quiz" moment for every mode,
+    // so check unconditionally here too.
+    if (typeof maybeForceUpdateOutsideQuiz === 'function') maybeForceUpdateOutsideQuiz();
     appPage.classList.remove('visible', 'fading-out');
     choice.classList.add('hidden');
     if (typeof showNewSplash === 'function') showNewSplash();
@@ -1780,7 +2469,20 @@ function exitAppOrChoiceToLanding() {
 }
 
 // ─── Boot ─────────────────────────────────────────────────────────────────────
-window.addEventListener("DOMContentLoaded", () => {
+// Deliberately NOT gated on DOMContentLoaded. That event only fires once the
+// parser reaches the end of the document — which, with every <script> tag
+// down here being a plain blocking one (no defer/async), means waiting on
+// EVERY script listed after this one too: forum.js, manual.js,
+// push-notifications.js, and the external jsdelivr-hosted supabase-js CDN
+// script in particular. On a slow connection that CDN fetch alone can take
+// a while, and none of those scripts have anything to do with the quiz
+// button grid. Meanwhile <script src="js/quiz-engine.js"> itself sits near
+// the end of <body>, after the landing screen's markup (#quizSelectGrid,
+// #modeLabelQuiz, etc.) and after the course/quizzes/*.js data files that
+// feed QUIZZES/QUIZ_SIZE — so by the time THIS script is executing, the DOM
+// nodes below already exist and the data they need is already loaded. No
+// need to wait for anything past this point: run it right here, inline.
+{
   // Render quiz selection buttons from the QUIZZES registry
   renderQuizButtons();
   // Sync the landing title / header <h1> to the actually-selected quiz's
@@ -1789,42 +2491,479 @@ window.addEventListener("DOMContentLoaded", () => {
   // hardcoded into index.html's static markup regardless of which
   // course/quiz that actually is, until the user clicks a quiz button.
   selectQuiz(selectedQuizNum);
+  // selectQuiz() only ever flips the cumulative toggle's own visual state
+  // when actively switching TO quiz #1 (forcing single) — every prior
+  // initial state was 'single' anyway (matching the static HTML's own
+  // default markup), so nothing needed reconciling at boot before now.
+  // Now that the default itself can be 'cumulative' (see
+  // _cumulativeDefaultOn above), sync the toggle/labels to match here the
+  // same way toggleCumulativeMode() does after a real click — otherwise
+  // the switch would sit there visually showing "Single quiz" while
+  // selectedCumulativeMode is actually 'cumulative' underneath it.
+  if (selectedCumulativeMode === 'cumulative') {
+    document.getElementById('cumulativeToggle').classList.add('on');
+    document.getElementById('cumLabelSingle').classList.remove('active');
+    document.getElementById('cumLabelCumulative').classList.add('active');
+  }
   // "Random 6" label reflects this course's actual quiz size
   // (QUIZ_SIZE from course-config.js) instead of a hardcoded "6" —
   // courses with a different exam size get the label right for free.
   const modeLabelQuiz = document.getElementById('modeLabelQuiz');
   if (modeLabelQuiz) modeLabelQuiz.textContent = `🎯 Random ${QUIZ_SIZE}`;
   // Landing screen is shown by default; quiz is initialized when user hits Start
-});
+}
 
 // ─── Version checker ──────────────────────────────────────────────────────────
 // This page's current version. Bump this string whenever you publish an update.
-const CURRENT_VERSION = '9.0.0';
+const CURRENT_VERSION = '14.1.0';
 
-// How often to poll the manifest (milliseconds). Default: every 5 minutes.
-const VERSION_CHECK_INTERVAL = 5 * 60 * 1000;
+// The manifest is polled every "poll.update" of site-version.json
+// (js/site-config.js), 5 minutes by default, while the tab is visible.
 
-// URL of the tiny JSON manifest file you host next to this HTML.
-// Create a file called version.json with content: {"version":"1.0.0"}
-// Update the version string there whenever you publish a new release.
-const VERSION_MANIFEST_URL = 'version.json';
+// URL of the tiny JSON manifest file you host next to this HTML, with
+// content like {"version":"1.0.0","editor":"1.0.0"}. Update "version" there
+// whenever you publish a new release of the site; "editor" is the editor's
+// own number (editor/editor.js "site version"), which this page ignores, so
+// an editor-only release never asks students to reload. The optional
+// settings next to them (min_version, poll, off, sync_paused, purge_id) are
+// described in js/site-config.js.
+//
+// Not "version.json" any more, on purpose: up to 12.4.4 the code polled that
+// name, and up to 12.4.3, on every mismatch, it made its (old) service worker
+// re-download the whole precache list — ~2 MB every 5 minutes for as long as
+// such a tab stayed open. With that name gone, those tabs get a 404, which
+// their checkForUpdate() treats as "server unavailable" and skips (they still
+// get every update on their next reload). Never bring the old name back.
+const VERSION_MANIFEST_URL = 'site-version.json';
 
 let _updateDismissed = false;
+// True once a real version mismatch has actually been seen — independent
+// of whether the banner itself is showing, so maybeForceUpdateOutsideQuiz()
+// (below) still has something to act on even while Notifications >
+// "Hide update reminder" keeps checkForUpdate() from ever calling
+// BannerManager.request in the first place.
+let _updatePending = false;
+// The site-version.json value behind _updatePending: what the cache purge below
+// is keyed to.
+let _latestVersion = null;
+// When the last site-version.json request went out, so coming back to the tab
+// (visibilitychange below) doesn't fire one on every tab switch.
+let _lastUpdateCheckAt = 0;
+
+// An update that has been waiting this long is applied without asking —
+// outside a timed attempt, or during one that has itself run this long.
+// Counted from the first time any tab of this browser saw that the running
+// version (CURRENT_VERSION) is outdated, so a newer release arriving in
+// the meantime doesn't restart the clock.
+const UPDATE_FORCE_AFTER = 48 * 60 * 60 * 1000;
+const UPDATE_FORCE_DURING_QUIZ_AFTER = 3 * 60 * 60 * 1000;
+const UPDATE_OUTDATED_KEY = STORAGE_PREFIX + '-update-outdated';  // { from: CURRENT_VERSION, at }
+let _updateSeenAt = 0;  // same, for this tab only (localStorage can be unavailable)
+// site-version.json's "min_version" is above CURRENT_VERSION: the update is
+// overdue at once instead of after UPDATE_FORCE_AFTER. No min_version (or
+// an unreadable one) means no minimum.
+let _belowMinVersion = false;
+
+// -1, 0 or 1 for dotted numeric versions ("12.4.10" > "12.4.9").
+function compareVersions(a, b) {
+  const pa = String(a).split('.').map(Number), pb = String(b).split('.').map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] || 0) - (pb[i] || 0);
+    if (d) return d < 0 ? -1 : 1;
+  }
+  return 0;
+}
+
+function _noteOutdated() {
+  if (!_updateSeenAt) _updateSeenAt = Date.now();
+  try {
+    const rec = JSON.parse(localStorage.getItem(UPDATE_OUTDATED_KEY) || 'null');
+    if (rec && rec.from === CURRENT_VERSION) return;
+    localStorage.setItem(UPDATE_OUTDATED_KEY, JSON.stringify({ from: CURRENT_VERSION, at: _updateSeenAt }));
+  } catch (_) {}
+}
+
+function _updateWaitedMs() {
+  let since = _updateSeenAt || Date.now();
+  try {
+    const rec = JSON.parse(localStorage.getItem(UPDATE_OUTDATED_KEY) || 'null');
+    if (rec && rec.from === CURRENT_VERSION && rec.at < since) since = rec.at;
+  } catch (_) {}
+  return Date.now() - since;
+}
 
 // Update always takes top priority — it has no hider, since nothing outranks it.
+// One BannerManager slot, two banners: the plain "new version" one, or the
+// countdown below once the update is overdue.
 BannerManager.register('update', () => {
-  document.getElementById('update-banner').classList.add('visible');
+  document.getElementById(_forcedUpdate ? 'update-forced-banner' : 'update-banner').classList.add('visible');
 });
 
+function _updateOverdue() {
+  return _belowMinVersion || _updateWaitedMs() >= UPDATE_FORCE_AFTER;
+}
+
+// Applies a pending update when either:
+//   • Notifications > "Update anyway outside quiz mode" (settings.js) is on
+//     together with "Hide update reminder" — the point is to still get the
+//     update applied for someone who's opted out of ever seeing the nag
+//     banner. A silent reload straight away, as that setting promises; or
+//   • the update has been waiting UPDATE_FORCE_AFTER (48 h), or this
+//     version is below site-version.json's "min_version", whatever the
+//     settings or a dismissed banner say — a tab kept open for days must
+//     not stay on old code forever. Never a reload out of the blue: a
+//     banner counts down UPDATE_FORCE_COUNTDOWN (5 min) first, also when
+//     the hide settings or Go silent are on, since it warns about a reload
+//     that happens either way (_syncForcedUpdate below).
+// Never during a live timed attempt, except an overdue update once that
+// attempt has run UPDATE_FORCE_DURING_QUIZ_AFTER (3 h): nobody is still
+// working on it by then. Called right after a mismatch is detected, on
+// every poll, and the instant a quiz attempt ends (see stopLiveQuizTimer
+// above) so a pending update doesn't sit around for up to another update
+// poll (poll.update) once it's finally safe to apply.
+async function maybeForceUpdateOutsideQuiz() {
+  if (!_updatePending) return;
+  if (_updateOverdue()) { _syncForcedUpdate(); return; }
+  if (_forcedUpdate) _endForcedUpdate(); // min_version taken back out
+  if (typeof getSetting !== 'function') return;
+  const hidden = getSetting('notifications', 'hideUpdateReminder') === true;
+  const forceOutside = getSetting('notifications', 'forceRefreshOutsideQuiz') === true;
+  if (!hidden || !forceOutside) return;
+  if (isQuizTimerActive()) return;
+  if (!_claimForcedReload()) return;
+  await purgeUpdateCacheAndWait();
+  location.reload();
+}
+
+// A forced reload that didn't bring the new version (site-version.json bumped
+// without CURRENT_VERSION, say) would land straight back here and reload
+// again, forever, for every visitor. So: one forced reload per outdated
+// version per tab per UPDATE_FORCED_GAP. Per tab (sessionStorage, which
+// survives the reload but isn't shared), so the first tab to reload doesn't
+// leave the browser's other old tabs counting down to a reload that never
+// comes. Without sessionStorage there's no way to tell, so no forced reload
+// at all.
+const UPDATE_FORCED_GAP = 24 * 60 * 60 * 1000;
+const UPDATE_FORCED_KEY = STORAGE_PREFIX + '-update-forced';  // { from: CURRENT_VERSION, at }
+function _forcedReloadAllowed() {
+  try {
+    const rec = JSON.parse(sessionStorage.getItem(UPDATE_FORCED_KEY) || 'null');
+    return !(rec && rec.from === CURRENT_VERSION && Date.now() - rec.at < UPDATE_FORCED_GAP);
+  } catch (_) { return false; }
+}
+function _claimForcedReload() {
+  if (!_forcedReloadAllowed()) return false;
+  try {
+    sessionStorage.setItem(UPDATE_FORCED_KEY, JSON.stringify({ from: CURRENT_VERSION, at: Date.now() }));
+    return true;
+  } catch (_) { return false; }
+}
+
+// ─── Overdue update countdown ────────────────────────────────────────────────
+// Outside a timed attempt the countdown runs; during one (under 3 h) it
+// waits, and the banner says the reload comes UPDATE_FORCE_COUNTDOWN after
+// the quiz. A quiz started mid-countdown puts it back to waiting, and the
+// end of that quiz starts a full countdown again, so finishing a quiz never
+// reloads the page under the results. While waiting, the banner has ✕ instead
+// of Reload now (a reload would lose the attempt): it hides the banner until
+// the quiz ends, when the countdown shows up. The deadline is a timestamp checked
+// every second, so a hidden tab's throttled timers still reload it about on
+// time, out of sight.
+const UPDATE_FORCE_COUNTDOWN = 5 * 60 * 1000;
+let _forcedUpdate = false;    // countdown banner owns the 'update' slot
+let _forcedDeadline = 0;      // 0 while waiting for a quiz to end
+let _forcedTicker = null;
+let _forcedRendered = '';     // headline/body last written, so a tick only touches the clock
+let _forcedHiddenForQuiz = false;  // ✕ while waiting: off screen until the quiz ends
+
+function _forcedWaitingForQuiz() {
+  return isQuizTimerActive() && quizTimerRunningMs() < UPDATE_FORCE_DURING_QUIZ_AFTER;
+}
+
+// Waiting or counting down, by whether a timed quiz is under way now.
+function _updateForcedDeadline() {
+  if (_forcedWaitingForQuiz()) { _forcedDeadline = 0; return; }
+  if (_forcedDeadline) return;
+  _forcedDeadline = Date.now() + UPDATE_FORCE_COUNTDOWN;
+  // The quiz is over: a banner hidden for it comes back for the countdown.
+  if (_forcedHiddenForQuiz) {
+    _forcedHiddenForQuiz = false;
+    const banner = document.getElementById('update-forced-banner');
+    banner.classList.remove('hiding');
+    banner.classList.add('visible');
+  }
+}
+
+function _syncForcedUpdate() {
+  if (!_forcedReloadAllowed()) { if (_forcedUpdate) _endForcedUpdate(); return; }
+  _updateForcedDeadline();
+  if (!_forcedUpdate) {
+    _forcedUpdate = true;
+    // Already on screen as the plain banner: swap in place, BannerManager
+    // still has 'update' active and would ignore another request.
+    const plain = document.getElementById('update-banner');
+    if (plain.classList.contains('visible')) {
+      plain.classList.remove('visible');
+      document.getElementById('update-forced-banner').classList.add('visible');
+    }
+    BannerManager.request('update');
+  }
+  if (!_forcedTicker) _forcedTicker = setInterval(_forcedTick, 1000);
+  _renderForcedUpdateBanner();
+}
+
+function _endForcedUpdate() {
+  _forcedUpdate = false;
+  _forcedDeadline = 0;
+  _forcedRendered = '';
+  _forcedHiddenForQuiz = false;
+  clearInterval(_forcedTicker);
+  _forcedTicker = null;
+  document.getElementById('update-forced-banner').classList.remove('visible');
+  BannerManager.release('update');
+}
+
+// ✕, only offered while waiting for a quiz. Keeps the 'update' slot, so no
+// other banner pops up mid-quiz in its place.
+function dismissForcedUpdateForQuiz() {
+  if (!_forcedUpdate || _forcedDeadline) return;
+  _forcedHiddenForQuiz = true;
+  const banner = document.getElementById('update-forced-banner');
+  banner.classList.add('hiding');
+  const done = () => {
+    banner.removeEventListener('animationend', onEnd);
+    clearTimeout(fallback);
+    banner.classList.remove('hiding');
+    if (_forcedHiddenForQuiz) banner.classList.remove('visible'); // the quiz may have ended mid-fade
+  };
+  // The blinking icon's animation never ends, but filter by target anyway.
+  const onEnd = (e) => { if (e.target === banner) done(); };
+  banner.addEventListener('animationend', onEnd);
+  const fallback = setTimeout(done, 380); // reduced motion can skip animationend
+}
+
+function _forcedTick() {
+  _updateForcedDeadline();
+  if (_forcedDeadline && Date.now() >= _forcedDeadline) {
+    clearInterval(_forcedTicker);
+    _forcedTicker = null;
+    if (!_claimForcedReload()) { _endForcedUpdate(); return; }
+    // Nobody watched the countdown: say why on the reloaded page.
+    if (document.hidden || _lastInputAt < _forcedDeadline - UPDATE_FORCE_COUNTDOWN) _noteUpdatedWhileAway(document.hidden);
+    reloadForUpdate();
+    return;
+  }
+  if (!document.hidden) _renderForcedUpdateBanner();
+}
+
+function _renderForcedUpdateBanner() {
+  const banner = document.getElementById('update-forced-banner');
+  const critical = _belowMinVersion;
+  const waiting = !_forcedDeadline;
+  const key = `${critical}|${waiting}|${Math.floor(_updateWaitedMs() / 86400000)}`;
+  if (key !== _forcedRendered) {
+    _forcedRendered = key;
+    const days = Math.max(2, Math.floor(_updateWaitedMs() / 86400000));
+    banner.classList.toggle('critical', critical);
+    banner.classList.toggle('waiting', waiting);
+    document.getElementById('update-forced-title').textContent = critical
+      ? 'A recent update was marked critical.'
+      : `You’re ${days} days behind the latest update.`;
+    // The ticking clock is aria-live="off": announced once with the
+    // sentence, not every second.
+    const when = waiting
+      ? `${UPDATE_FORCE_COUNTDOWN / 60000} minutes after this quiz`
+      : 'in <span class="forced-time" aria-live="off"></span>';
+    document.getElementById('update-forced-body').innerHTML = critical
+      ? `You’ll be updated automatically ${when}, or update now yourself.`
+      : `The site will reload automatically ${when}, or reload now yourself.`;
+    document.getElementById('update-forced-btn').textContent = critical ? 'Update now' : 'Reload now';
+  }
+  const clock = banner.querySelector('.forced-time');
+  if (clock) {
+    const sec = Math.max(0, Math.ceil((_forcedDeadline - Date.now()) / 1000));
+    clock.textContent = `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+  }
+}
+
+// A quiz started mid-countdown: back to waiting at once, not on the next tick.
+window.addEventListener('quiztimer:activechange', (event) => {
+  if (_forcedUpdate && event.detail && event.detail.active) _syncForcedUpdate();
+});
+
+// ─── "Updated while you were away" ───────────────────────────────────────────
+// A countdown that ran out in a hidden tab, or with no input at all since it
+// started, reloaded a page nobody was looking at. The reloaded page then says
+// why, once the person is back: a hidden tab as soon as it's shown again, a
+// tab left on screen at the first mouse move, tap or key. It stays
+// UPDATE_DONE_MS of on-screen time (paused while the tab is hidden), with
+// the outline receding like the full-screen reminder's. Kept in
+// sessionStorage, so only that tab says it, and only if the reload really
+// brought a newer version.
+const UPDATE_DONE_MS = 10 * 1000;
+const UPDATE_AWAY_KEY = STORAGE_PREFIX + '-update-away';  // { from, critical, days, hidden, at }
+let _lastInputAt = Date.now();
+['pointerdown', 'pointermove', 'keydown', 'wheel', 'touchstart'].forEach((type) => {
+  window.addEventListener(type, () => { _lastInputAt = Date.now(); }, { passive: true, capture: true });
+});
+
+function _noteUpdatedWhileAway(hidden) {
+  try {
+    sessionStorage.setItem(UPDATE_AWAY_KEY, JSON.stringify({
+      from: CURRENT_VERSION,
+      critical: _belowMinVersion,
+      days: Math.max(2, Math.floor(_updateWaitedMs() / 86400000)),
+      hidden,
+      at: Date.now(),
+    }));
+  } catch (_) {}
+}
+
+function _takeUpdatedWhileAwayNote() {
+  try {
+    const rec = JSON.parse(sessionStorage.getItem(UPDATE_AWAY_KEY) || 'null');
+    sessionStorage.removeItem(UPDATE_AWAY_KEY);
+    if (!rec || rec.from === CURRENT_VERSION || Date.now() - rec.at > UPDATE_FORCED_GAP) return null;
+    return rec;
+  } catch (_) { return null; }
+}
+
+let _updateDone = null;  // { note, timer, fadeTimer, finished, left, since }
+
+BannerManager.register('update-done',
+  () => { // show
+    if (!_updateDone || _updateDone.finished) { setTimeout(() => BannerManager.release('update-done'), 0); return; }
+    showUpdateDoneBanner();
+  },
+  () => { // hide (an update banner preempted it): it was a passing notice, so it's over
+    if (_updateDone) _updateDone.finished = true;
+    _resetUpdateDoneBanner();
+  }
+);
+
+function showUpdateDoneBanner() {
+  const banner = document.getElementById('update-done-banner');
+  const { note } = _updateDone;
+  banner.classList.toggle('critical', !!note.critical);
+  document.getElementById('update-done-text').innerHTML = note.critical
+    ? 'The site was updated while you were away, <strong>due to a critical fix in the latest update</strong>.'
+    : `The site was updated while you were away, <strong>since you were ${Number(note.days) || 2} days behind the latest update</strong>.`;
+  banner.hidden = false;
+  banner.classList.remove('hiding', 'running');
+  banner.classList.add('visible');
+  // Same geometry as _drawFullscreenHintRing: the ring's viewBox is the
+  // banner's own pixel size so its corners match the border radius.
+  const ring = banner.querySelector('.banner-ring');
+  const rect = ring.querySelector('rect');
+  const w = banner.offsetWidth, h = banner.offsetHeight, inset = 0.75;
+  const radius = parseFloat(getComputedStyle(banner).borderTopLeftRadius) || 0;
+  ring.setAttribute('viewBox', `0 0 ${w} ${h}`);
+  rect.setAttribute('x', inset);
+  rect.setAttribute('y', inset);
+  rect.setAttribute('width', Math.max(0, w - inset * 2));
+  rect.setAttribute('height', Math.max(0, h - inset * 2));
+  rect.setAttribute('rx', Math.max(0, radius - inset));
+  banner.style.setProperty('--done-ms', UPDATE_DONE_MS + 'ms');
+  banner.classList.remove('paused');
+  void banner.offsetWidth; // restart the ring animation
+  banner.classList.add('running');
+  _updateDone.left = UPDATE_DONE_MS;
+  _resumeUpdateDoneBanner();
+}
+
+// Only on-screen time counts: the timer and the ring stop while hidden.
+function _resumeUpdateDoneBanner() {
+  clearTimeout(_updateDone.timer);
+  _updateDone.since = Date.now();
+  _updateDone.timer = setTimeout(closeUpdateDoneBanner, _updateDone.left);
+  document.getElementById('update-done-banner').classList.remove('paused');
+}
+function _pauseUpdateDoneBanner() {
+  clearTimeout(_updateDone.timer);
+  _updateDone.left = Math.max(0, _updateDone.left - (Date.now() - _updateDone.since));
+  document.getElementById('update-done-banner').classList.add('paused');
+}
+
+function _resetUpdateDoneBanner() {
+  if (_updateDone) { clearTimeout(_updateDone.timer); clearTimeout(_updateDone.fadeTimer); }
+  const banner = document.getElementById('update-done-banner');
+  banner.classList.remove('visible', 'hiding', 'running', 'paused');
+  banner.hidden = true;
+}
+
+// The 10 s ran out, or the banner was tapped.
+function closeUpdateDoneBanner() {
+  if (!_updateDone || _updateDone.finished) return;
+  _updateDone.finished = true;
+  clearTimeout(_updateDone.timer);
+  const banner = document.getElementById('update-done-banner');
+  // The ring's own animationend bubbles up here too: only the banner's counts.
+  const onEnd = (e) => { if (e.target === banner) done(); };
+  const done = () => {
+    banner.removeEventListener('animationend', onEnd);
+    _resetUpdateDoneBanner();
+    BannerManager.cancel('update-done');
+  };
+  banner.classList.add('hiding');
+  banner.addEventListener('animationend', onEnd);
+  _updateDone.fadeTimer = setTimeout(done, 380); // reduced motion can skip animationend
+}
+
+window.addEventListener('DOMContentLoaded', () => {
+  const note = _takeUpdatedWhileAwayNote();
+  if (!note) return;
+  _updateDone = { note, timer: null, fadeTimer: null, finished: false, left: 0, since: 0 };
+  const loadedAt = Date.now();
+  const inputs = ['pointerdown', 'pointermove', 'keydown', 'wheel', 'touchstart'];
+  const show = () => {
+    if (document.hidden) return;
+    if (!note.hidden && _lastInputAt <= loadedAt) return;  // left on screen: wait for a sign of life
+    document.removeEventListener('visibilitychange', show);
+    inputs.forEach((type) => window.removeEventListener(type, show, true));
+    BannerManager.request('update-done');
+  };
+  document.addEventListener('visibilitychange', show);
+  // Added after the _lastInputAt listeners (same phase), so it sees the new time.
+  inputs.forEach((type) => window.addEventListener(type, show, { passive: true, capture: true }));
+  show();
+  document.addEventListener('visibilitychange', () => {
+    if (!_updateDone || _updateDone.finished || !_updateDone.since) return;
+    if (document.hidden) _pauseUpdateDoneBanner();
+    else _resumeUpdateDoneBanner();
+  });
+});
+
+// A dismissed banner keeps polling: the manifest also carries the settings
+// in js/site-config.js, which have to reach every open tab. It just isn't
+// shown again this session.
 async function checkForUpdate() {
-  if (_updateDismissed) return; // user already dismissed; stop bothering them this session
+  _lastUpdateCheckAt = Date.now();
   try {
     const res = await fetch(VERSION_MANIFEST_URL + '?_=' + Date.now(), { cache: 'no-store' });
     if (!res.ok) return; // server unavailable — fail silently
     const data = await res.json();
+    // Kept apart so a fault in the settings can never stop update detection.
+    try { applySiteConfig(data); } catch (e) { console.error('site-version.json settings not applied:', e); }
+    const min =typeof data.min_version === 'string' ? data.min_version.trim() : '';
+    _belowMinVersion = /^\d+(\.\d+)*$/.test(min) && compareVersions(CURRENT_VERSION, min) < 0;
     const latest = (data.version || '').trim();
     if (latest && latest !== CURRENT_VERSION) {
-      document.getElementById('banner-new-version').textContent = 'v' + latest;
+      _updatePending = true;
+      // Fire-and-forget: gets a head start on the reload button/auto-reload
+      // below (both also await this themselves, so it's safe either way) —
+      // by the time either actually fires, the purge has usually already
+      // completed instead of adding its ~instant caches.delete() latency to
+      // the critical path of the click itself.
+      _latestVersion = latest;
+      _noteOutdated();
+      purgeUpdateCacheAndWait();
+      document.getElementById('banner-new-version').textContent = latest;
+      // Opted in to silent updates, or the update is overdue: see if this
+      // is already a safe moment to apply it.
+      maybeForceUpdateOutsideQuiz();
+      // Dismissed, or reminder hidden: never occupy BannerManager's queue for it.
+      if (_updateDismissed) return;
+      if (typeof getSetting === 'function' && getSetting('notifications', 'hideUpdateReminder') === true) return;
       BannerManager.request('update');
     }
   } catch (_) {
@@ -1832,11 +2971,261 @@ async function checkForUpdate() {
   }
 }
 
+// Wipes sw.js's CACHE_NAME (see that file's matching listener) so the very
+// next reload's fetches for style.css/course-config.js/banner-manager.js/
+// themes.js/the MathJax bundle miss cache and hit the network fresh, instead
+// of stale-while-revalidate needing a second reload to actually show up.
+// Only ever called from an actual version-mismatch path below — ordinary
+// browsing never touches this, so the normal cache-first speed is untouched
+// outside of an update. Resolves either way (network error, no controller
+// yet, or the SW just not answering in time) so a reload is never blocked.
+//
+// At most once per new version per browser: the worker refills the whole
+// precache list after every purge, and before this guard a tab left open on
+// an old version repeated that on every update poll (~2.7 MB each time).
+// The worker's cache is shared by every tab, so one purge (UPDATE_PURGED_KEY)
+// covers them all; _purge covers this tab when localStorage is unavailable.
+const UPDATE_PURGED_KEY = STORAGE_PREFIX + '-update-purged';
+let _purge = null;  // { version, promise }
+function purgeUpdateCacheAndWait() {
+  if (_purge && _purge.version === _latestVersion) return _purge.promise;
+  let purgedFor = null;
+  try { purgedFor = localStorage.getItem(UPDATE_PURGED_KEY); } catch (_) {}
+  const promise = (_latestVersion && purgedFor === _latestVersion) ? Promise.resolve() : new Promise((resolve) => {
+    if (!('serviceWorker' in navigator) || !navigator.serviceWorker.controller) { resolve(); return; }
+    const channel = new MessageChannel();
+    const timeout = setTimeout(resolve, 2000); // don't let an unresponsive SW hang the reload
+    channel.port1.onmessage = () => { clearTimeout(timeout); resolve(); };
+    try {
+      navigator.serviceWorker.controller.postMessage({ type: 'purge-update-cache' }, [channel.port2]);
+      try { if (_latestVersion) localStorage.setItem(UPDATE_PURGED_KEY, _latestVersion); } catch (_) {}
+    } catch (_) {
+      clearTimeout(timeout);
+      resolve();
+    }
+  });
+  _purge = { version: _latestVersion, promise };
+  return promise;
+}
+
+// Called by the update banner's Reload button. Purges first (a no-op when
+// checkForUpdate() above already fired it for this version) so this single
+// reload actually shows the update, not just schedules it for next time.
+async function reloadForUpdate() {
+  await purgeUpdateCacheAndWait();
+  location.reload();
+}
+
 function dismissUpdate() {
   _updateDismissed = true;
   document.getElementById('update-banner').classList.remove('visible');
   BannerManager.release('update');
 }
+
+// ─── Random N full-screen reminder ───────────────────────────────────────────
+// Shares BannerManager with update/bug/theme so it never overlaps them. It
+// stays visible for 10 seconds of actual on-screen time; if the update banner
+// preempts it, both the timeout and the receding outline pause and resume when
+// this banner gets its turn again.
+const FULLSCREEN_HINT_DURATION = 10 * 1000;
+const FULLSCREEN_HINT_FADE_MS = 300;
+let _fullscreenHintRemaining = FULLSCREEN_HINT_DURATION;
+let _fullscreenHintTimer = null;
+let _fullscreenHintFadeTimer = null;
+let _fullscreenHintFadeEndHandler = null;
+let _fullscreenHintFading = false;
+let _fullscreenHintVisibleAt = 0;
+let _fullscreenHintRequested = false;
+let _fullscreenHintShownThisFullscreen = false;
+let _fullscreenHintWasFullscreen = !!document.fullscreenElement;
+
+function _studySettingNow(key, defaultValue) {
+  return (typeof getSetting === 'function')
+    ? getSetting('study', key)
+    : _readStudySettingRaw(key, defaultValue);
+}
+
+function _fullscreenHintEligible() {
+  if (!document.fullscreenElement) return false;
+  if (typeof isQuizTimerActive !== 'function' || !isQuizTimerActive()) return false;
+  if (_studySettingNow('fullscreenRandomN', true) !== true) return false;
+  if (_studySettingNow('hideFullscreenReminder', true) === true) return false;
+  if (typeof getSetting === 'function' && getSetting('notifications', 'goSilent') === true) return false;
+  return true;
+}
+
+function _drawFullscreenHintRing(durationMs) {
+  const banner = document.getElementById('fullscreen-hint-banner');
+  const ring = banner && banner.querySelector('.fullscreen-hint-ring');
+  const rect = ring && ring.querySelector('rect');
+  if (!banner || !ring || !rect) return;
+
+  const w = banner.offsetWidth, h = banner.offsetHeight;
+  const strokeW = 1.5;
+  const inset = strokeW / 2;
+  const radius = parseFloat(getComputedStyle(banner).borderTopLeftRadius) || 0;
+  ring.setAttribute('viewBox', `0 0 ${w} ${h}`);
+  rect.setAttribute('x', inset);
+  rect.setAttribute('y', inset);
+  rect.setAttribute('width', Math.max(0, w - inset * 2));
+  rect.setAttribute('height', Math.max(0, h - inset * 2));
+  rect.setAttribute('rx', Math.max(0, radius - inset));
+
+  const len = rect.getTotalLength();
+  const elapsedFraction = Math.max(0, Math.min(1, 1 - durationMs / FULLSCREEN_HINT_DURATION));
+  rect.style.transition = 'none';
+  rect.style.strokeDasharray = len;
+  rect.style.strokeDashoffset = len * elapsedFraction;
+  void rect.getBoundingClientRect();
+  rect.style.transition = `stroke-dashoffset ${Math.max(0, durationMs)}ms linear`;
+  requestAnimationFrame(() => { rect.style.strokeDashoffset = len; });
+}
+
+function _pauseFullscreenHint() {
+  if (!_fullscreenHintVisibleAt) return;
+  const elapsed = performance.now() - _fullscreenHintVisibleAt;
+  _fullscreenHintRemaining = Math.max(0, _fullscreenHintRemaining - elapsed);
+  _fullscreenHintVisibleAt = 0;
+  clearTimeout(_fullscreenHintTimer);
+  _fullscreenHintTimer = null;
+}
+
+function _clearFullscreenHintFadeWait() {
+  clearTimeout(_fullscreenHintFadeTimer);
+  _fullscreenHintFadeTimer = null;
+  const banner = document.getElementById('fullscreen-hint-banner');
+  if (banner && _fullscreenHintFadeEndHandler) {
+    banner.removeEventListener('animationend', _fullscreenHintFadeEndHandler);
+  }
+  _fullscreenHintFadeEndHandler = null;
+}
+
+function _hideFullscreenHintVisual() {
+  _pauseFullscreenHint();
+  const banner = document.getElementById('fullscreen-hint-banner');
+  if (banner) { banner.classList.remove('visible', 'hiding'); banner.hidden = true; }
+}
+
+function _completeFullscreenHintFade() {
+  if (!_fullscreenHintFading) return;
+  _clearFullscreenHintFadeWait();
+  _fullscreenHintFading = false;
+  _fullscreenHintVisibleAt = 0;
+  _fullscreenHintRemaining = FULLSCREEN_HINT_DURATION;
+  _fullscreenHintRequested = false;
+  const banner = document.getElementById('fullscreen-hint-banner');
+  if (banner) { banner.classList.remove('visible', 'hiding'); banner.hidden = true; }
+
+  // cancel(), rather than release(), also removes this hint if an update
+  // banner happened to preempt it during the short fade-out animation.
+  if (window.BannerManager && typeof BannerManager.cancel === 'function') BannerManager.cancel('fullscreen-hint');
+  else if (window.BannerManager) BannerManager.release('fullscreen-hint');
+}
+
+function _fadeOutFullscreenHint() {
+  if (_fullscreenHintFading) return;
+  _pauseFullscreenHint();
+  _fullscreenHintFading = true;
+  const banner = document.getElementById('fullscreen-hint-banner');
+  if (!banner || !banner.classList.contains('visible')) {
+    _completeFullscreenHintFade();
+    return;
+  }
+
+  banner.classList.add('hiding');
+  _fullscreenHintFadeEndHandler = (event) => {
+    if (event.target === banner) _completeFullscreenHintFade();
+  };
+  banner.addEventListener('animationend', _fullscreenHintFadeEndHandler);
+  // Fallback for browsers/reduced-motion combinations that skip animationend.
+  _fullscreenHintFadeTimer = setTimeout(_completeFullscreenHintFade, FULLSCREEN_HINT_FADE_MS + 80);
+}
+
+function _showFullscreenHintVisual() {
+  // If another banner preempted us during our fade, do not let the queue
+  // resurrect a hint the user already dismissed (or whose 10s expired).
+  if (_fullscreenHintFading) {
+    _completeFullscreenHintFade();
+    return;
+  }
+  if (!_fullscreenHintEligible()) {
+    _cancelFullscreenHint();
+    return;
+  }
+  const banner = document.getElementById('fullscreen-hint-banner');
+  if (!banner) {
+    _cancelFullscreenHint();
+    return;
+  }
+  _clearFullscreenHintFadeWait();
+  banner.hidden = false;
+  banner.classList.remove('hiding');
+  banner.classList.add('visible');
+  _fullscreenHintVisibleAt = performance.now();
+  _drawFullscreenHintRing(_fullscreenHintRemaining);
+  clearTimeout(_fullscreenHintTimer);
+  _fullscreenHintTimer = setTimeout(_fadeOutFullscreenHint, _fullscreenHintRemaining);
+}
+
+function _cancelFullscreenHint() {
+  clearTimeout(_fullscreenHintTimer);
+  _fullscreenHintTimer = null;
+  _clearFullscreenHintFadeWait();
+  _fullscreenHintFading = false;
+  _fullscreenHintVisibleAt = 0;
+  _fullscreenHintRemaining = FULLSCREEN_HINT_DURATION;
+  _fullscreenHintRequested = false;
+  const banner = document.getElementById('fullscreen-hint-banner');
+  if (banner) { banner.classList.remove('visible', 'hiding'); banner.hidden = true; }
+  if (window.BannerManager && typeof BannerManager.cancel === 'function') BannerManager.cancel('fullscreen-hint');
+  else if (window.BannerManager) BannerManager.release('fullscreen-hint');
+}
+
+// The entire hint is clickable/tappable. Start fading immediately, then route
+// directly to the Study tab and the full-screen setting instead of making the
+// user hunt through Settings.
+function openFullscreenHintSettings() {
+  _fadeOutFullscreenHint();
+  if (typeof openSettingsStudySection === 'function') {
+    openSettingsStudySection('fullscreenRandomN');
+  } else if (typeof openSettingsScreen === 'function') {
+    openSettingsScreen('study', 'fullscreenRandomN');
+  }
+}
+
+function _maybeShowFullscreenHint() {
+  if (_fullscreenHintShownThisFullscreen || _fullscreenHintRequested || !_fullscreenHintEligible()) return;
+  _fullscreenHintShownThisFullscreen = true;
+  _fullscreenHintRequested = true;
+  _fullscreenHintRemaining = FULLSCREEN_HINT_DURATION;
+  BannerManager.request('fullscreen-hint');
+}
+
+// Called by the two Settings > Study switches so changing either preference
+// takes effect immediately without requiring a new quiz or fullscreen cycle.
+function syncFullscreenHintPreference() {
+  if (_fullscreenHintEligible()) _maybeShowFullscreenHint();
+  else _cancelFullscreenHint();
+}
+
+BannerManager.register('fullscreen-hint', _showFullscreenHintVisual, _hideFullscreenHintVisual);
+
+document.addEventListener('fullscreenchange', () => {
+  const nowFullscreen = !!document.fullscreenElement;
+  if (nowFullscreen && !_fullscreenHintWasFullscreen) {
+    _fullscreenHintShownThisFullscreen = false;
+    _maybeShowFullscreenHint();
+  } else if (!nowFullscreen) {
+    _cancelFullscreenHint();
+    _fullscreenHintShownThisFullscreen = false;
+  }
+  _fullscreenHintWasFullscreen = nowFullscreen;
+});
+
+window.addEventListener('quiztimer:activechange', (event) => {
+  if (event && event.detail && event.detail.active) _maybeShowFullscreenHint();
+  else _cancelFullscreenHint();
+});
 
 // ─── Bug report nudge banner ("Report on Telegram") ───────────────────────────
 // Shows once a day, after ~10 minutes of active use — not on a repeating timer.
@@ -1857,7 +3246,14 @@ BannerManager.register('bug',
   }
 );
 
+// Three ✕ in all turn on "Hide bug report reminder" (same rule as the
+// theme nudge, js/themes.js). The count starts over then, so turning the
+// setting back off gives three more.
+const BUG_NUDGE_REFUSALS_KEY = STORAGE_PREFIX + '-bug-nudge-refusals';
+const BUG_NUDGE_REFUSALS_MAX = 3;
+
 function showBugBanner() {
+  if (typeof getSetting === 'function' && getSetting('notifications', 'hideBugReportReminder') === true) return;
   const last = +localStorage.getItem(BUG_NUDGE_KEY) || 0;
   if (Date.now() - last < BUG_NUDGE_INTERVAL) return;
   BannerManager.request('bug');
@@ -1872,13 +3268,35 @@ function dismissBugBanner() {
     banner.classList.remove('visible', 'hiding');
   }, { once: true });
   BannerManager.release('bug');
+  const refusals = (+localStorage.getItem(BUG_NUDGE_REFUSALS_KEY) || 0) + 1;
+  if (refusals >= BUG_NUDGE_REFUSALS_MAX && typeof setSetting === 'function') {
+    localStorage.removeItem(BUG_NUDGE_REFUSALS_KEY);
+    setSetting('notifications', 'hideBugReportReminder', true);
+    // After the slide-out: the setting's display:none would cut it short.
+    setTimeout(() => { if (typeof applyNotificationSettings === 'function') applyNotificationSettings(); }, 350);
+  } else {
+    localStorage.setItem(BUG_NUDGE_REFUSALS_KEY, String(refusals));
+  }
 }
 
 // Run immediately on load, then on the set interval
 window.addEventListener('DOMContentLoaded', () => {
   checkForUpdate();
-  setInterval(checkForUpdate, VERSION_CHECK_INTERVAL);
+  // Hidden tabs don't poll: every poll is a billed request, and a tab nobody
+  // is looking at has no use for an update until it's shown again (below).
+  startSitePoll('update', () => { if (!document.hidden && sitePollDue('update', _lastUpdateCheckAt)) checkForUpdate(); });
 
   // Telegram/bug-report nudge: once a day, after 10 minutes of usage.
   setTimeout(showBugBanner, BUG_NUDGE_DELAY);
+
+  // Coming back to the tab: catch up on the polls skipped while it was
+  // hidden — at most one request per interval, however often tabs are
+  // switched. Otherwise just retry a pending silent/overdue update, which
+  // was only ever re-checked when *leaving* a quiz (showLanding() above) or
+  // on the next 5-min poll.
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) return;
+    if (Date.now() - _lastUpdateCheckAt >= sitePollMs('update')) checkForUpdate();
+    else maybeForceUpdateOutsideQuiz();
+  });
 });

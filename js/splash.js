@@ -98,6 +98,29 @@
     CHAINREACTION:  () => isDate(12, 2),  // First controlled nuclear chain reaction, 1942
     WRIGHTFLIGHT:   () => isDate(12, 17), // Wright brothers' first flight, 1903
     JWST:           () => isDate(12, 25), // James Webb Space Telescope launch, 2021
+
+    // ── PHYS 161 (mechanics & thermodynamics) ──────────────────────
+    NEWTON:         () => isDate(1, 4),   // Newton's birthday, 1643 (Gregorian)
+    KEPLER:         () => isDate(1, 6),   // Kepler's birthday, 1572 (Gregorian)
+    FOUCAULT:       () => isDate(2, 3),   // Foucault pendulum at the Paris Observatory, 1851
+    GALILEO:        () => isDate(2, 15),  // Galileo's birthday, 1564
+    BOLTZMANN:      () => isDate(2, 20),  // Boltzmann's birthday, 1844
+    NOETHER:        () => isDate(3, 23),  // Emmy Noether's birthday, 1882
+    JOULE:          () => isDate(12, 24), // Joule's birthday, 1818
+    CUSTOM:         () => isDateRange(11, 1, 7), // Exam week
+
+    // ── PHYS 162 (electricity, magnetism & optics) ─────────────────
+    AMPERE:         () => isDate(1, 20),  // Ampère's birthday, 1775
+    VOLTA:          () => isDate(2, 18),  // Volta's birthday, 1745
+    HERTZ:          () => isDate(2, 22),  // Hertz's birthday, 1857
+    LENZ:           () => isDate(2, 24),  // Lenz's birthday, 1804 (Gregorian)
+    OHM:            () => isDate(3, 16),  // Ohm's birthday, 1789
+    GAUSS:          () => isDate(4, 30),  // Gauss's birthday, 1777
+    MAXWELL:        () => isDate(6, 13),  // Maxwell's birthday, 1831
+    COULOMB:        () => isDate(6, 14),  // Coulomb's birthday, 1736
+    TESLA:          () => isDate(7, 10),  // Tesla's birthday, 1856
+    OERSTED:        () => isDate(8, 14),  // Ørsted's birthday, 1777
+    FARADAY:        () => isDate(9, 22),  // Faraday's birthday, 1791
   };
 
   function eligible () {
@@ -162,13 +185,34 @@
     return choice[0];
   }
 
+  /* ── {pct} / {p} / {count} placeholders ───────────────────────────
+     The odds splash states its own real chance: the demon roll (below)
+     takes DEMON_CHANCE of draws, the rest are a uniform pick from the
+     pool eligible right now, so one splash's chance is
+     (1 - DEMON_CHANCE) / pool size. {pct} is that in percent, {p} an
+     upper bound rounded up to 3 decimals. {count} is every splash there
+     is, time- and date-specific ones included, plus the demon's. Filled
+     in on the way out, so the no-repeat window still keys on the raw
+     text. */
+  function fillPlaceholders (text, poolSize) {
+    if (text.indexOf('{') === -1) return text;
+    const p = (1 - DEMON_CHANCE) / poolSize;
+    return text
+      .replace('{pct}', (p * 100).toFixed(2))
+      .replace('{p}', String(Math.ceil(p * 1000) / 1000))
+      .replace('{count}', String(splashes.length + 1));
+  }
+
   function pick () {
     if (!splashes) return null; // init() hasn't resolved yet — extremely unlikely by the
                                  // time anything can call this, but guards eligible()'s
                                  // .filter() against a null splashes either way.
     const pool = eligible();
     if (!pool.length) return null;
+    return fillPlaceholders(pickRaw(pool), pool.length);
+  }
 
+  function pickRaw (pool) {
     // A due holiday/anniversary splash always wins the first draw of
     // the day it's active, regardless of the no-repeat window below.
     const mandatoryChoice = pickDueMandatory(pool);
@@ -294,14 +338,45 @@
     }
   }
 
+  /* ── Deploy message ────────────────────────────────────────────────
+     DEPLOY_MESSAGE (js/data/changelog.js), when not empty, is the splash
+     the first time the main screen shows after this browser gets the
+     deploy, and never again. A browser visiting for the first time never
+     sees it: it is marked as handled straight away. Keyed on version AND
+     text, so a new message on a redeploy without a version bump still
+     shows once. */
+  const DEPLOY_MSG_KEY = STORAGE_PREFIX + '_deploy_msg_seen';
+  // Every earlier visit left a device id (js/site-visits.js runs on each
+  // page load); read before this load creates one for a first visit.
+  const returningBrowser = (() => {
+    try { return !!localStorage.getItem(STORAGE_PREFIX + '_forum_device_id'); } catch (e) { return false; }
+  })();
+
+  // The message, once, or null. Waits while the main screen is hidden (a
+  // shared solution link opens over it), so it isn't used up unseen.
+  function takeDeployMessage () {
+    const msg = typeof DEPLOY_MESSAGE === 'string' ? DEPLOY_MESSAGE.trim() : '';
+    if (!msg || typeof CURRENT_VERSION === 'undefined') return null;
+    const landing = document.getElementById('landingScreen');
+    if (landing && landing.classList.contains('hidden')) return null;
+    const id = CURRENT_VERSION + '\n' + msg;
+    try {
+      if (localStorage.getItem(DEPLOY_MSG_KEY) === id) return null;
+      localStorage.setItem(DEPLOY_MSG_KEY, id);
+    } catch (e) { return null; }   // can't remember it: better never than every time
+    return returningBrowser ? msg : null;
+  }
+
   function showNewSplash () {
     const el = document.getElementById('splashText');
     if (!el || !splashes) return;
 
     exitDemonModeIfActive();
 
-    let text;
-    if (Math.random() < DEMON_CHANCE) {
+    let text = takeDeployMessage();
+    if (text) {
+      // shown as is: no demon roll, not part of the no-repeat window
+    } else if (Math.random() < DEMON_CHANCE) {
       text = DEMON_SPLASH;
       enterDemonMode();
     } else {
@@ -314,7 +389,55 @@
     el.style.animation = 'none';
     void el.offsetWidth; // force reflow
     el.style.animation = '';
+    noteBounceActivity();
   }
+
+  // ── The bounce rests when nobody is around ──────────────────────────────
+  // It was the main GPU cost of an idle menu. After a minute with no activity
+  // its speed eases down to zero, wherever in the bounce it happens to be, and
+  // any activity eases it back up, so it never jumps.
+  const BOUNCE_IDLE_MS = 60 * 1000;
+  const BOUNCE_EASE_MS = 1500;
+  let bounceIdleTimer = 0;
+  let bounceEaseFrame = 0;
+  let bounceResting = false;
+
+  function easeBounceTo (rate) {
+    cancelAnimationFrame(bounceEaseFrame);
+    const el = document.getElementById('splashText');
+    // None while the splash isn't rendered, or with reduced motion.
+    const bounce = el && el.getAnimations().find(a => a.animationName);
+    if (!bounce) return;
+    if (rate > 0) bounce.play();
+    const from = bounce.playbackRate;
+    const start = performance.now();
+    const step = (now) => {
+      const t = Math.min((now - start) / BOUNCE_EASE_MS, 1);
+      bounce.playbackRate = from + (rate - from) * t * (2 - t);
+      if (t < 1) bounceEaseFrame = requestAnimationFrame(step);
+      else if (rate === 0) bounce.pause();
+    };
+    bounceEaseFrame = requestAnimationFrame(step);
+  }
+
+  function noteBounceActivity () {
+    clearTimeout(bounceIdleTimer);
+    bounceIdleTimer = setTimeout(() => {
+      bounceResting = true;
+      easeBounceTo(0);
+    }, BOUNCE_IDLE_MS);
+    if (bounceResting) {
+      bounceResting = false;
+      easeBounceTo(1);
+    }
+  }
+
+  ['mousemove', 'mousedown', 'keydown', 'touchstart', 'wheel', 'scroll'].forEach((type) => {
+    window.addEventListener(type, noteBounceActivity, { capture: true, passive: true });
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) noteBounceActivity();
+  });
 
   // Shown instead of nothing if splashes.json can't be fetched — most
   // commonly because the page is opened as a local file:// path rather
@@ -324,7 +447,11 @@
 
   async function init () {
     try {
-      const res = await fetch('course/splashes.json', { cache: 'force-cache' });
+      // 'no-cache', not 'force-cache': force-cache kept serving whatever
+      // splashes.json the browser had ever cached, so a redeploy's new
+      // splashes never showed up. Same fix as loadManualData() in
+      // js/manual.js — revalidates first, still a cheap 304 when unchanged.
+      const res = await fetch('course/splashes.json', { cache: 'no-cache' });
       if (!res.ok) throw new Error('bad response');
       const data = await res.json();
       splashes = (Array.isArray(data) && data.length) ? data : FALLBACK_SPLASHES;

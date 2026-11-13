@@ -22,13 +22,19 @@ const FONT_OPTIONS = [
 ];
 function fontOptionById(id){ return FONT_OPTIONS.find(f => f.id === id) || FONT_OPTIONS[0]; }
 
+// Classic (the plain body styles, no data-theme) is the default for anyone
+// who hasn't picked a theme; its id stays 'default', as saved before it was
+// renamed.
+const DEFAULT_COLOR_THEME = 'default';
 const THEMES = [
-  { id:'default', name:'Default', night:{bg:'#0d1117',accent:'#79AFFF',accent2:'#FF8A98'}, day:{bg:'#ffffff',accent:'#2C6DD5',accent2:'#C73A4A'} },
+  { id:'default', name:'Classic', night:{bg:'#0d1117',accent:'#79AFFF',accent2:'#FF8A98'}, day:{bg:'#ffffff',accent:'#2C6DD5',accent2:'#C73A4A'} },
   { id:'nord',    name:'Nord',    night:{bg:'#2E3440',accent:'#88C0D0',accent2:'#B48EAD'}, day:{bg:'#ECEFF4',accent:'#4C7EA8',accent2:'#8067A8'} },
   { id:'sakura',  name:'Sakura',  night:{bg:'#241A20',accent:'#FF7AA8',accent2:'#8FD6A8'}, day:{bg:'#FFF5F7',accent:'#E8558A',accent2:'#4FAE7A'} },
   { id:'cyber',   name:'Cyber',   night:{bg:'#05060A',accent:'#00F0FF',accent2:'#FF2FD0'}, day:{bg:'#F2F4FB',accent:'#7A00E0',accent2:'#D6009C'} },
   { id:'forest',  name:'Forest',  night:{bg:'#141A13',accent:'#4F9D7A',accent2:'#D98A3D'}, day:{bg:'#F5F2E8',accent:'#3F7D55',accent2:'#B5651D'} },
-  { id:'solar',   name:'Solar',   night:{bg:'#002B36',accent:'#2AA1D6',accent2:'#D98032'}, day:{bg:'#FDF6E3',accent:'#1B7BAB',accent2:'#B85C1E'} },
+  { id:'solar',   name:'Solar',   night:{bg:'#15110E',accent:'#FFA63D',accent2:'#6FB7FF'}, day:{bg:'#FFF8EC',accent:'#A85A00',accent2:'#1F6FB8'} },
+  { id:'dusk',    name:'Dusk',    night:{bg:'#17132A',accent:'#B69CFF',accent2:'#FFB38A'}, day:{bg:'#F7F4FF',accent:'#6A4FC9',accent2:'#C25A2E'} },
+  { id:'ocean',   name:'Ocean',   night:{bg:'#071A26',accent:'#4FE0C0',accent2:'#FF8A6B'}, day:{bg:'#F2FAFB',accent:'#00806C',accent2:'#D4553A'} },
 ];
 
 /* ── color math ── */
@@ -49,7 +55,7 @@ function deriveTheme(bg, text, accent, accent2){
 }
 
 /* ── state ── */
-function getColorTheme(){ return localStorage.getItem(THEME_KEY) || 'default'; }
+function getColorTheme(){ return localStorage.getItem(THEME_KEY) || DEFAULT_COLOR_THEME; }
 function defaultCustomDraft(){
   return {
     night:{ bg:'#0d1117', text:'#e6edf3', accent:'#58a6ff', accent2:'#ff8a98' },
@@ -80,15 +86,83 @@ function applyCustomForCurrentMode(){
   s.setProperty('--svg-blue', der.accent); s.setProperty('--svg-red', der.accent2);
   s.setProperty('--radius-mult', String(draft.radius || 1));
   s.setProperty('--sans', fo.sans); s.setProperty('--mono', fo.mono);
+  if (typeof updateOnColorVars === 'function') updateOnColorVars();
 }
 window.__applyCustomOnModeChange = function(){ if (getColorTheme()==='custom') applyCustomForCurrentMode(); };
 
+// Day/night and colour-theme switches as one crossfade of the whole page
+// (View Transitions: the browser snapshots the page before and after and
+// fades between the two pictures) instead of every element running its
+// own colour transition. On Solve-All's 150 problems the per-element way
+// meant starting thousands of transitions at once and took seconds.
+// html.theme-vt switches those per-element transitions off for the swap
+// (css/style.css). Browsers without View Transitions, and reduced motion,
+// just run the change: the old per-element fade, or instant.
+let _themeVtSeq = 0;
+function runThemeChange(change){
+  const root = document.documentElement;
+  const reduce = root.classList.contains('settings-reduce-motion') ||
+    (window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches);
+  if (!document.startViewTransition || reduce || document.visibilityState !== 'visible') { change(); return; }
+  const seq = ++_themeVtSeq;
+  root.classList.add('theme-vt');
+  let vt;
+  try { vt = document.startViewTransition(change); }
+  catch (e) { root.classList.remove('theme-vt'); change(); return; }
+  // A second switch mid-fade skips this one (its change still runs; only
+  // `ready` rejects, which is expected); only the latest clears the class.
+  vt.ready.catch(() => {});
+  vt.finished.finally(() => { if (seq === _themeVtSeq) root.classList.remove('theme-vt'); });
+}
+window.runThemeChange = runThemeChange;
+
 let _fadeTimer = null;
 function themeFadeTick(){
+  // The page-wide crossfade already masks the font-family jump.
+  if (document.documentElement.classList.contains('theme-vt')) return;
   document.body.classList.add('theme-swap');
   clearTimeout(_fadeTimer);
   _fadeTimer = setTimeout(()=>document.body.classList.remove('theme-swap'), 180);
 }
+
+/* ── Auto-contrast for text sitting on solid theme-colored fills ──
+   Preset themes hand-pick --chrome-dark for the accent button text, but
+   the custom theme builder lets people choose literally any accent
+   color, and a couple of spots (the check-answer button, the new
+   correct/partial/wrong score boxes) need to stay readable no matter
+   what. Rather than hard-code a text color per theme, read the *live*
+   computed fill color and pick black or white by perceived brightness
+   (YIQ) — recomputed every time a theme or day/night mode change could
+   have altered the underlying color. */
+function _onColorFor(varName){
+  const [r,g,b] = cssVarRgb(varName, document.body);
+  const yiq = (r * 299 + g * 587 + b * 114) / 1000;
+  return yiq >= 140 ? '#0d1117' : '#ffffff';
+}
+function updateOnColorVars(){
+  // cssVarRgb lives in js/theme-colors.js, which offline.html doesn't load
+  // (adding it there would change sw.js's precache list, and every browser
+  // would re-check that whole list). That page has none of the filled
+  // elements these colors are for, and the CSS falls back without them.
+  // Throwing here instead used to stop applyColorTheme() half-way there:
+  // its swatches and day/night button never updated.
+  if (typeof cssVarRgb !== 'function') return;
+  // All reads first, then only the writes that change something. Each
+  // write on <body> invalidates every element's style (the variables
+  // inherit), so interleaving read/write/read forced a full restyle per
+  // colour: ~3s on Solve-All's 150 problems for one day/night flip.
+  const next = {
+    '--on-accent':  _onColorFor('--accent'),
+    '--on-correct': _onColorFor('--correct'),
+    '--on-partial': _onColorFor('--partial'),
+    '--on-wrong':   _onColorFor('--wrong'),
+  };
+  const s = document.body.style;
+  for (const k in next) {
+    if (s.getPropertyValue(k) !== next[k]) s.setProperty(k, next[k]);
+  }
+}
+window.__updateOnColorVars = updateOnColorVars;
 
 function applyColorTheme(id, persist, skipFade){
   if (!skipFade) themeFadeTick();
@@ -101,6 +175,8 @@ function applyColorTheme(id, persist, skipFade){
     else document.body.setAttribute('data-theme', id);
   }
   if (persist) localStorage.setItem(THEME_KEY, id);
+  updateOnColorVars();
+  if (persist && typeof settingsSyncNoteLocalChanges === 'function') settingsSyncNoteLocalChanges(); // js/settings-sync.js
 }
 
 // Restore saved color theme immediately (avoid flash of default)
@@ -129,7 +205,12 @@ function renderThemeGrid(){
       <span class="ts-name">${t.name}</span>
     </button>`).join('') + customSwatch;
 }
-function selectTheme(id){ applyColorTheme(id, true); renderThemeGrid(); closeThemePanel(); }
+function selectTheme(id){
+  closeThemePanel();
+  // Picked during a nudge: the choice stands, and the banner's done.
+  if (_nudgeActive) { endThemeNudge(false); BannerManager.release('theme'); }
+  runThemeChange(() => { applyColorTheme(id, true); renderThemeGrid(); });
+}
 
 function toggleThemePanel(e){
   if (e) e.stopPropagation();
@@ -162,8 +243,15 @@ function populateCustomInputs(){
   document.getElementById('ctm-accent').value = d.accent;
   document.getElementById('ctm-accent2').value = d.accent2;
   document.getElementById('ctm-radius').value = _ctmDraft.radius;
-  document.getElementById('ctm-font').value = _ctmDraft.font;
+  syncCtmFontSelect();
   updateCtmPreview();
+}
+// Each option (and the closed select itself) drawn in the font it picks.
+function syncCtmFontSelect(){
+  const sel = document.getElementById('ctm-font');
+  [...sel.options].forEach(o => { o.style.fontFamily = fontOptionById(o.value).sans; });
+  sel.value = _ctmDraft.font;
+  sel.style.fontFamily = fontOptionById(_ctmDraft.font).sans;
 }
 function openCustomThemeModal(){
   closeThemePanel();
@@ -193,6 +281,7 @@ function updateCustomRadius(value){
 }
 function updateCustomFont(value){
   _ctmDraft.font = value;
+  syncCtmFontSelect();
   updateCtmPreview();
 }
 function updateCtmPreview(){
@@ -216,25 +305,56 @@ function saveCustomTheme(){
   closeCustomThemeModal();
 }
 
-/* ── theme nudge banner (~15 min after page load, at most once/day) ── */
+/* ── theme nudge banner (~15 min after page load, at most once/day) ──
+   The banner previews a random theme on the live page without saving it;
+   ✕ puts the previous one back. Hiding the banner (its own setting or Go
+   silent) has to stop the preview too, not just the banner: the CSS in
+   css/settings.css only hides the element, so a preview running behind it
+   used to stay on screen until a reload. Three ✕ in all turn the banner's
+   own setting on. */
 const NUDGE_INTERVAL = 24 * 60 * 60 * 1000; // 1 day
+const NUDGE_REFUSALS_KEY = STORAGE_PREFIX + '-theme-nudge-refusals';
+const NUDGE_REFUSALS_MAX = 3;
 let _nudgePrevTheme = null;
+let _nudgeActive = false;
+
+function themeNudgeSuppressed(){
+  // Inside Safe Exam Browser it would change the theme in the middle of a quiz.
+  if (isLockdownSession()) return true;
+  return typeof getSetting === 'function' &&
+    (getSetting('notifications', 'hideThemeNudge') === true || getSetting('notifications', 'goSilent') === true);
+}
+
+// Banner off and preview over. revert: put the previous theme back (✕, or
+// hidden by a setting); false when the person just picked a theme
+// themselves (selectTheme), which must not be undone.
+function endThemeNudge(revert){
+  _nudgeActive = false;
+  localStorage.setItem(NUDGE_KEY, String(Date.now()));
+  document.getElementById('theme-nudge-banner').classList.remove('visible');
+  if (revert) applyColorTheme(_nudgePrevTheme || DEFAULT_COLOR_THEME, false);
+}
 
 // The actual reveal is deferred to BannerManager so it only happens once
 // nothing higher-priority (update) or earlier-in-line (bug/telegram) is showing.
 BannerManager.register('theme',
   () => { // show
+    // Its turn may come long after it asked: the setting can be on by now.
+    if (themeNudgeSuppressed()) { setTimeout(() => BannerManager.release('theme'), 0); return; }
     const cur = getColorTheme();
-    const pool = THEMES.filter(t => t.id !== 'default' && t.id !== cur);
+    const pool = THEMES.filter(t => t.id !== cur);
     const pick = (pool.length ? pool : THEMES)[Math.floor(Math.random() * (pool.length || THEMES.length))];
     _nudgePrevTheme = cur;
+    _nudgeActive = true;
     applyColorTheme(pick.id, false);
     document.getElementById('theme-nudge-name').textContent = pick.name;
     document.getElementById('theme-nudge-banner').classList.add('visible');
   },
   () => { // hide (preempted by a higher-priority banner)
+    if (!_nudgeActive) return;
+    _nudgeActive = false;
     document.getElementById('theme-nudge-banner').classList.remove('visible');
-    applyColorTheme(_nudgePrevTheme || 'default', false);
+    applyColorTheme(_nudgePrevTheme || DEFAULT_COLOR_THEME, false);
   }
 );
 
@@ -244,15 +364,29 @@ function scheduleThemeNudge(){
   setTimeout(triggerThemeNudge, 15 * 60 * 1000);
 }
 function triggerThemeNudge(){
+  if (themeNudgeSuppressed()) return;
   const last = +localStorage.getItem(NUDGE_KEY) || 0;
   if (Date.now() - last < NUDGE_INTERVAL) return;
   BannerManager.request('theme');
 }
 function dismissThemeNudge(){
-  localStorage.setItem(NUDGE_KEY, String(Date.now()));
-  document.getElementById('theme-nudge-banner').classList.remove('visible');
-  applyColorTheme(_nudgePrevTheme || 'default', false);
+  if (!_nudgeActive) return;
+  endThemeNudge(true);
   BannerManager.release('theme');
+  const refusals = (+localStorage.getItem(NUDGE_REFUSALS_KEY) || 0) + 1;
+  localStorage.setItem(NUDGE_REFUSALS_KEY, String(refusals));
+  if (refusals >= NUDGE_REFUSALS_MAX && typeof setSetting === 'function') {
+    localStorage.removeItem(NUDGE_REFUSALS_KEY); // so turning the setting back off gives three more
+    setSetting('notifications', 'hideThemeNudge', true);
+    if (typeof applyNotificationSettings === 'function') applyNotificationSettings();
+  }
+}
+// Called by applyNotificationSettings() (js/settings.js) on every change,
+// including ones synced in from another device.
+function syncThemeNudgeSuppression(){
+  if (!themeNudgeSuppressed()) return;
+  if (_nudgeActive) endThemeNudge(true);
+  BannerManager.cancel('theme');
 }
 
 window.addEventListener('DOMContentLoaded', () => {

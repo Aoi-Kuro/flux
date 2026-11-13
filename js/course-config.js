@@ -22,18 +22,18 @@ const COURSES = {
   phys162: {
     storagePrefix: 'phys162',
     supabase: {
-      url: 'https://eammcjjsjyvmbjsloxpz.supabase.co',
+      url: 'https://tnvdwirpveqnjyvbuxvw.supabase.co',
       // Publishable key — safe to be public, RLS controls what it can
       // actually do (see the comment that used to live in
       // js/supabase-config.js). Never put the sb_secret_... key here.
-      publishableKey: 'sb_publishable_NjZjecxc0iP1JnPSk5cJWQ_qllgCF7P',
+      publishableKey: 'sb_publishable_DRjPrjYSPSZEkeIK28w5JA_8tOYSt_z',
     },
     // Public half of the VAPID keypair post-message.ts (in that project's
     // own superbase/edge-functions) signs pushes with. Public by design —
     // this is what identifies "a push claiming to be from this app", not
     // what lets anyone send one. Each Supabase project gets its own
     // keypair, so this is course-specific too.
-    pushVapidPublicKey: 'BHEaaW9g9lqgGVa8cpwWaXq8Sy6vSdxYSJbhRpshv1G5WRExKk0NHqpU3oRPF8vetfrGzjmlV9T1u_xl18LszGY',
+    pushVapidPublicKey: 'BDRo_Yl40BpT1hZXKWrYvgNyJXLPQQ2twT9-u4w4TR73UuMAf4F5m9Pce1_MEdk5LzpWJzi5HqIZK8Iso_s9JxQ',
     // How big a "Random N" draw is, and — in cumulative mode — how many
     // of those N come from the previous quiz vs. the current one. Courses
     // can differ here (more/fewer problems per exam), so this isn't a
@@ -47,7 +47,10 @@ const COURSES = {
     // screen (see forum.js's renderForumPinnedBanner) — an ordinary
     // message, nothing server-side marks it special, this id is the only
     // thing that says "this one is the pinned one".
-    pinnedMessageId: 336,
+    pinnedMessageId: null,
+    // The Netlify site this course deploys to (`netlify link`); minify.py
+    // --deploy refuses any other.
+    netlifySiteId: '64b151a5-f4e0-4cc6-8fd6-ef5728babcdb',
     // Which course this is for CHANGELOG.js's per-entry `scope` filtering
     // (js/data/changelog.js): 0 always means "both courses", so 0 is never
     // used here — this is the id that means "this course specifically".
@@ -62,6 +65,12 @@ const COURSES = {
     // course-specific, so they aren't repeated per course here.
     display: {
       courseCode: 'PHYS162',
+      // The name next to the logo in the top bar (Kanit Black Italic).
+      brandName: 'FLUX',
+      // Browser-tab name: the main page shows just this; offline.html and
+      // the editor add " | Offline" / " | Editorial". Shared-link titles
+      // are "<appName> Practice App".
+      appName: 'Flux',
       ogDescription: "Interactive physics practice quiz: electric fields, Gauss's law, circuits & more. Instant feedback with scoring.",
       twitterDescription: 'Interactive physics practice quiz for PHYS 162 course at Nazarbayev University.',
       siteUrl: 'https://your-domain.com/PHYS162_Practice_Quiz.html',
@@ -73,8 +82,8 @@ const COURSES = {
       // TODO(phys161 release): stand up the phys161 Supabase project
       // (schema + edge functions from superbase/), then fill these in.
       // Left blank on purpose — see below for what happens otherwise.
-      url: 'https://ntlonovwrpspqncmejdm.supabase.co',
-      publishableKey: 'sb_publishable_cj-dJARetQ3jv_1r3vqtKQ_kndImovt',
+      url: 'https://srbwxqixcqbkgziqehuf.supabase.co',
+      publishableKey: 'sb_publishable_c3qQR-aIOGtusd9cD4SjKg_rF3FYEMV',
     },
     // TODO(phys161 release): generate a fresh VAPID keypair for the
     // phys161 project (web-push generate-vapid-keys or equivalent), put
@@ -87,16 +96,22 @@ const COURSES = {
     // from the previous quiz in cumulative mode) since nothing else was
     // specified yet.
     quizSettings: {
-      size: 6,
+      size: 7,
       cumulativePrevCount: 3,
     },
     pinnedMessageId: 2,
     changelogScope: 1,
+    // The Netlify site this course deploys to (`netlify link`). minify.py
+    // --deploy refuses any other site, so a build of this course can't land
+    // on another course's site with this course's nickname list.
+    netlifySiteId: 'e4972310-9b75-4dad-ad86-675c2f54b3d9',
     // TODO(phys161 release): confirm ogDescription/twitterDescription
     // actually describe phys161's real topic coverage — copied from
     // course/course.json's phys161 block, not re-verified here.
     display: {
       courseCode: 'PHYS161',
+      brandName: 'IMPULSE',
+      appName: 'Impulse',
       ogDescription: 'Interactive physics practice quiz: kinematics, dynamics, thermodynamics & more. Instant feedback with scoring.',
       twitterDescription: 'Interactive physics practice quiz for PHYS 161 course at Nazarbayev University.',
       siteUrl: 'https://your-domain.com/PHYS161_Practice_Quiz.html',
@@ -181,14 +196,26 @@ if (COURSE_CHANGELOG_SCOPE == null) {
 // items" section of README.md.
 const _display = _active.display || COURSES.phys162.display;
 const COURSE_CODE = _display.courseCode;
-const COURSE_TITLE = `${COURSE_CODE} Practice Quiz`;
+const BRAND_NAME = _display.brandName;
+// Display-only: insert a space between the letter prefix and the digits
+// so "PHYS162" reads as "PHYS 162" wherever it's shown to a person —
+// works for any <letters><digits> course code, nothing course-specific
+// hardcoded here. Falls back to COURSE_CODE unchanged if it doesn't match
+// that shape (e.g. already has a space, or no trailing digits).
+const COURSE_CODE_DISPLAY = COURSE_CODE.replace(/^([A-Za-z]+)(\d+)$/, '$1 $2');
+const APP_NAME = _display.appName;
+// Shared-link (OG/Twitter) title — "Impulse Practice App".
+const SHARE_TITLE = `${APP_NAME} Practice App`;
 
-// offline.html and index.html share this file but want different <title>
-// text ("You're offline — ..." vs plain) — distinguished by filename
-// rather than by any DOM heuristic, since offline.html has none of the
-// OG/Twitter meta tags below to key off of.
-const _isOfflinePage = /offline\.html$/i.test(location.pathname);
-document.title = _isOfflinePage ? `You're offline — ${COURSE_TITLE}` : COURSE_TITLE;
+// offline.html sets its own title here ("Impulse | Offline") — told apart
+// by filename, since it has none of the OG/Twitter meta tags below to key
+// off of. index.html loads this file in <head> BEFORE its <title> (and
+// sets the title to APP_NAME with an inline script right after it);
+// setting document.title here with no <title> yet would create a second
+// one. The editor sets "<APP_NAME> | Editorial" itself in editor.js.
+if (/offline\.html$/i.test(location.pathname)) {
+  document.title = `${APP_NAME} | Offline`;
+}
 
 // index.html-only from here down — offline.html has none of these meta
 // tags, so each querySelector below just no-ops there (el is null). Kept
@@ -199,27 +226,15 @@ function _setMetaContent(selector, value) {
   const el = document.querySelector(selector);
   if (el) el.setAttribute('content', value);
 }
-_setMetaContent('meta[property="og:title"]', COURSE_TITLE);
-_setMetaContent('meta[name="twitter:title"]', COURSE_TITLE);
+_setMetaContent('meta[property="og:title"]', SHARE_TITLE);
+_setMetaContent('meta[name="twitter:title"]', SHARE_TITLE);
 _setMetaContent('meta[property="og:description"]', _display.ogDescription);
 _setMetaContent('meta[name="twitter:description"]', _display.twitterDescription);
 _setMetaContent('meta[property="og:url"]', _display.siteUrl);
 
-// The 4 "eyebrow" labels are all in <body>, not yet parsed when this
-// <head> script runs — deferred to DOMContentLoaded. Each is
-// `${COURSE_CODE} · <fixed mode name>`; the mode-name half is framework
-// copy, not course-specific, so it's written here rather than repeated
-// in every course's `display` block.
-window.addEventListener('DOMContentLoaded', () => {
-  const _setEyebrowText = (id, suffix) => {
-    const el = document.getElementById(id);
-    if (el) el.textContent = `${COURSE_CODE} · ${suffix}`;
-  };
-  _setEyebrowText('eyebrowLandingPractice', 'Practice Mode');
-  _setEyebrowText('eyebrowLandingSolveAll', 'Solve them all');
-  _setEyebrowText('eyebrowQuizHeader', 'Practice Mode');
-  _setEyebrowText('eyebrowSolveHeader', 'Solve Mode');
-});
+// The landing screen's course-code label (#eyebrowLandingPractice) and the
+// site name by the logo are filled by one-line inline scripts right after
+// them in index.html, so neither paints with stale text first.
 
 if (!SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY) {
   // Not fatal — forum.js/attempts-sync.js/push-notifications.js all already

@@ -37,6 +37,13 @@ function _isValidStoredAttempt(a) {
     && Array.isArray(a.answers);
 }
 
+// The small lock beside the mode of an attempt taken in lockdown mode.
+function lockdownMark(attempt) {
+  return attempt.locked
+    ? '<span class="mode-lock" role="img" title="Taken in lockdown mode" aria-label="Taken in lockdown mode">🔒</span>'
+    : '';
+}
+
 function loadStats() {
   try {
     const parsed = JSON.parse(localStorage.getItem(STATS_KEY));
@@ -60,6 +67,7 @@ function saveStats(arr) {
 function clearLocalAttemptsCache() {
   localStorage.removeItem(STATS_KEY);
   if (typeof _isStatsScreenOpen === 'function' && _isStatsScreenOpen()) renderStats();
+  if (typeof onAttemptRecorded === 'function') onAttemptRecorded();
 }
 
 // ── Timer ─────────────────────────────────────────────────────────────────────
@@ -96,16 +104,19 @@ async function computeAttemptHash(identityName, quizNum, mode, attemptedAt, scor
 // Fire-and-forget from checkAll() (not awaited — the hash computation and
 // any resulting sync attempt happen in the background while the person is
 // already looking at their results panel, same as this file's other
-// best-effort network calls).
-async function recordAttemptFromQuiz(score, maxScore, mode, answers) {
-  const dur = stopAttemptTimer();
+// best-effort network calls). `dur` is passed in (via stopAttemptTimer(),
+// called once in checkAll() itself) rather than this function calling
+// stopAttemptTimer() directly — checkAll() also needs that same number
+// synchronously, to render on the result panel, and stopAttemptTimer()
+// zeroes out _attemptStart on read, so a second call here would just get 0.
+async function recordAttemptFromQuiz(score, maxScore, mode, answers, dur) {
   const attemptedAt = new Date().toISOString();
   const identityName = (typeof getForumNickname === 'function' ? getForumNickname() : '') || '';
 
   const hash = await computeAttemptHash(identityName, selectedQuizNum, mode, attemptedAt, score, maxScore, answers);
 
   const stats = loadStats();
-  stats.push({
+  const attempt = {
     hash,
     quizNum: selectedQuizNum,
     mode,
@@ -115,13 +126,22 @@ async function recordAttemptFromQuiz(score, maxScore, mode, answers) {
     maxScore,
     answers,
     synced: false
-  });
+  };
+  stats.push(attempt);
   saveStats(stats);
   renderStats();
+  // Safe Exam Browser has no identity to sync with (see js/lockdown.js).
+  if (isLockdownSession()) dropOffLockdownAttempt(attempt);
   // Best-effort immediate sync — if there's no connection this just leaves
   // the attempt's synced:false as it already was, with the "not synced"
   // badge/Sync button covering the rest (see renderTable/syncAttempts).
   if (typeof syncAttempts === 'function') syncAttempts();
+  // Lets the live quiz screen refresh its "last 5 attempts" mini-panel
+  // (js/quiz-engine.js) right when this attempt actually lands in
+  // storage, rather than immediately after checkAll() returns — the hash
+  // computation above is async, so the save above happens strictly later
+  // than checkAll() finishes.
+  if (typeof onAttemptRecorded === 'function') onAttemptRecorded();
 }
 
 async function deleteAttempt(hash) {
@@ -131,6 +151,7 @@ async function deleteAttempt(hash) {
 
   saveStats(loadStats().filter(a => a.hash !== hash));
   renderStats();
+  if (typeof onAttemptRecorded === 'function') onAttemptRecorded();
 
   // Also delete server-side (delete-quiz-attempt Edge Function) so it
   // doesn't just reappear on the next sync/other device. Best-effort: if
@@ -144,27 +165,32 @@ async function deleteAttempt(hash) {
 
 // ── Review screen ────────────────────────────────────────────────────────────
 // Read-only replay of one stored attempt. Looks the original problem back up
-// in QUIZZES by (quiz_num, problem_id) from the attempt's own answers array,
-// then reuses numberCorrect/unitConversionFactor/unitStatus/fmt/fmtUnit
-// (all defined in quiz-engine.js) — the exact same grading functions
-// checkAll() itself calls — so a reviewed card is graded identically to how
-// it looked the moment it was actually checked, not a re-implementation
-// that could quietly drift out of sync with real grading over time.
+// in QUIZZES by (quiz_num, problem_id) from the attempt's own answers array.
+// The points shown are the ones awarded at the time (grading rules can
+// change); gradeAnswer/answerFeedbackHtml (js/answer-check.js) — what
+// checkAll() itself uses — only pick the hint wording. The stored value and
+// unit are shown together, as they were typed into the one answer field.
 function findReviewProblem(quizNum, problemId) {
-  const q = QUIZZES[quizNum - 1];
-  return q ? (q.problems.find(p => p.id === problemId) || null) : null;
+  // Active OR retired — retired problems stay openable from review (they
+  // just show as "DEL"); only a problem removed outright resolves to null.
+  return getQuizProblem(quizNum, problemId);
 }
 
 // Set by renderAttemptReview, read by paintForumProblemButtons via the
 // 'rv-forum-' prefix (js/forum.js) — see that call site for why.
 let _reviewProblemsForCounts = null;
 
+let _reviewReturnScrollY = 0;
+
 function openAttemptReview(hash) {
   const attempt = loadStats().find(a => a.hash === hash);
   if (!attempt) return;
+  _reviewReturnScrollY = typeof captureScreenScroll === 'function' ? captureScreenScroll() : (window.scrollY || 0);
   renderAttemptReview(attempt);
   document.getElementById('statsScreen')?.classList.remove('visible');
   document.getElementById('reviewScreen')?.classList.add('visible');
+  if (typeof scrollScreenToTop === 'function') scrollScreenToTop();
+  else window.scrollTo(0, 0);
   // Per-problem forum buttons just came into view — same 5s counts poll
   // live quiz cards use (idempotent, safe even if already running from
   // elsewhere).
@@ -172,17 +198,36 @@ function openAttemptReview(hash) {
 }
 
 function closeAttemptReview() {
+  // If the user got here by clicking a review score-box, its smooth
+  // scrollIntoView() may still be animating. That animation belongs to the
+  // review page, but the moment we hide the review it can keep running against
+  // the newly-restored Stats DOM. The result is a brief squashed/widened Stats
+  // layout and, more importantly, it can fight the saved scroll restoration.
+  // Cancel any in-flight document scroll before swapping the screens.
+  const currentY = window.scrollY || window.pageYOffset || 0;
+  window.scrollTo({ top: currentY, left: 0, behavior: 'auto' });
+
   document.getElementById('reviewScreen')?.classList.remove('visible');
   document.getElementById('statsScreen')?.classList.add('visible');
+  if (typeof restoreScreenScroll === 'function') restoreScreenScroll(_reviewReturnScrollY);
+  else window.scrollTo(0, _reviewReturnScrollY);
   if (typeof stopForumProblemCountsPolling === 'function') stopForumProblemCountsPolling();
   _reviewProblemsForCounts = null;
 }
 
 function _escAttr(s) { return (s || '').replace(/"/g, '&quot;'); }
 
+// Clicked from a pill in #reviewScoreBoxes — jumps down to that problem's
+// full card in #reviewProblems (see the matching reviewCard-N id set in
+// renderAttemptReview()).
+function scrollToReviewCard(idx) {
+  document.getElementById(`reviewCard-${idx}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
 function renderAttemptReview(attempt) {
   const metaEl = document.getElementById('reviewMeta');
   const listEl = document.getElementById('reviewProblems');
+  const boxesEl = document.getElementById('reviewScoreBoxes');
   if (!metaEl || !listEl) return;
 
   const quizName = QUIZZES[attempt.quizNum - 1]?.name || '';
@@ -191,7 +236,7 @@ function renderAttemptReview(attempt) {
 
   metaEl.innerHTML = `
     <span class="review-meta-item"><span class="review-meta-label">Quiz</span>#${attempt.quizNum} · ${quizName}</span>
-    <span class="review-meta-item"><span class="review-meta-label">Mode</span>${attempt.mode === 'cumulative' ? 'Cumulative' : 'Single'}</span>
+    <span class="review-meta-item"><span class="review-meta-label">Mode</span><span style="white-space:nowrap">${attempt.mode === 'cumulative' ? `Sets 1–${attempt.quizNum}` : 'Single Set'}${lockdownMark(attempt)}</span></span>
     <span class="review-meta-item"><span class="review-meta-label">Date</span>${dateStr} ${timeStr}</span>
     <span class="review-meta-item"><span class="review-meta-label">Duration</span>${fmtDuration(attempt.duration)}</span>
     <span class="review-meta-item"><span class="review-meta-label">Score</span>${attempt.score}/${attempt.maxScore}</span>`;
@@ -202,19 +247,38 @@ function renderAttemptReview(attempt) {
   // closeAttemptReview starting/stopping the shared poll.
   _reviewProblemsForCounts = attempt.answers.map(a => ({ id: a.problem_id, _quizNum: a.quiz_num }));
 
+  // Same score-box pill row the live quiz's result breakdown and the
+  // "Last attempts" mini-panel use (js/quiz-engine.js) — each pill jumps to
+  // that problem's card in the list below instead of just being decorative.
+  if (boxesEl) {
+    boxesEl.innerHTML = attempt.answers.map((a, idx) => {
+      const cls = a.points === 1 ? 'score-box-correct' : a.points === 0.9 ? 'score-box-partial' : 'score-box-wrong';
+      return `<span class="score-box ${cls}" title="${a.points} pt" onclick="scrollToReviewCard(${idx})">${problemLabel(a.quiz_num, a.problem_id)}</span>`;
+    }).join('');
+  }
+
   listEl.innerHTML = '';
   attempt.answers.forEach((a, idx) => {
     const p = findReviewProblem(a.quiz_num, a.problem_id);
     const card = document.createElement('div');
+    card.id = `reviewCard-${idx}`;
     card.className = 'problem-card review-problem-card';
+    const idArg = _escAttr(a.problem_id).replace(/'/g, "\\'");
+    // 📘 as on the quiz cards: js/solutions.js shows it only when this
+    // problem has a published solution — retired (DEL) ones included, since
+    // their solutions stay published and open like any other.
+    const flagHtml = typeof problemFlagHtml === 'function' ? problemFlagHtml(a.quiz_num, a.problem_id) : '';
     const forumRowHtml = `
         <div class="card-check-row" id="rv-forum-row-${idx}">
-          <button class="forum-problem-btn" id="rv-forum-btn-${idx}" title="Forum thread for ${_escAttr(a.problem_id)}"
-            onclick="openForumForProblem(${a.quiz_num}, '${_escAttr(a.problem_id).replace(/'/g, "\\'")}')">
+          <button class="forum-problem-btn" id="rv-forum-btn-${idx}" title="Forum thread for ${problemLabel(a.quiz_num, a.problem_id)}"
+            onclick="openForumForProblem(${a.quiz_num}, '${idArg}')">
             💬 <span id="rv-forum-total-${idx}"></span>
             <span class="forum-problem-btn-badge" id="rv-forum-badge-${idx}" style="display:none;"></span>
             <span class="forum-problem-btn-at" id="rv-forum-at-${idx}" style="display:none;">@</span>
           </button>
+          <button class="solution-btn" data-quiz="${a.quiz_num}" data-problem="${_escAttr(a.problem_id)}" style="display:none;"
+            title="Worked solution for ${problemLabel(a.quiz_num, a.problem_id)}"
+            onclick="openSolution(${a.quiz_num}, '${idArg}')">📘 Solution</button>
         </div>`;
 
     if (!p) {
@@ -223,13 +287,11 @@ function renderAttemptReview(attempt) {
       // instead of silently dropping the row from the review.
       card.classList.add('wrong');
       card.innerHTML = `
-        <div class="card-header"><span class="problem-num">${a.problem_id} · Quiz #${a.quiz_num}</span></div>
+        <div class="card-header"><span class="problem-num">${problemLabel(a.quiz_num, a.problem_id)} · Quiz #${a.quiz_num}</span>${flagHtml}</div>
         <div class="problem-text" style="color:var(--muted)">This problem's original text is no longer available.</div>
         <div class="answer-row">
-          <span class="answer-label">Value =</span>
-          <input class="answer-input" type="text" value="${_escAttr(a.entered_value)}" readonly tabindex="-1">
-          <span class="sep">·</span>
-          <input class="unit-input" type="text" value="${_escAttr(a.entered_unit)}" readonly tabindex="-1">
+          <span class="answer-label">Answer =</span>
+          <input class="answer-input" type="text" value="${_escAttr(joinAnswer(a.entered_value, a.entered_unit))}" readonly tabindex="-1">
         </div>
         <div class="feedback show">Recorded score: <strong>${a.points}</strong> pt</div>
         ${forumRowHtml}`;
@@ -237,47 +299,36 @@ function renderAttemptReview(attempt) {
       return;
     }
 
-    const numOk  = numberCorrect(a.entered_value, p.answer, unitConversionFactor(a.entered_unit, p.units));
-    const uStat  = unitStatus(a.entered_unit, p.units);
-    const unitOk = uStat === 'ok';
-    const pts    = a.points; // trust the score actually awarded at the time over a live recompute, in case grading rules ever change later
+    const typed = joinAnswer(a.entered_value, a.entered_unit);
+    const pts   = a.points; // trust the score actually awarded at the time over a live recompute, in case grading rules ever change later
+    const res   = { ...gradeAnswer(typed, p), pts };
 
     card.classList.add(pts === 1 ? 'correct' : pts === 0.9 ? 'partial' : 'wrong');
     const isCumulative = attempt.mode === 'cumulative' && a.quiz_num !== attempt.quizNum;
-    const numDisplay = isCumulative ? `${p.id} · Quiz #${a.quiz_num}` : p.id;
+    const pLabel = problemLabel(a.quiz_num, a.problem_id);
+    const numDisplay = isCumulative ? `${pLabel} · Quiz #${a.quiz_num}` : pLabel;
 
-    let fbClass, fbHtml;
-    if (pts === 1) {
-      fbClass = 'correct-fb';
-      fbHtml = `✓ Correct <span class="pts-badge pts-full">+1 pt</span>`;
-    } else if (pts === 0.9) {
-      fbClass = 'partial-fb';
-      const unitHint = uStat === 'invalid'
-        ? `unit format invalid — use spaces to multiply, e.g. <strong>${fmtUnit(p.units)}</strong>`
-        : `unit should be <strong>${fmtUnit(p.units)}</strong>`;
-      fbHtml = `✓ Value correct, but ${unitHint} <span class="pts-badge pts-partial">+0.9 pt</span>`;
-    } else {
-      fbClass = 'wrong-fb';
-      fbHtml = `✗ Expected ≈ <strong>${fmt(p.answer)}</strong> ${fmtUnit(p.units)} <span class="pts-badge pts-zero">+0 pt</span>`;
-    }
+    const fbClass = pts === 1 ? 'correct-fb' : pts === 0.9 ? 'partial-fb' : 'wrong-fb';
+    const fbHtml  = answerFeedbackHtml(res, p, true);
 
     card.innerHTML = `
       <div class="card-header">
         <span class="problem-num">${numDisplay}</span>
+        ${typeof handoutButtonHtml === 'function' ? handoutButtonHtml(a.quiz_num) : ''}
         <span class="problem-topic">${p.topic}</span>
+        ${flagHtml}
       </div>
       <div class="problem-text">${p.text}</div>
       <div class="answer-row">
-        <span class="answer-label">Value =</span>
-        <input class="answer-input ${numOk ? 'correct-input' : 'wrong-input'}" type="text" value="${_escAttr(a.entered_value)}" readonly tabindex="-1">
-        <span class="sep">·</span>
-        <input class="unit-input ${numOk ? (unitOk ? 'correct-unit' : 'partial-unit') : 'wrong-unit'}" type="text" value="${_escAttr(a.entered_unit)}" readonly tabindex="-1">
+        <span class="answer-label">Answer =</span>
+        <input class="answer-input ${pts === 1 ? 'correct-input' : pts === 0.9 ? 'partial-input' : 'wrong-input'}" type="text" value="${_escAttr(typed)}" readonly tabindex="-1">
       </div>
       <div class="feedback show ${fbClass}">${fbHtml}</div>
       ${forumRowHtml}`;
     listEl.appendChild(card);
   });
   renderMathIn(listEl);
+  if (typeof refreshSolutionButtons === 'function') refreshSolutionButtons();
 }
 
 // ── Filter state ──────────────────────────────────────────────────────────────
@@ -300,6 +351,7 @@ function openStatsScreen() {
   // carrying over whatever was left selected from the last visit.
   sfQuizzes = new Set([1, 2, 3, 4]);
   sfMode = 'all';
+  _attemptLogExpanded = false;
   // Hide field lines so they don't bleed through
   if (typeof setFieldLinesVisible === 'function') setFieldLinesVisible(false);
   landing.classList.add('fading-out');
@@ -390,6 +442,8 @@ function renderStats() {
   renderFilters();
   drawChart();
   renderTable();
+  renderTopicPerformance();
+  renderProblemsOverview();
   if (typeof updateExportButtonState === 'function') updateExportButtonState();
 }
 
@@ -437,7 +491,7 @@ function renderFilters() {
   const mg = document.createElement('div');
   mg.className = 'sf-group';
   mg.innerHTML = '<span class="sf-label">Mode:</span>';
-  [['all','All'],['single','Single'],['cumulative','Cumul.']].forEach(([val, label]) => {
+  [['all','All'],['single','Single'],['cumulative','Multi-set']].forEach(([val, label]) => {
     const btn = document.createElement('button');
     btn.className = 'sf-chip' + (sfMode === val ? ' active mode-active' : '');
     btn.textContent = label;
@@ -484,7 +538,7 @@ function drawChart() {
   }
 
   const maxAttempts = Math.max(...Object.values(byQuiz).map(a => a.length), 2);
-  const MAX_SCORE = 6;
+  const MAX_SCORE = 7;
 
   // Horizontal grid + Y labels
   for (let s = 0; s <= MAX_SCORE; s++) {
@@ -619,6 +673,51 @@ function initChartTooltip() {
 }
 
 // ── Table ─────────────────────────────────────────────────────────────────────
+// Only the first ATTEMPT_LOG_PREVIEW_COUNT rows show at full strength by
+// default — the rest render normally underneath but sit under a bottom
+// fade + a "Show all" overlay button (attempt-log-fade/-showall-btn, css/
+// stats.css) until expanded. _attemptLogExpanded persists across re-renders
+// triggered while the panel stays open (polling, filter changes, returning
+// from a per-problem forum visit) and is only reset back to collapsed on a
+// fresh openStatsScreen() — same "reset to default on fresh open" rule the
+// filters already follow.
+const ATTEMPT_LOG_PREVIEW_COUNT = 5;
+let _attemptLogExpanded = false;
+
+function expandAttemptLog() {
+  // renderTable() rebuilds #attemptLogScroll from scratch (new element, not
+  // a patched one), so the usual "measure the same element before/after"
+  // height animation doesn't apply here — instead: measure the old capped
+  // height first, let the rebuild happen (now uncapped, all rows already in
+  // the DOM), then re-cap the *new* element back down to that same starting
+  // height and animate it open. Rows are already there under the cap, so
+  // growing the max-height is what reveals them instead of a jump straight
+  // to full height.
+  const oldScroll = document.getElementById('attemptLogScroll');
+  const startH = oldScroll ? oldScroll.getBoundingClientRect().height : 0;
+
+  _attemptLogExpanded = true;
+  renderTable();
+
+  const newScroll = document.getElementById('attemptLogScroll');
+  if (!newScroll || !startH) return;
+  const endH = newScroll.scrollHeight;
+  if (endH <= startH) return; // nothing to animate
+  // .attempt-log-scroll (css/stats.css) already carries overflow:hidden and
+  // a max-height transition for the collapsed state — reuse that same
+  // transition here instead of declaring a second one, so growing to full
+  // height feels like the same animation, not a different one bolted on.
+  newScroll.style.maxHeight = startH + 'px';
+  void newScroll.offsetHeight; // force reflow so the next assignment transitions
+  requestAnimationFrame(() => { newScroll.style.maxHeight = endH + 'px'; });
+  const cleanup = () => {
+    newScroll.style.maxHeight = '';
+    newScroll.removeEventListener('transitionend', cleanup);
+  };
+  newScroll.addEventListener('transitionend', cleanup);
+  setTimeout(cleanup, 420);
+}
+
 function renderTable() {
   const wrap = document.getElementById('statsTableWrap');
   const attempts = getFiltered().slice().reverse(); // newest first
@@ -627,7 +726,7 @@ function renderTable() {
 
   const header = `
     <div class="stats-table-header">
-      <span class="stats-table-title">Attempt log <span class="sfp-live-dot" id="attemptsSyncDot" title="Synced and up to date" style="display:none;"></span></span>
+      <span class="stats-table-title">Attempt log <span class="sfp-live-dot" id="attemptsSyncDot" title="Synced" style="display:none;"></span></span>
       <span class="stats-table-header-right">
         <button class="stats-io-btn" id="statsExportBtn" onclick="openExportFormatModal()" disabled>↓ Export stats</button>
         <span class="stats-table-count" id="statsRowCount">${attempts.length} attempt${attempts.length !== 1 ? 's' : ''}</span>
@@ -665,7 +764,7 @@ function renderTable() {
           #${a.quizNum} · ${name}
         </span>
       </td>
-      <td><span class="mode-badge ${a.mode}">${a.mode === 'cumulative' ? 'Cumul.' : 'Single'}</span></td>
+      <td style="white-space:nowrap"><span class="mode-badge ${a.mode}">${a.mode === 'cumulative' ? `Sets 1–${a.quizNum}` : 'Single'}</span>${lockdownMark(a)}</td>
       <td style="white-space:nowrap;color:var(--muted)">
         ${dateStr} <span style="opacity:0.6">${timeStr}</span>
         ${a.synced ? '' : '<div class="attempt-not-synced">not synced</div>'}
@@ -679,20 +778,449 @@ function renderTable() {
     </tr>`;
   }).join('');
 
+  const needsCollapse = !_attemptLogExpanded && attempts.length > ATTEMPT_LOG_PREVIEW_COUNT;
+
   wrap.innerHTML = `
     <div class="stats-table-section">
       ${header}
-      <div style="overflow-x:auto">
-        <table class="stats-table">
-          <thead><tr>
-            <th>Quiz</th><th>Mode</th><th>Date &amp; Time</th>
-            <th>Duration</th><th>Score</th><th style="width:104px">Actions</th>
-          </tr></thead>
-          <tbody>${tbody}</tbody>
-        </table>
+      <div class="attempt-log-scroll" id="attemptLogScroll">
+        <div style="overflow-x:auto">
+          <table class="stats-table">
+            <thead><tr>
+              <th>Quiz</th><th>Mode</th><th>Date &amp; Time</th>
+              <th>Duration</th><th>Score</th><th style="width:104px">Actions</th>
+            </tr></thead>
+            <tbody>${tbody}</tbody>
+          </table>
+        </div>
+        ${needsCollapse ? `
+          <div class="attempt-log-fade"></div>
+          <button class="attempt-log-showall-btn" onclick="expandAttemptLog()">Show all ${attempts.length} attempts</button>` : ''}
       </div>
     </div>`;
+
+  // Height is measured off the real rendered rows (thead + first N tbody
+  // rows) rather than a guessed pixel value, so it stays correct across
+  // font-size/padding changes (e.g. the @600px responsive tweaks above)
+  // without needing to be kept in sync by hand.
+  if (needsCollapse) {
+    const scrollEl = document.getElementById('attemptLogScroll');
+    const table = scrollEl && scrollEl.querySelector('table');
+    if (table) {
+      const rows = table.querySelectorAll('tbody tr');
+      let h = table.querySelector('thead')?.getBoundingClientRect().height || 0;
+      for (let i = 0; i < Math.min(ATTEMPT_LOG_PREVIEW_COUNT, rows.length); i++) {
+        h += rows[i].getBoundingClientRect().height;
+      }
+      // +40px lets the next row peek through under the fade instead of
+      // cutting off exactly on a row boundary.
+      scrollEl.style.maxHeight = (h + 40) + 'px';
+    }
+  }
+
   if (typeof _setSyncButtonState === 'function') _setSyncButtonState(_attemptsSyncing ? 'syncing' : 'idle');
+  if (typeof updateExportButtonState === 'function') updateExportButtonState();
+}
+
+// ── All-problems overview ────────────────────────────────────────────────────
+// One giant grid per enabled quiz, one pill per problem in that quiz's pool,
+// colored by either that problem's LATEST or BEST-EVER recorded score across
+// every attempt in history (not just the currently-filtered attempts) — a
+// switch above the grid(s) picks which, defaulting to "Last" —
+// wrong/partial/correct/never-attempted at a glance.
+
+const PO_MODE_KEY = STORAGE_PREFIX + '_po_mode'; // 'last' | 'best'
+let _poMode = localStorage.getItem(PO_MODE_KEY) === 'best' ? 'best' : 'last';
+
+// key: `${quizNum}_${problemId}` → { points, date } of the most recent
+// attempt that included that problem. Walks every attempt's own answers
+// array (not just quizNum/maxScore) since a cumulative attempt's answers
+// can span several quizzes at once.
+function _buildLatestProblemScores() {
+  const map = new Map();
+  loadStats().forEach(a => {
+    (a.answers || []).forEach(ans => {
+      const key = `${ans.quiz_num}_${ans.problem_id}`;
+      const prev = map.get(key);
+      if (!prev || new Date(a.date) > new Date(prev.date)) {
+        map.set(key, { points: ans.points, date: a.date });
+      }
+    });
+  });
+  return map;
+}
+
+// Same key shape as _buildLatestProblemScores, but keeps whichever attempt
+// scored HIGHEST for that problem, ties broken toward the more recent one
+// (so its title still reads as a real attempt rather than an arbitrary pick).
+function _buildBestProblemScores() {
+  const map = new Map();
+  loadStats().forEach(a => {
+    (a.answers || []).forEach(ans => {
+      const key = `${ans.quiz_num}_${ans.problem_id}`;
+      const prev = map.get(key);
+      if (!prev || ans.points > prev.points || (ans.points === prev.points && new Date(a.date) > new Date(prev.date))) {
+        map.set(key, { points: ans.points, date: a.date });
+      }
+    });
+  });
+  return map;
+}
+
+// Picks a "round" column count (multiples of 5) instead of whatever exactly
+// tiles the container width, per request — so a row reads as 5/10/15/20/25/30
+// boxes rather than an arbitrary number that happens to fit.
+function _computeProblemsOverviewCols(containerWidthPx) {
+  const targetBoxPx = 38; // desired approx width per box, gap included
+  const step = 5;
+  const cols = Math.floor(containerWidthPx / targetBoxPx / step) * step;
+  return Math.max(step, cols);
+}
+
+function _applyProblemsOverviewCols() {
+  document.querySelectorAll('.problems-overview-grid').forEach(grid => {
+    grid.style.setProperty('--po-cols', _computeProblemsOverviewCols(grid.clientWidth));
+  });
+}
+
+// Renders one Last/Best switch instance. Repeated once per quiz card
+// (rather than once above all of them) so the control lives inside the
+// section it affects — but it's still a single shared setting: flipping
+// any instance recolors every card via _recolorProblemsOverview() below,
+// which also syncs every other instance's own active/knob state to match.
+function _poModeSwitchRowHtml() {
+  return `
+    <div class="po-mode-switch-row">
+      <span class="filter-mode-option${_poMode === 'last' ? ' active' : ''}">Last attempt</span>
+      <div class="mode-toggle-track small${_poMode === 'best' ? ' on' : ''}" onclick="togglePoMode()"><div class="mode-toggle-knob"></div></div>
+      <span class="filter-mode-option${_poMode === 'best' ? ' active' : ''}">Best ever</span>
+    </div>`;
+}
+
+// Flips the Last/Best switch, persists the choice, and recolors every box
+// (plus every switch instance) in place — see _recolorProblemsOverview,
+// which patches existing elements' classes rather than rebuilding them, so
+// the .score-box background-color transition (css/style.css) actually has
+// something to animate between.
+function togglePoMode() {
+  _poMode = _poMode === 'best' ? 'last' : 'best';
+  localStorage.setItem(PO_MODE_KEY, _poMode);
+  _recolorProblemsOverview();
+}
+
+// In-place update used by togglePoMode() — never rebuilds the grid, so
+// each box's own transition animates from its old color to its new one
+// instead of popping straight to it. Also re-syncs every switch instance's
+// active label + knob position, since there's one per quiz card now.
+function _recolorProblemsOverview() {
+  const scores = _poMode === 'best' ? _buildBestProblemScores() : _buildLatestProblemScores();
+  document.querySelectorAll('.problems-overview-grid .score-box').forEach(box => {
+    const key = `${box.dataset.quiz}_${box.dataset.pid}`;
+    const rec = scores.get(key);
+    const cls = !rec ? 'score-box-unattempted'
+      : rec.points === 1 ? 'score-box-correct'
+      : rec.points === 0.9 ? 'score-box-partial'
+      : 'score-box-wrong';
+    box.classList.remove('score-box-unattempted', 'score-box-correct', 'score-box-partial', 'score-box-wrong');
+    box.classList.add(cls);
+    box.title = rec
+      ? `${box.textContent} · ${_poMode === 'best' ? 'best' : 'latest'} attempt: ${rec.points} pt`
+      : `${box.textContent} · not attempted yet`;
+  });
+  document.querySelectorAll('.po-mode-switch-row').forEach(row => {
+    const [lastLabel, track, bestLabel] = row.children;
+    if (lastLabel) lastLabel.classList.toggle('active', _poMode === 'last');
+    if (bestLabel) bestLabel.classList.toggle('active', _poMode === 'best');
+    if (track) track.classList.toggle('on', _poMode === 'best');
+  });
+}
+
+function renderProblemsOverview() {
+  const wrap = document.getElementById('statsProblemsOverviewWrap');
+  if (!wrap) return;
+
+  const anyEnabled = QUIZZES.some(q => q.enabled && Array.isArray(q.problems) && q.problems.length > 0);
+  if (!anyEnabled) {
+    wrap.innerHTML = '';
+    return;
+  }
+
+  const scores = _poMode === 'best' ? _buildBestProblemScores() : _buildLatestProblemScores();
+
+  // One card per quiz slot (all 4, not just enabled ones) — same .quiz-badge
+  // look the Attempt log's "Quiz" column uses (color, dot, background) so
+  // this reads as the same quiz identity everywhere in Stats.
+  const sections = QUIZZES.map((q, i) => {
+    const quizNum = i + 1;
+    const color = quizColor(i);
+    const label = q.name ? `Quiz ${quizNum} : ${q.name}` : `Quiz ${quizNum}:`;
+    const badgeHtml = `<span class="quiz-badge" style="background:${color}22;color:${color}">` +
+      `<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:${color}"></span>${label}</span>`;
+
+    const hasProblems = q.enabled && Array.isArray(q.problems) && q.problems.length > 0;
+
+    if (!hasProblems) {
+      return `
+        <div class="stats-table-section problems-overview-section">
+          <div class="stats-table-header">
+            ${badgeHtml}
+          </div>
+          <div class="problems-overview-locked">This quiz is not yet available.</div>
+        </div>`;
+    }
+
+    const total = q.problems.length;
+    const attemptedCount = q.problems.reduce((n, p) => n + (scores.has(`${quizNum}_${p.id}`) ? 1 : 0), 0);
+    const boxes = q.problems.map((p) => {
+      const pLabel = problemLabel(quizNum, p.id);
+      const rec = scores.get(`${quizNum}_${p.id}`);
+      const cls = !rec ? 'score-box-unattempted'
+        : rec.points === 1 ? 'score-box-correct'
+        : rec.points === 0.9 ? 'score-box-partial'
+        : 'score-box-wrong';
+      const title = rec
+        ? `${pLabel} · ${_poMode === 'best' ? 'best' : 'latest'} attempt: ${rec.points} pt`
+        : `${pLabel} · not attempted yet`;
+      // Clickable straight into that problem's forum thread — same
+      // openForumForProblem() the in-quiz forum buttons use (js/forum.js),
+      // so it lands on the identical thread/context view. data-quiz/
+      // data-pid let _recolorProblemsOverview() find this exact box again
+      // without a full rebuild.
+      return `<span class="score-box ${cls}" title="${title}" data-quiz="${quizNum}" data-pid="${p.id}" onclick="openForumForProblem(${quizNum}, '${p.id}')">${pLabel}</span>`;
+    }).join('');
+
+    return `
+      <div class="stats-table-section problems-overview-section">
+        <div class="stats-table-header po-section-header">
+          ${badgeHtml}
+          ${_poModeSwitchRowHtml()}
+          <span class="stats-table-count">${attemptedCount}/${total} attempted</span>
+        </div>
+        <div class="problems-overview-body">
+          <div class="problems-overview-legend">
+            <span class="po-legend-item"><span class="score-box score-box-correct po-legend-swatch"></span>correct</span>
+            <span class="po-legend-item"><span class="score-box score-box-partial po-legend-swatch"></span>value only</span>
+            <span class="po-legend-item"><span class="score-box score-box-wrong po-legend-swatch"></span>wrong</span>
+            <span class="po-legend-item"><span class="score-box score-box-unattempted po-legend-swatch"></span>not attempted</span>
+          </div>
+          <div class="problems-overview-grid">${boxes}</div>
+          <div class="problems-overview-footnote">Results shown are for Random ${QUIZ_SIZE} mode only: Entire Set attempts aren't reflected here.</div>
+        </div>
+      </div>`;
+  }).join('');
+
+  wrap.innerHTML = sections;
+  _applyProblemsOverviewCols();
+}
+
+// ── Topic performance ─────────────────────────────────────────────────────────
+// One card between the Attempt log and the per-quiz problem grids: every
+// topic of every available quiz (one group per quiz, with a gap between
+// them), each with two thin bars on the same 0–100% scale:
+//   top    — AVERAGE: the mean points of every answer given to a problem of
+//            that topic, across all attempt history;
+//   bottom — BEST: for each problem of the topic answered at least once,
+//            its best score; then the mean of those.
+// Points are the quiz's own: 1 correct, 0.9 value only, 0 wrong. Like the
+// grids below it, it reads all history (loadStats), not the Attempt log's
+// filter, so it only covers Random N attempts (Solve Them All isn't
+// recorded as attempts). A problem's topic comes from its definition, so a
+// retired problem still counts toward its topic.
+
+// `${quizNum}|${topic}` -> { sum, n, best: Map(problemId -> best points) }
+function _buildTopicPerformance() {
+  const byTopic = new Map();
+  loadStats().forEach((a) => {
+    (a.answers || []).forEach((ans) => {
+      const p = typeof getQuizProblem === 'function' ? getQuizProblem(ans.quiz_num, ans.problem_id) : null;
+      if (!p || !p.topic) return;
+      const key = `${ans.quiz_num}|${p.topic}`;
+      let t = byTopic.get(key);
+      if (!t) { t = { sum: 0, n: 0, best: new Map() }; byTopic.set(key, t); }
+      const pts = Number(ans.points) || 0;
+      t.sum += pts;
+      t.n++;
+      const prev = t.best.get(ans.problem_id);
+      if (prev === undefined || pts > prev) t.best.set(ans.problem_id, pts);
+    });
+  });
+  return byTopic;
+}
+
+// Which quiz's topics the card shows: a sliding "Quiz 1 | 2 | 3 | 4" switch
+// in its header (available quizzes only), remembered in this browser.
+const TP_QUIZ_KEY = STORAGE_PREFIX + '_tp_quiz';
+function _tpSavedQuiz(available) {
+  let n = NaN;
+  try { n = parseInt(localStorage.getItem(TP_QUIZ_KEY), 10); } catch (e) { /* ignore */ }
+  return available.includes(n) ? n : available[0];
+}
+
+// Switches in place (no rebuild): moves the pill, shows that quiz's group
+// with a short fade, and animates the card's height to the new group's
+// instead of letting it jump — the same _animateHeightChange the filter
+// window uses between its Topic / Number / Type panels (js/quiz-engine.js).
+function setTopicQuiz(quizNum) {
+  try { localStorage.setItem(TP_QUIZ_KEY, String(quizNum)); } catch (e) { /* ignore */ }
+  const sw = document.getElementById('tpSwitch');
+  if (!sw) return;
+  const btns = Array.from(sw.querySelectorAll('button[data-quiz]'));
+  const idx = btns.findIndex((b) => +b.dataset.quiz === quizNum);
+  if (idx < 0 || btns[idx].getAttribute('aria-selected') === 'true') return;
+  btns.forEach((b, i) => b.setAttribute('aria-selected', String(i === idx)));
+  sw.style.setProperty('--tp-i', idx);
+  sw.style.setProperty('--tp-color', quizColor(quizNum - 1));
+  const groupsEl = document.getElementById('tpGroups');
+  const swap = () => {
+    document.querySelectorAll('#tpGroups .tp-group').forEach((g) => {
+      const show = +g.dataset.quiz === quizNum;
+      g.hidden = !show;
+      if (show) {
+        g.classList.remove('tp-enter');
+        void g.offsetWidth;                     // restart the fade
+        g.classList.add('tp-enter');
+      }
+    });
+  };
+  if (typeof _animateHeightChange === 'function') _animateHeightChange(groupsEl, swap);
+  else swap();
+}
+
+// 95% interval for a topic's average (Wilson score interval, z = 1.96).
+// Scores are almost all 0 or 1 (0.9 for value-only), so the average behaves
+// like a success rate; unlike "mean ± 1.96·SE", Wilson stays inside 0–100%
+// and keeps a sensible width with few answers or an average near 100%.
+// Returns [lo, hi] as fractions, or null with no answers.
+function _tpWilson(p, n) {
+  if (!n) return null;
+  const z = 1.96, z2 = z * z;
+  const denom = 1 + z2 / n;
+  const centre = (p + z2 / (2 * n)) / denom;
+  const half = (z / denom) * Math.sqrt(Math.max(0, p * (1 - p)) / n + z2 / (4 * n * n));
+  return [Math.max(0, centre - half), Math.min(1, centre + half)];
+}
+
+function _tpEsc(s) {
+  return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+
+// ── Topic rows (shared by the Stats Topics card and the Random N result
+// screen's "Topics in this attempt", js/quiz-engine.js) ──
+const _tpPct = (x) => Math.round(x * 100);
+
+// [lo, hi] drawn as an error bar |———| across the track (average only). A
+// tiny SVG stretched over the track: x runs 0–100 (percent), strokes don't
+// scale (vector-effect) and snap to whole pixels (crispEdges), so every cap
+// is the same width wherever it lands, and one opaque colour means no
+// brighter spot where a cap meets the line.
+function _tpCiSvg(ci) {
+  const lo = (ci[0] * 100).toFixed(2), hi = (ci[1] * 100).toFixed(2);
+  return `<svg class="tp-ci" viewBox="0 0 100 10" preserveAspectRatio="none" aria-hidden="true">` +
+    `<path class="tp-ci-line" d="M${lo} 5H${hi}" vector-effect="non-scaling-stroke" shape-rendering="crispEdges"/>` +
+    `<path class="tp-ci-cap" d="M${lo} 0V10M${hi} 0V10" vector-effect="non-scaling-stroke" shape-rendering="crispEdges"/>` +
+    `</svg>`;
+}
+
+// One bar. The average also gets its interval and a small ▼ above the bar
+// pointing at the mean, so the mean stays easy to find under the line.
+function _tpBar(cls, v, ci) {
+  return `<span class="tp-track"><span class="tp-fill ${cls}" style="width:${v === null ? 0 : _tpPct(v)}%"></span>` +
+    (ci ? _tpCiSvg(ci) + `<span class="tp-mean" style="left:${(v * 100).toFixed(2)}%" aria-hidden="true"></span>` : '') +
+    `</span>`;
+}
+
+// One topic row: name | average (+ interval) and best bars | the two N
+// (shown on hover) | percentages. t is the topic's _buildTopicPerformance
+// entry, or undefined when it has no answers yet. No title tooltips: the
+// browser's delayed tooltip covered the bars while reading them, and the
+// hover state already shows the percentages, the interval and both N.
+function _tpRowHtml(topic, t) {
+  const avg = t && t.n ? t.sum / t.n : null;
+  const bestVals = t ? [...t.best.values()] : [];
+  const best = bestVals.length ? bestVals.reduce((sum, v) => sum + v, 0) / bestVals.length : null;
+  const ci = avg !== null ? _tpWilson(avg, t.n) : null;
+  return `
+          <div class="tp-row">
+            <span class="tp-name"><span class="tp-name-text">${_tpEsc(topic)}</span></span>
+            <span class="tp-bars">${_tpBar('tp-avg', avg, ci)}${_tpBar('tp-best', best, null)}</span>
+            <span class="tp-ns">${avg !== null
+              ? `<span><i>N</i> = ${t.n}</span><span><i>N</i> = ${bestVals.length}</span>`
+              : '<span></span><span></span>'}</span>
+            <span class="tp-vals"><span>${avg === null ? '—' : _tpPct(avg) + '%'}</span><span>${best === null ? '—' : _tpPct(best) + '%'}</span></span>
+          </div>`;
+}
+
+// Rows for the topics that appeared in one attempt (in the order they first
+// appear in it, each once), with the same all-history bars as the Stats
+// card — the attempt itself included. '' when none can be resolved.
+function topicRowsForAttemptHtml(attempt) {
+  if (!attempt) return '';
+  const perf = _buildTopicPerformance();
+  const seen = new Set();
+  const rows = [];
+  (attempt.answers || []).forEach((ans) => {
+    const quizNum = ans.quiz_num || attempt.quizNum;
+    const p = typeof getQuizProblem === 'function' ? getQuizProblem(quizNum, ans.problem_id) : null;
+    if (!p || !p.topic) return;
+    const key = `${quizNum}|${p.topic}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    rows.push(_tpRowHtml(p.topic, perf.get(key)));
+  });
+  return rows.join('');
+}
+
+// The same legend as the Stats card's header.
+const TP_LEGEND_HTML = '<span class="tp-legend"><span class="tp-key tp-avg"></span>average<span class="tp-key tp-key-ci"></span>95% interval<span class="tp-key tp-best"></span>best</span>';
+
+function renderTopicPerformance() {
+  const wrap = document.getElementById('statsTopicsWrap');
+  if (!wrap) return;
+  const quizzes = QUIZZES
+    .map((q, i) => ({ q, quizNum: i + 1 }))
+    .filter(({ q }) => q.enabled && Array.isArray(q.problems) && q.problems.length > 0);
+  if (!quizzes.length) { wrap.innerHTML = ''; return; }
+
+  const perf = _buildTopicPerformance();
+  const available = quizzes.map(({ quizNum }) => quizNum);
+  const selected = _tpSavedQuiz(available);
+
+  const groups = quizzes.map(({ q, quizNum }) => {
+    // Topics in the order they first appear among the quiz's active problems.
+    const topics = [];
+    q.problems.forEach((pr) => { if (pr.topic && !topics.includes(pr.topic)) topics.push(pr.topic); });
+    const rows = topics.map((topic) => _tpRowHtml(topic, perf.get(`${quizNum}|${topic}`))).join('');
+
+    // Same .quiz-badge as the Attempt log and the grids below.
+    const color = quizColor(quizNum - 1);
+    const label = q.name ? `Quiz ${quizNum} : ${q.name}` : `Quiz ${quizNum}`;
+    return `
+        <div class="tp-group" data-quiz="${quizNum}"${quizNum === selected ? '' : ' hidden'}>
+          <div class="tp-group-head"><span class="quiz-badge" style="background:${color}22;color:${color}"><span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:${color}"></span>${_tpEsc(label)}</span></div>
+          ${rows}
+        </div>`;
+  }).join('');
+
+  const selIdx = available.indexOf(selected);
+  const switchHtml = `
+          <div class="tp-switch" id="tpSwitch" role="tablist" aria-label="Quiz"
+               style="--tp-n:${available.length};--tp-i:${selIdx};--tp-color:${quizColor(selected - 1)}">
+            <span class="tp-switch-pill" aria-hidden="true"></span>
+            ${available.map((n) => `<button type="button" role="tab" data-quiz="${n}" aria-selected="${n === selected}" onclick="setTopicQuiz(${n})">Quiz ${n}</button>`).join('')}
+          </div>`;
+
+  wrap.innerHTML = `
+      <div class="stats-table-section tp-section">
+        <div class="stats-table-header tp-header">
+          <span class="stats-table-title">Topics</span>
+          ${switchHtml}
+          ${TP_LEGEND_HTML}
+        </div>
+        <div class="tp-body">
+          <div class="tp-groups" id="tpGroups">${groups}</div>
+          <div class="problems-overview-footnote">Average counts every answer, with its 95% interval as |—|; best takes each problem's best score. Random ${QUIZ_SIZE} mode only: Entire Set attempts aren't reflected here.</div>
+        </div>
+      </div>`;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -709,8 +1237,14 @@ function fmtDuration(sec) {
 // numbers — my forum messages, my
 // quizzes taken; (3) "everybody" numbers, each as its own tally-counter
 // dial — total forum participants, total visits, total quizzes taken by
-// everyone. Every number here refreshes together on one 5s interval
-// (pollStatsPanel below, three RPCs in one Promise.allSettled batch) — 
+// everyone. Every number here refreshes together (pollStatsPanel below,
+// three RPCs in one Promise.allSettled batch) whenever js/forum.js's or
+// js/attempts-sync.js's Realtime channel pings ('forum-data-changed'/
+// 'attempts-data-changed', see startStatsPanelPolling below) — plus a slow
+// 45s fallback tick as a safety net (these RPCs aren't table reads, so
+// there's no single table this screen can subscribe to Realtime on
+// directly the way js/forum.js does; it piggybacks on those two other
+// already-open channels instead of opening one of its own) —
 // get_stats_panel covers the first two dials' values plus the "my
 // messages"/join-date text, get_total_quiz_attempts covers the third dial,
 // and get_my_total_quiz_attempts covers "my quizzes taken". The latter two
@@ -726,11 +1260,19 @@ function fmtDuration(sec) {
 // screen-open instead (loadSfpAvatar below), via get_author_stats — it
 // doesn't need a 5s refresh since it essentially never changes mid-session
 // (only a rename re-seeds it, which already calls renderSfpIdentity again).
+// The fallback interval is site-version.json's "poll.stats" (js/site-config.js), 45 s by default.
 let _statsPanelPollTimer = null;
+let _statsPanelLastPollAt = 0;           // when pollStatsPanel() last ran, whatever triggered it
 
 async function loadStatsPanel() {
   const nickname = (typeof getForumNickname === 'function') ? getForumNickname() : '';
   renderSfpIdentity(nickname);
+  // Draw all three dials as placeholders immediately, rather than leaving
+  // them as blank/uninitialized <svg> tags (index.html gives them no
+  // fallback markup) until the first pollStatsPanel() below actually
+  // resolves — which can visibly lag behind the rest of the panel opening,
+  // especially before js/forum.js (tier 2) has even finished loading.
+  ['sfpDialParticipants', 'sfpDialVisits', 'sfpDialQuizzes'].forEach(id => renderTallyDial(id, null));
   await pollStatsPanel();
 }
 
@@ -746,6 +1288,23 @@ function renderSfpIdentity(nickname) {
   const pinItem    = document.getElementById('sfpSettingsPinItem');
   const exitItem   = document.getElementById('sfpSettingsExitItem');
   if (!nameEl || !avatarEl) return;
+
+  // Made offline, not registered yet (js/offline-account.js): its name and
+  // PIN, and Change nickname (renames it before it syncs), but no Exit,
+  // which is a server-side unlink.
+  const pending = !nickname && typeof getPendingAccount === 'function' ? getPendingAccount() : null;
+  if (pending) {
+    if (gsItem)     gsItem.style.display     = 'none';
+    if (changeItem) changeItem.style.display = '';
+    if (pinItem)    pinItem.style.display    = '';
+    if (exitItem)   exitItem.style.display   = 'none';
+    avatarEl.innerHTML = '';
+    nameEl.textContent = pending.nickname;
+    const joinedEl = document.getElementById('sfpJoinedAt');
+    if (joinedEl) joinedEl.textContent = pending.conflict ? 'Needs a new name' : 'Registers when the database is back';
+    loadSfpAvatar(pending.nickname, avatarEl);
+    return;
+  }
 
   // Nothing claimed yet: the gear menu collapses down to just "Getting
   // started" (openSfpGettingStarted below) instead of offering
@@ -767,18 +1326,20 @@ function renderSfpIdentity(nickname) {
 }
 
 // "Getting started" item in the settings gear dropdown — shown only while
-// unregistered (see renderSfpIdentity above). Reuses the same "Getting
-// Started!" info screen the main Start button shows a brand-new device
-// (openGettingStartedModal, js/forum.js), then chains straight into the
-// nickname-claim modal exactly like startSelected() does in
-// js/quiz-engine.js, except on success it refreshes this panel instead of
-// launching a quiz.
+// unregistered (see renderSfpIdentity above). Reuses the same Getting Started
+// screen the main Start button shows a brand-new device
+// (openGettingStartedModal, js/forum.js), except on success it refreshes this
+// panel instead of launching a quiz.
 function openSfpGettingStarted() {
-  if (typeof openGettingStartedModal !== 'function' || typeof openForumClaimModal !== 'function') return;
-  openGettingStartedModal(() => openForumClaimModal('create', '', () => {
+  if (typeof openGettingStartedModal !== 'function') return;
+  const done = () => {
     renderSfpIdentity((typeof getForumNickname === 'function') ? getForumNickname() : '');
     if (typeof pollStatsPanel === 'function') pollStatsPanel();
-  }));
+  };
+  // With the database offline, offlineAccountGate (js/offline-account.js)
+  // opens the offline version of the same screen.
+  if (typeof offlineAccountGate === 'function') offlineAccountGate(done, { quiz: false });
+  else openGettingStartedModal(done);
 }
 
 // ── Settings gear dropdown (Change nickname / Your PIN / Exit) ──────────────
@@ -797,6 +1358,28 @@ document.addEventListener('click', (e) => {
   const menu = document.getElementById('sfpSettingsMenu');
   if (menu && menu.classList.contains('open') && !menu.contains(e.target) && e.target.id !== 'sfpSettingsBtn') closeSfpSettingsMenu();
 });
+
+// One identity refresh (refreshForumIdentityUI, js/forum.js) paints this
+// same avatar into the composer bar, this panel and the landing badge at
+// once, and each used to send its own get_author_stats request. They now
+// share one lookup per nickname for a minute. Promise.resolve matters: the
+// supabase-js query is a lazy thenable that re-sends on every await, so
+// the builder itself can't be shared. A failed lookup is dropped at once,
+// so the next paint retries instead of reusing the failure.
+const SFP_AVATAR_LOOKUP_TTL_MS = 60 * 1000;
+const _sfpAvatarLookups = new Map();   // nickname -> { at, promise }
+
+function _sfpAvatarLookup(client, nickname) {
+  const hit = _sfpAvatarLookups.get(nickname);
+  if (hit && Date.now() - hit.at < SFP_AVATAR_LOOKUP_TTL_MS) return hit.promise;
+  const promise = Promise.resolve(client.rpc('get_author_stats', { p_author_name: nickname }));
+  _sfpAvatarLookups.set(nickname, { at: Date.now(), promise });
+  promise.then(
+    (res) => { if (!res || res.error) _sfpAvatarLookups.delete(nickname); },
+    () => _sfpAvatarLookups.delete(nickname),
+  );
+  return promise;
+}
 
 async function loadSfpAvatar(nickname, avatarEl) {
   // Local-first: paint whatever we already have (cache, or the plain
@@ -834,7 +1417,7 @@ async function loadSfpAvatar(nickname, avatarEl) {
   if (!client) { await fallbackIfNeeded(); return; }
 
   try {
-    const { data, error } = await client.rpc('get_author_stats', { p_author_name: nickname });
+    const { data, error } = await _sfpAvatarLookup(client, nickname);
     if (error) throw error;
     const row = data && data[0];
     if (row && row.avatar_svg) {
@@ -869,6 +1452,11 @@ async function loadSfpAvatar(nickname, avatarEl) {
 function openSfpNicknameEditor() {
   if (typeof openForumClaimModal !== 'function') return;
   const current = (typeof getForumNickname === 'function') ? getForumNickname() : '';
+  // Not registered yet: rename the pending account (js/offline-account.js).
+  if (!current && typeof getPendingAccount === 'function' && getPendingAccount()) {
+    openOfflineRenameModal({ onDone: () => renderSfpIdentity('') });
+    return;
+  }
   const onSuccess = () => {
     renderSfpIdentity((typeof getForumNickname === 'function') ? getForumNickname() : '');
     // A claim/rename/switch changes which identity this device resolves
@@ -902,6 +1490,7 @@ async function pollStatsPanel() {
   const client = (typeof getForumClient === 'function') ? getForumClient() : null;
   const dot = document.getElementById('sfpLiveDot');
   if (!client) return;
+  _statsPanelLastPollAt = Date.now();
 
   if (dot) dot.style.display = '';
   if (typeof _settleLiveDot === 'function') _settleLiveDot(dot, 'syncing', 'Refreshing…');
@@ -957,33 +1546,80 @@ async function pollStatsPanel() {
   }
 
   if (typeof _settleLiveDot === 'function') {
-    if (ok) _settleLiveDot(dot, 'ok', 'Live — updated just now');
-    else _settleLiveDot(dot, 'error', "Couldn't refresh — will retry automatically");
+    if (ok) _settleLiveDot(dot, 'ok', 'Synced');
+    else _settleLiveDot(dot, 'error', await dbFailureText("Connection lost: waiting for network"));
   }
 }
 
 function startStatsPanelPolling() {
   stopStatsPanelPolling();
-  _statsPanelPollTimer = setInterval(() => {
-    // Skip the network round trip while the tab is backgrounded, or while
-    // this screen has sat idle 5+ minutes — resumes on its own next active
-    // tick, and immediately on visibilitychange/interaction instead of
-    // waiting out the rest of the current 5s window.
+  document.addEventListener('forum-data-changed', _statsPanelReactiveHandler);
+  document.addEventListener('attempts-data-changed', _statsPanelReactiveHandler);
+  _ensureSiteVisitsRealtime();
+  // Realtime (the listeners above) handles the normal case now — this
+  // interval is just a safety net for a missed ping, so it can be far
+  // slower than the old blind 5s poll.
+  _statsPanelPollTimer = startSitePoll('stats', () => {
     if (document.hidden) return;
     if (typeof isStatsIdle === 'function' && isStatsIdle()) return;
+    if (!sitePollDue('stats', _statsPanelLastPollAt)) return; // refreshed since by a ping or tab return
     pollStatsPanel();
-  }, 5000);
+  });
+}
+
+// ── total_visits' Realtime channel ──────────────────────────────────────
+// site_visits isn't tied to any one identity/device (see migration
+// 006_site_visits_realtime_broadcast.sql), so unlike attempts/solve-all
+// this is one shared, unscoped channel — no per-identity key, and no self-
+// echo risk to guard against, since pollStatsPanel() only reads, it never
+// writes in response to this ping. Only open while this screen is (see
+// stop below), same as the panel's own poll timer.
+let _siteVisitsRealtimeChannel = null;
+
+function _ensureSiteVisitsRealtime() {
+  if (_siteVisitsRealtimeChannel || siteOff('realtime')) return;
+  const client = (typeof getForumClient === 'function') ? getForumClient() : null;
+  if (!client) return;
+  _siteVisitsRealtimeChannel = client
+    .channel('site-visits')
+    .on('broadcast', { event: 'changed' }, _statsPanelReactiveHandler)
+    .subscribe();
+}
+
+function _teardownSiteVisitsRealtime() {
+  if (_siteVisitsRealtimeChannel) {
+    const client = (typeof getForumClient === 'function') ? getForumClient() : null;
+    if (client) client.removeChannel(_siteVisitsRealtimeChannel);
+  }
+  _siteVisitsRealtimeChannel = null;
+}
+
+function _statsPanelReactiveHandler() {
+  if (document.hidden) return;
+  if (typeof isStatsIdle === 'function' && isStatsIdle()) return;
+  pollStatsPanel();
 }
 
 function stopStatsPanelPolling() {
-  if (_statsPanelPollTimer) {
-    clearInterval(_statsPanelPollTimer);
-    _statsPanelPollTimer = null;
-  }
+  _statsPanelPollTimer = stopSitePoll(_statsPanelPollTimer);
+  document.removeEventListener('forum-data-changed', _statsPanelReactiveHandler);
+  document.removeEventListener('attempts-data-changed', _statsPanelReactiveHandler);
+  _teardownSiteVisitsRealtime();
 }
 
+// Coming back to the tab refreshes only if the panel was last refreshed
+// longer ago than the fallback interval; Realtime keeps delivering while
+// the tab is hidden, and refreshing on every switch cost three RPCs each.
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && _statsPanelPollTimer) pollStatsPanel();
+  if (!document.hidden && _statsPanelPollTimer
+      && Date.now() - _statsPanelLastPollAt >= sitePollMs('stats')) pollStatsPanel();
+});
+
+// Realtime switched off or back on in site-version.json (js/site-config.js),
+// while the panel is open.
+document.addEventListener('site-config-changed', (e) => {
+  if (e.detail.after.off.includes('realtime')) _teardownSiteVisitsRealtime();
+  else if (_statsPanelPollTimer) _ensureSiteVisitsRealtime();
 });
 
 // Draws a hand-tally-counter graphic: chrome body, a ring + thumb lever on
@@ -999,9 +1635,20 @@ function renderTallyDial(svgId, value) {
   const svg = document.getElementById(svgId);
   if (!svg) return;
 
+  // `value` is null/undefined when there's genuinely no data yet — the
+  // panel just opened and pollStatsPanel() hasn't resolved, or a poll is
+  // still in flight — as distinct from a real, confirmed count of zero.
+  // Rendered as a dash in every digit slot (matching the "—" placeholder
+  // already used for sfpNickname/sfpJoinedAt/sfpMyMessages/sfpMyQuizzes)
+  // instead of leaving the dial blank until the first successful poll.
+  const isPlaceholder = value === null || value === undefined;
   const n = Math.max(0, Math.floor(Number(value) || 0));
-  const digitCount = Math.max(4, String(n).length);
-  const padded = String(n).padStart(digitCount, '0');
+  const digitCount = isPlaceholder ? 4 : Math.max(4, String(n).length);
+  const padded = isPlaceholder ? '-'.repeat(digitCount) : String(n).padStart(digitCount, '0');
+  // Distinct sentinel so the very first real value (including a genuine
+  // "0000") still counts as a change from the placeholder and triggers
+  // the pulse/lever-press below.
+  const datasetValue = isPlaceholder ? `placeholder-${digitCount}` : padded;
 
   if (svg.dataset.built !== String(digitCount)) {
     const cx = 75;
@@ -1045,13 +1692,13 @@ function renderTallyDial(svgId, value) {
       <text x="0" y="${winY + winH / 2 + 6}" text-anchor="middle" class="sfp-tally-count">${tspans}</text>
     `;
     svg.dataset.built = String(digitCount);
-    svg.dataset.value = padded;
+    svg.dataset.value = datasetValue;
     return;
   }
 
   const countText = svg.querySelector('.sfp-tally-count');
-  if (countText && svg.dataset.value !== padded) {
-    svg.dataset.value = padded;
+  if (countText && svg.dataset.value !== datasetValue) {
+    svg.dataset.value = datasetValue;
     Array.from(countText.children).forEach((tspan, i) => { tspan.textContent = padded[i]; });
 
     countText.classList.remove('sfp-tally-count-pulse');
@@ -1067,9 +1714,12 @@ function renderTallyDial(svgId, value) {
   }
 }
 
-// ── Redraw chart on resize ────────────────────────────────────────────────────
+// ── Redraw chart / re-flow problems overview on resize ──────────────────────
 window.addEventListener('resize', () => {
-  if (document.getElementById('statsScreen').classList.contains('visible')) drawChart();
+  if (document.getElementById('statsScreen').classList.contains('visible')) {
+    drawChart();
+    _applyProblemsOverviewCols();
+  }
 });
 
 window.addEventListener('DOMContentLoaded', () => {

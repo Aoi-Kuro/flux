@@ -1,0 +1,49 @@
+# Netlify response headers (https://docs.netlify.com/routing/headers/).
+#
+# Netlify's default for every file is "max-age=0, must-revalidate": the
+# browser re-asks Netlify about each file on every page load, and each of
+# those (even an empty 304) is a billed web request. The folders below hold
+# third-party builds and art that rarely change, so browsers may reuse them
+# for a day without asking.
+#
+# Our own js/, css/, course/ and HTML stay on the default: their file names
+# don't change between releases, so a cached copy would outlive a deploy and
+# the update reload (quiz-engine.js) would still run old code. For the same
+# reason vendor/pt-answer is left out — it ships together with
+# js/answer-check.js.
+#
+# Changing a file under these folders: browsers that already have it may
+# keep the old copy for up to a day, unless its name or URL changes.
+
+# Bundles made by minify.py: the name carries a hash of the content, so a
+# changed bundle is a new URL (index.html, always re-checked, points to it)
+# and an existing one never changes — cached for a year, never re-checked.
+/js/bundle/*
+  Cache-Control: public, max-age=31536000, immutable
+
+/css/bundle/*
+  Cache-Control: public, max-age=31536000, immutable
+
+/vendor/mathjax/*
+  Cache-Control: public, max-age=86400
+
+/vendor/tikzjax/*
+  Cache-Control: public, max-age=86400
+
+/vendor/fonts/*
+  Cache-Control: public, max-age=86400
+
+/vendor/dompurify/*
+  Cache-Control: public, max-age=86400
+
+/vendor/jspdf/*
+  Cache-Control: public, max-age=86400
+
+/vendor/sheetjs/*
+  Cache-Control: public, max-age=86400
+
+/favicon/*
+  Cache-Control: public, max-age=86400
+
+/images/*
+  Cache-Control: public, max-age=86400

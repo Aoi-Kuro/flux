@@ -39,6 +39,15 @@
 //      owns the requested nickname (i.e. you "claimed" the name you already
 //      have). Returns success without changing anything.
 //
+//   5. MADE OFFLINE — { offline_created: true, pin } from a device that made
+//      its account while the database was offline (js/offline-account.js).
+//      Case 1 with the device's own PIN; a taken name answers 'taken'
+//      without ever checking that PIN against the owner (no Case 2), and a
+//      device linked to another identity answers 'device_linked' (no Case 3).
+//
+// Names are compared after normalizeNickname() (NFC + trim), the rules shared
+// word for word with js/nickname-rules.js.
+//
 // A 5-digit PIN only has 100,000 possible values, so wrong-PIN attempts are
 // throttled per-identity: 5 wrong guesses locks that identity for 15 minutes.
 //
@@ -56,7 +65,38 @@ import { withSupabase } from 'npm:@supabase/server@^1';
 // would be permanently unmentionable past that point (e.g. "@Aoi Kuro" only
 // ever resolves the mention as "Aoi", silently dropping " Kuro"). Underscores,
 // periods, and hyphens remain available as space substitutes.
+//
+// Reserved nicknames no human claim can ever land on, case-insensitive.
+// "gemini" specifically: this exact name is how the front end labels the
+// bot's own replies (GEMINI_BOT_NAME in post-message.ts) and picks its
+// official avatar (device_id check there; FORUM_GEMINI_BOT_DEVICE_ID in
+// forum.js). A human claiming "Gemini" wouldn't get that device_id or
+// avatar, but would still read as the bot at a glance in a message list —
+// close enough to trick someone. It answers with the same 'flagged_nickname'
+// error moderation uses, so the front end needs nothing extra for it.
+//
+// The block below is a word-for-word copy of the one in js/nickname-rules.js
+// (the sign-up form and the offline name check use that one). minify.py
+// stops the build if the two differ: change both or neither.
+// <nickname-rules>
 const NICKNAME_RE = /^[\p{L}\p{N}._-]{2,40}$/u;
+const RESERVED_NICKNAMES_LOWER = new Set(['gemini']);
+
+function normalizeNickname(raw = '') {
+  return typeof raw === 'string' ? raw.normalize('NFC').trim() : '';
+}
+
+function nicknameKey(name = '') {
+  return normalizeNickname(name).toLowerCase();
+}
+
+function nicknameProblem(name = '') {
+  if (!NICKNAME_RE.test(name)) return 'invalid_nickname';
+  if (RESERVED_NICKNAMES_LOWER.has(name.toLowerCase())) return 'flagged_nickname';
+  return null;
+}
+// </nickname-rules>
+
 const LOCK_MINUTES = 15;
 const MAX_FAILED_ATTEMPTS = 5;
 
@@ -69,19 +109,6 @@ const MAX_FAILED_ATTEMPTS = 5;
 // (FORUM_GEMINI_BOT_DEVICE_ID) — keep these three in sync if it ever changes.
 const GEMINI_BOT_DEVICE_ID = '00000000-0000-4000-8000-000000000001';
 
-// Reserved nicknames no human claim can ever land on, case-insensitive.
-// "gemini" specifically: this exact name is how the front end labels the
-// bot's own replies (GEMINI_BOT_NAME in post-message.ts) and picks its
-// official avatar (device_id check there; FORUM_GEMINI_BOT_DEVICE_ID in
-// forum.js). A human claiming "Gemini" wouldn't get that device_id or
-// avatar, but would still read as the bot at a glance in a message list —
-// close enough to trick someone. Checked for both a brand-new claim and a
-// rename (both go through the block below, right after nicknameLower is
-// computed, before any of the four cases branch), reusing the same
-// 'flagged_nickname' error code/message moderation already uses so the
-// front end needs no changes to handle this.
-const RESERVED_NICKNAMES_LOWER = new Set(['gemini']);
-
 function isUuid(v: unknown): v is string {
   return typeof v === 'string' &&
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
@@ -93,6 +120,60 @@ function isUuid(v: unknown): v is string {
 // enough to brute-force every PIN offline. Generate with `openssl rand -hex
 // 32`, set once — it's never entered by a person.
 const PIN_PEPPER = Deno.env.get('PIN_PEPPER');
+
+// DEVICE_SECRET_PEPPER: same idea as PIN_PEPPER, but for device_secret (see
+// migration 001_device_secrets.sql). device_id is public — anyone reading
+// the forum can see whose device_id posted what — so it can't be trusted
+// as proof of "this is my device" on its own. device_secret is the actual
+// proof: generated once on the client alongside device_id and never sent
+// anywhere except in requests from its own owner. Generate the pepper with
+// `openssl rand -hex 32`, set once, same as PIN_PEPPER.
+const DEVICE_SECRET_PEPPER = Deno.env.get('DEVICE_SECRET_PEPPER');
+
+// Verifies device_secret against device_secrets, registering it
+// trust-on-first-use if this device_id has never been seen before. Returns
+// true iff the request is allowed to proceed as this device_id. Reuses
+// sha256Hex/randomHex above rather than redefining them — same hashing
+// shape as hashPin(), just a different pepper and table.
+async function verifyOrRegisterDevice(db: any, deviceId: string, secret: unknown, token?: unknown): Promise<boolean> {
+  if (await verifyDeviceToken(deviceId, token)) return true;
+  if (!DEVICE_SECRET_PEPPER || typeof secret !== 'string' || secret.length < 16 || secret.length > 200) {
+    return false;
+  }
+
+  const { data: row, error } = await db
+    .from('device_secrets')
+    .select('secret_hash, secret_salt')
+    .eq('device_id', deviceId)
+    .maybeSingle();
+  if (error) {
+    console.error('claim-nickname: device-auth lookup error', error);
+    return false;
+  }
+
+  if (!row) {
+    const salt = randomHex(16);
+    const hash = await sha256Hex(`${DEVICE_SECRET_PEPPER}:${salt}:${secret}`);
+    const { error: insErr } = await db
+      .from('device_secrets')
+      .insert({ device_id: deviceId, secret_hash: hash, secret_salt: salt });
+    if (!insErr) return true;
+    // Race: another request for this same brand-new device_id registered
+    // it a moment ago — fall through and verify against whatever it wrote,
+    // rather than failing a legitimate first-ever request outright.
+    const { data: retryRow, error: retryErr } = await db
+      .from('device_secrets').select('secret_hash, secret_salt').eq('device_id', deviceId).maybeSingle();
+    if (retryErr || !retryRow) {
+      console.error('claim-nickname: device-auth race-retry error', retryErr);
+      return false;
+    }
+    const retryHash = await sha256Hex(`${DEVICE_SECRET_PEPPER}:${retryRow.secret_salt}:${secret}`);
+    return retryHash === retryRow.secret_hash;
+  }
+
+  const candidateHash = await sha256Hex(`${DEVICE_SECRET_PEPPER}:${row.secret_salt}:${secret}`);
+  return candidateHash === row.secret_hash;
+}
 
 // OPENAI_API_KEY: shared with post-message.ts (see the header comment there
 // and in forum.js) — Edge Function secrets are project-wide, so nothing new
@@ -115,6 +196,86 @@ function randomHex(byteLen: number): string {
   crypto.getRandomValues(arr);
   return Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('');
 }
+
+// -- Device-verification token (skips the device_secrets DB round-trip) ----
+// verifyOrRegisterDevice() below used to hit `device_secrets` on every call,
+// even seconds after the same device had already proven ownership -- the
+// #1 source of Log Ingestion/Query volume (device_secrets + identity_devices
+// made up 55% of all request logs in a 26-min sample, 2026-09-25). After a
+// successful DB-backed verification we now also issue a short-lived signed
+// token; a client holding a still-valid token skips the DB check next time.
+// identity_devices is deliberately NOT covered by this -- that lookup stays
+// live everywhere, since claim/drop-nickname can reassign device_id to a
+// different identity at any moment and a cached identity would go stale.
+// Security note: this token is not a weaker credential than device_secret
+// itself -- both live in the same client-side (localStorage) trust
+// boundary. It only bounds *how long* a proof of ownership is honored for,
+// the same way a session cookie bounds a login.
+const DEVICE_TOKEN_SECRET = Deno.env.get('DEVICE_TOKEN_SECRET');
+const DEVICE_TOKEN_TTL_SECONDS = 12 * 60 * 60;
+
+async function hmacHex(payload: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(DEVICE_TOKEN_SECRET!),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(payload));
+  return Array.from(new Uint8Array(sig)).map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function issueDeviceToken(deviceId: string): Promise<{ token: string; expiresAt: number } | null> {
+  if (!DEVICE_TOKEN_SECRET) return null; // secret not set yet -- fails open to DB-only mode
+  const expiresAt = Math.floor(Date.now() / 1000) + DEVICE_TOKEN_TTL_SECONDS;
+  const payload = `${deviceId}:${expiresAt}`;
+  const token = btoa(payload) + '.' + await hmacHex(payload);
+  return { token, expiresAt };
+}
+
+async function verifyDeviceToken(deviceId: string, token: unknown): Promise<boolean> {
+  if (!DEVICE_TOKEN_SECRET || typeof token !== 'string' || !token.includes('.')) return false;
+  const [encoded, sig] = token.split('.');
+  let payload: string;
+  try { payload = atob(encoded); } catch { return false; }
+  const [tokenDeviceId, expiresAtStr] = payload.split(':');
+  if (tokenDeviceId !== deviceId) return false;
+  const expiresAt = Number(expiresAtStr);
+  if (!Number.isFinite(expiresAt) || Date.now() / 1000 > expiresAt) return false;
+  const expected = await hmacHex(payload);
+  if (expected.length !== sig.length) return false;
+  let diff = 0;
+  for (let i = 0; i < expected.length; i++) diff |= expected.charCodeAt(i) ^ sig.charCodeAt(i);
+  return diff === 0;
+}
+
+// -- Identity-resolution token (skips the identity_devices DB round-trip) --
+// identity_devices resolves device_id -> identity_id (which claimed
+// nickname, if any, currently owns this device). It's deliberately NOT
+// covered by the long-lived device token above -- device_id can be
+// reassigned to a different identity mid-session (exit, then claim a new
+// nickname on the same device), and a stale cache here would misattribute
+// posts/edits/syncs to the identity that just left. Instead it gets its own
+// much shorter-lived token (see IDENTITY_TOKEN_TTL_SECONDS below): short
+// enough that a stolen/leaked token's usefulness expires in under five
+// minutes, and drop-nickname (the one action that actually invalidates this)
+// tells the client to delete its copy immediately rather than wait it out --
+// see js/forum.js's storage-event listener for the other open-tabs half of
+// that.
+const IDENTITY_TOKEN_TTL_SECONDS = 300;
+
+async function issueIdentityToken(deviceId: string, identityId: string | null): Promise<{ token: string; expiresAt: number } | null> {
+  if (!DEVICE_TOKEN_SECRET) return null;
+  const expiresAt = Math.floor(Date.now() / 1000) + IDENTITY_TOKEN_TTL_SECONDS;
+  const payload = `${deviceId}:${identityId ?? ''}:${expiresAt}`;
+  const token = btoa(payload) + '.' + await hmacHex(payload);
+  return { token, expiresAt };
+}
+
+// This function only ISSUES identity tokens (for the other endpoints to
+// consume) -- it never verifies one itself; see the live lookup in the
+// handler for why.
 
 function randomPin(): string {
   const n = 10000 + Math.floor(Math.random() * 90000); // always exactly 5 digits
@@ -314,8 +475,12 @@ export default {
     }
 
     const deviceId: string = payload?.device_id;
-    const rawNickname: string = typeof payload?.nickname === 'string' ? payload.nickname.trim() : '';
+    const rawNickname: string = normalizeNickname(payload?.nickname);
     const pin: string | undefined = typeof payload?.pin === 'string' ? payload.pin.trim() : undefined;
+    // Made while the database was offline (js/offline-account.js): the device
+    // already chose the PIN and has been showing it, so a new account takes
+    // that PIN instead of a fresh one. Never a login: see the branch below.
+    const offlineCreated = payload?.offline_created === true;
 
     if (!isUuid(deviceId)) {
       return Response.json({ ok: false, error: 'invalid_device_id' }, { status: 400 });
@@ -323,33 +488,49 @@ export default {
     if (deviceId === GEMINI_BOT_DEVICE_ID) {
       return Response.json({ ok: false, error: 'reserved_device_id' }, { status: 403 });
     }
-    if (!NICKNAME_RE.test(rawNickname)) {
+    if (!(await verifyOrRegisterDevice(ctx.supabaseAdmin, deviceId, payload?.device_secret, payload?.device_token))) {
+      return Response.json({ ok: false, error: 'device_auth_failed' }, { status: 403 });
+    }
+    const deviceToken = await issueDeviceToken(deviceId);
+    const nameProblem = nicknameProblem(rawNickname);
+    if (nameProblem === 'invalid_nickname') {
       return Response.json({ ok: false, error: 'invalid_nickname' }, { status: 400 });
     }
     if (pin !== undefined && !/^\d{5}$/.test(pin)) {
       return Response.json({ ok: false, error: 'invalid_pin_format' }, { status: 400 });
     }
+    if (offlineCreated && pin === undefined) {
+      return Response.json({ ok: false, error: 'invalid_pin_format' }, { status: 400 });
+    }
 
-    const nicknameLower = rawNickname.toLowerCase();
-    if (RESERVED_NICKNAMES_LOWER.has(nicknameLower)) {
-      return Response.json({ ok: false, error: 'flagged_nickname' }, { status: 422 });
+    const nicknameLower = nicknameKey(rawNickname);
+    if (nameProblem) {
+      return Response.json({ ok: false, error: nameProblem }, { status: 422 });
     }
     const db = ctx.supabaseAdmin;
 
     // "mine" = the identity (if any) this device is currently linked to.
     // "target" = the identity (if any) that already owns the requested name.
-    const [mineLink, targetIdentity] = await Promise.all([
-      db.from('identity_devices').select('identity_id').eq('device_id', deviceId).maybeSingle(),
+    // The identity_devices half of "mine" is always read live here, never
+    // from the identity token: claim is the one call that decides between
+    // create/link/rename, and a stale cached "lurker" token (e.g. one an
+    // older in-flight request from another endpoint wrote back AFTER a
+    // fresh claim) sent an already-linked device down Case 1, which then
+    // failed on identity_devices_pkey. Claims are rare, so the extra read
+    // costs nothing in log volume.
+    const [targetIdentity, mineLink] = await Promise.all([
       db.from('identities').select('*').eq('nickname_lower', nicknameLower).maybeSingle(),
+      db.from('identity_devices').select('identity_id').eq('device_id', deviceId).maybeSingle(),
     ]);
     if (mineLink.error || targetIdentity.error) {
       console.error('claim-nickname: lookup error', mineLink.error || targetIdentity.error);
       return Response.json({ ok: false, error: 'server_error' }, { status: 500 });
     }
+    const mineIdentityId: string | null = mineLink.data ? mineLink.data.identity_id : null;
 
     let mineIdentity: IdentityRow | null = null;
-    if (mineLink.data) {
-      const { data, error } = await db.from('identities').select('*').eq('id', mineLink.data.identity_id).maybeSingle();
+    if (mineIdentityId) {
+      const { data, error } = await db.from('identities').select('*').eq('id', mineIdentityId).maybeSingle();
       if (error) {
         console.error('claim-nickname: mine-identity lookup error', error);
         return Response.json({ ok: false, error: 'server_error' }, { status: 500 });
@@ -360,7 +541,28 @@ export default {
 
     // ── Case 4: no-op — already yours ───────────────────────────────────────
     if (mineIdentity && target && mineIdentity.id === target.id) {
-      return Response.json({ ok: true, nickname: target.nickname, unchanged: true });
+      const identityToken = await issueIdentityToken(deviceId, target.id);
+      return Response.json({
+        ok: true,
+        nickname: target.nickname,
+        unchanged: true,
+        ...(deviceToken ? { device_token: deviceToken.token, device_token_expires_at: deviceToken.expiresAt } : {}),
+        ...(identityToken ? { identity_token: identityToken.token, identity_token_expires_at: identityToken.expiresAt } : {}),
+      });
+    }
+
+    // ── Made offline (js/offline-account.js): only ever a new account ─────
+    // The PIN came from the device, so it is never tried against someone
+    // else's account: a miss would count as a wrong guess against them and
+    // could lock them out. A taken name goes back to the device, which then
+    // asks for a new one; a device already linked elsewhere is left alone.
+    if (offlineCreated) {
+      if (target) {
+        return Response.json({ ok: false, error: 'taken' }, { status: 409 });
+      }
+      if (mineIdentity) {
+        return Response.json({ ok: false, error: 'device_linked' }, { status: 409 });
+      }
     }
 
     // ── Case 2: link/switch this device onto an existing identity ─────────
@@ -391,7 +593,14 @@ export default {
       // Clear the lock state on success (mirrors the old restore behavior).
       await db.from('identities').update({ failed_attempts: 0, locked_until: null }).eq('id', target.id);
 
-      return Response.json({ ok: true, nickname: target.nickname, linked: true });
+      const identityToken = await issueIdentityToken(deviceId, target.id);
+      return Response.json({
+        ok: true,
+        nickname: target.nickname,
+        linked: true,
+        ...(deviceToken ? { device_token: deviceToken.token, device_token_expires_at: deviceToken.expiresAt } : {}),
+        ...(identityToken ? { identity_token: identityToken.token, identity_token_expires_at: identityToken.expiresAt } : {}),
+      });
     }
 
     // ── Case 3: rename — this device owns an identity, new name is free ───
@@ -414,6 +623,7 @@ export default {
 
       const renamePatch: Record<string, unknown> = {
         nickname: rawNickname,
+        nickname_lower: nicknameLower,
         failed_attempts: 0,
         updated_at: new Date().toISOString(),
       };
@@ -439,7 +649,22 @@ export default {
       // up across every message, everywhere, right now.
       const mentionsRewritten = await rewriteMentionsAfterRename(db, mineIdentity.nickname_lower, rawNickname);
 
-      return Response.json({ ok: true, nickname: rawNickname, renamed: true, mentions_rewritten: mentionsRewritten });
+      const identityToken = await issueIdentityToken(deviceId, mineIdentity.id);
+      return Response.json({
+        ok: true,
+        nickname: rawNickname,
+        renamed: true,
+        mentions_rewritten: mentionsRewritten,
+        ...(deviceToken ? { device_token: deviceToken.token, device_token_expires_at: deviceToken.expiresAt } : {}),
+        ...(identityToken ? { identity_token: identityToken.token, identity_token_expires_at: identityToken.expiresAt } : {}),
+      });
+    }
+
+    // A PIN means the person thinks this name is already theirs. Falling
+    // through to a new claim would turn a typo at login into an empty account.
+    // An offline-made account carries its own PIN on purpose (see above).
+    if (pin !== undefined && !offlineCreated) {
+      return Response.json({ ok: false, error: 'not_found' }, { status: 404 });
     }
 
     // ── Case 1: brand new claim ─────────────────────────────────────────────
@@ -447,7 +672,7 @@ export default {
       return Response.json({ ok: false, error: 'flagged_nickname' }, { status: 422 });
     }
 
-    const newPin = randomPin();
+    const newPin = offlineCreated ? pin! : randomPin();
     const salt = randomHex(16);
     const pinHash = await hashPin(newPin, salt);
     const newAvatar = await fetchIdenticonSvg(rawNickname);
@@ -456,6 +681,7 @@ export default {
       .from('identities')
       .insert({
         nickname: rawNickname,
+        nickname_lower: nicknameLower,
         pin_hash: pinHash,
         pin_salt: salt,
         ...(newAvatar !== null ? { avatar_svg: newAvatar } : {}),
@@ -479,6 +705,15 @@ export default {
       return Response.json({ ok: false, error: 'server_error' }, { status: 500 });
     }
 
-    return Response.json({ ok: true, nickname: rawNickname, pin: newPin, created: true });
+    const identityToken = await issueIdentityToken(deviceId, created.id);
+    return Response.json({
+      ok: true,
+      nickname: rawNickname,
+      pin: newPin,
+      created: true,
+      ...(offlineCreated ? { offline_created: true } : {}),
+      ...(deviceToken ? { device_token: deviceToken.token, device_token_expires_at: deviceToken.expiresAt } : {}),
+      ...(identityToken ? { identity_token: identityToken.token, identity_token_expires_at: identityToken.expiresAt } : {}),
+    });
   }),
 };

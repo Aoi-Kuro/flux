@@ -96,7 +96,7 @@ function _exportRow(a) {
   const timeStr = d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
   return {
     quiz: `#${a.quizNum} · ${name}`,
-    mode: a.mode === 'cumulative' ? 'Cumulative' : 'Single',
+    mode: a.mode === 'cumulative' ? `Sets 1–${a.quizNum}` : 'Single Set',
     dateTime: `${dateStr} ${timeStr}`,
     duration: fmtDuration(a.duration),
     score: `${a.score}/${a.maxScore}`,
@@ -264,7 +264,7 @@ function _buildExportChartSvg(width, height) {
   const PAD = { top: 18, right: 18, bottom: 40, left: 40 };
   const plotW = width - PAD.left - PAD.right;
   const plotH = height - PAD.top - PAD.bottom;
-  const MAX_SCORE = 6;
+  const MAX_SCORE = 7;
 
   const all = (typeof loadStats === 'function') ? loadStats() : [];
   const byQuiz = { 1: [], 2: [], 3: [], 4: [] };

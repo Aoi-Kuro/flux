@@ -14,6 +14,14 @@
 //      attempts, or attempts lost to local corruption, come back — the
 //      client just calls this with an empty `attempts` array to pull
 //      without pushing anything.
+//      When the client sends `known_fingerprint` and the stored list
+//      matches it, the reply is { unchanged: true, confirmed: [...] }
+//      instead, with no rows (see the unchanged check in the handler).
+//
+// The response also includes identity_id (see migration
+// 003_attempts_realtime_broadcast.sql) so the client can subscribe to a
+// Realtime Broadcast channel scoped to it — that's what tells the client
+// WHEN to call this again, instead of a blind interval.
 //
 // Requires superbase/migrations/006_quiz_attempts.sql to have been run
 // first. Requires the device to already be linked to a claimed identity
@@ -24,6 +32,161 @@
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { withSupabase } from "jsr:@supabase/server@^1";
+
+// ── Device-secret verification (see migration 001_device_secrets.sql) ──────
+// device_id alone is public (forum_messages_public), so it can't prove
+// device ownership on its own — and this endpoint both reads AND writes a
+// whole identity's quiz-attempt history, so this matters more here than
+// almost anywhere else in the app.
+const DEVICE_SECRET_PEPPER = Deno.env.get("DEVICE_SECRET_PEPPER");
+
+async function sha256Hex(input: string): Promise<string> {
+  const bytes = new TextEncoder().encode(input);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// Fingerprint of a set of attempts: SHA-256 of "hash:score" entries sorted
+// and joined with "\n". The score is in it so that a score corrected in the
+// database (a regrade) still counts as a change and reaches every device.
+// Must match attemptsFingerprint() in js/attempts-sync.js exactly (same
+// entries, sort and separator), or every sync falls back to a full pull:
+// never wrong, just no saving.
+async function attemptsFingerprint(entries: { hash: string; score: number }[]): Promise<string> {
+  return sha256Hex([...new Set(entries.map((e) => `${e.hash}:${Number(e.score)}`))].sort().join("\n"));
+}
+
+function randomHex(byteLen: number): string {
+  const arr = new Uint8Array(byteLen);
+  crypto.getRandomValues(arr);
+  return Array.from(arr).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// -- Device-verification token (skips the device_secrets DB round-trip) ----
+// verifyOrRegisterDevice() below used to hit `device_secrets` on every call,
+// even seconds after the same device had already proven ownership -- the
+// #1 source of Log Ingestion/Query volume (device_secrets + identity_devices
+// made up 55% of all request logs in a 26-min sample, 2026-09-25). After a
+// successful DB-backed verification we now also issue a short-lived signed
+// token; a client holding a still-valid token skips the DB check next time.
+// identity_devices is deliberately NOT covered by this -- that lookup stays
+// live everywhere, since claim/drop-nickname can reassign device_id to a
+// different identity at any moment and a cached identity would go stale.
+// Security note: this token is not a weaker credential than device_secret
+// itself -- both live in the same client-side (localStorage) trust
+// boundary. It only bounds *how long* a proof of ownership is honored for,
+// the same way a session cookie bounds a login.
+const DEVICE_TOKEN_SECRET = Deno.env.get("DEVICE_TOKEN_SECRET");
+const DEVICE_TOKEN_TTL_SECONDS = 12 * 60 * 60;
+
+async function hmacHex(payload: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(DEVICE_TOKEN_SECRET!),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(payload));
+  return Array.from(new Uint8Array(sig)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function issueDeviceToken(deviceId: string): Promise<{ token: string; expiresAt: number } | null> {
+  if (!DEVICE_TOKEN_SECRET) return null; // secret not set yet -- fails open to DB-only mode
+  const expiresAt = Math.floor(Date.now() / 1000) + DEVICE_TOKEN_TTL_SECONDS;
+  const payload = `${deviceId}:${expiresAt}`;
+  const token = btoa(payload) + "." + await hmacHex(payload);
+  return { token, expiresAt };
+}
+
+async function verifyDeviceToken(deviceId: string, token: unknown): Promise<boolean> {
+  if (!DEVICE_TOKEN_SECRET || typeof token !== "string" || !token.includes(".")) return false;
+  const [encoded, sig] = token.split(".");
+  let payload: string;
+  try { payload = atob(encoded); } catch { return false; }
+  const [tokenDeviceId, expiresAtStr] = payload.split(":");
+  if (tokenDeviceId !== deviceId) return false;
+  const expiresAt = Number(expiresAtStr);
+  if (!Number.isFinite(expiresAt) || Date.now() / 1000 > expiresAt) return false;
+  const expected = await hmacHex(payload);
+  if (expected.length !== sig.length) return false;
+  let diff = 0;
+  for (let i = 0; i < expected.length; i++) diff |= expected.charCodeAt(i) ^ sig.charCodeAt(i);
+  return diff === 0;
+}
+
+// -- Identity-resolution token (skips the identity_devices DB round-trip) --
+// identity_devices resolves device_id -> identity_id (which claimed
+// nickname, if any, currently owns this device). It's deliberately NOT
+// covered by the long-lived device token above -- device_id can be
+// reassigned to a different identity mid-session (exit, then claim a new
+// nickname on the same device), and a stale cache here would misattribute
+// posts/edits/syncs to the identity that just left. Instead it gets its own
+// much shorter-lived token (see IDENTITY_TOKEN_TTL_SECONDS below): short
+// enough that a stolen/leaked token's usefulness expires in under five
+// minutes, and drop-nickname (the one action that actually invalidates this)
+// tells the client to delete its copy immediately rather than wait it out --
+// see js/forum.js's storage-event listener for the other open-tabs half of
+// that.
+const IDENTITY_TOKEN_TTL_SECONDS = 300;
+
+async function issueIdentityToken(deviceId: string, identityId: string | null): Promise<{ token: string; expiresAt: number } | null> {
+  if (!DEVICE_TOKEN_SECRET) return null;
+  const expiresAt = Math.floor(Date.now() / 1000) + IDENTITY_TOKEN_TTL_SECONDS;
+  const payload = `${deviceId}:${identityId ?? ""}:${expiresAt}`;
+  const token = btoa(payload) + "." + await hmacHex(payload);
+  return { token, expiresAt };
+}
+
+// Returns { ok: false } on any invalid/expired/mismatched token -- caller
+// falls back to the normal identity_devices DB lookup exactly as before.
+// Returns { ok: true, identityId: null } for a device confirmed NOT linked
+// to any identity (a lurker), so that case is cached too, not just the
+// linked case.
+async function verifyIdentityToken(deviceId: string, token: unknown): Promise<{ ok: true; identityId: string | null } | { ok: false }> {
+  if (!DEVICE_TOKEN_SECRET || typeof token !== "string" || !token.includes(".")) return { ok: false };
+  const [encoded, sig] = token.split(".");
+  let payload: string;
+  try { payload = atob(encoded); } catch { return { ok: false }; }
+  const parts = payload.split(":");
+  if (parts.length !== 3) return { ok: false };
+  const [tokenDeviceId, identityIdPart, expiresAtStr] = parts;
+  if (tokenDeviceId !== deviceId) return { ok: false };
+  const expiresAt = Number(expiresAtStr);
+  if (!Number.isFinite(expiresAt) || Date.now() / 1000 > expiresAt) return { ok: false };
+  const expected = await hmacHex(payload);
+  if (expected.length !== sig.length) return { ok: false };
+  let diff = 0;
+  for (let i = 0; i < expected.length; i++) diff |= expected.charCodeAt(i) ^ sig.charCodeAt(i);
+  if (diff !== 0) return { ok: false };
+  return { ok: true, identityId: identityIdPart === "" ? null : identityIdPart };
+}
+
+async function verifyOrRegisterDevice(db: any, deviceId: string, secret: unknown, token?: unknown): Promise<boolean> {
+  if (await verifyDeviceToken(deviceId, token)) return true;
+  if (!DEVICE_SECRET_PEPPER || typeof secret !== "string" || secret.length < 16 || secret.length > 200) {
+    return false;
+  }
+  const { data: row, error } = await db
+    .from("device_secrets").select("secret_hash, secret_salt").eq("device_id", deviceId).maybeSingle();
+  if (error) { console.error("sync-quiz-attempts: device-auth lookup error", error); return false; }
+
+  if (!row) {
+    const salt = randomHex(16);
+    const hash = await sha256Hex(`${DEVICE_SECRET_PEPPER}:${salt}:${secret}`);
+    const { error: insErr } = await db
+      .from("device_secrets").insert({ device_id: deviceId, secret_hash: hash, secret_salt: salt });
+    if (!insErr) return true;
+    const { data: retryRow, error: retryErr } = await db
+      .from("device_secrets").select("secret_hash, secret_salt").eq("device_id", deviceId).maybeSingle();
+    if (retryErr || !retryRow) { console.error("sync-quiz-attempts: device-auth race-retry error", retryErr); return false; }
+    const retryHash = await sha256Hex(`${DEVICE_SECRET_PEPPER}:${retryRow.secret_salt}:${secret}`);
+    return retryHash === retryRow.secret_hash;
+  }
+
+  const candidateHash = await sha256Hex(`${DEVICE_SECRET_PEPPER}:${row.secret_salt}:${secret}`);
+  return candidateHash === row.secret_hash;
+}
 
 const MAX_ATTEMPTS_PER_REQUEST = 100; // defensive cap, not a real-world limit
 const MAX_ANSWERS_PER_ATTEMPT = 20;   // no quiz has anywhere near this many problems
@@ -46,6 +209,7 @@ interface IncomingAttempt {
   max_score: number;
   answers: IncomingAnswer[];
   attempted_at: string; // ISO date string
+  locked?: boolean; // taken in lockdown mode; older clients don't send it
 }
 
 function isPlainString(v: unknown, maxLen: number): v is string {
@@ -67,6 +231,7 @@ function validateAttempt(a: unknown): a is IncomingAttempt {
   if (typeof x.score !== "number" || x.score < 0) return false;
   if (typeof x.max_score !== "number" || x.max_score < 0) return false;
   if (typeof x.attempted_at !== "string" || Number.isNaN(Date.parse(x.attempted_at))) return false;
+  if (x.locked !== undefined && typeof x.locked !== "boolean") return false;
   if (!Array.isArray(x.answers) || x.answers.length > MAX_ANSWERS_PER_ATTEMPT) return false;
   for (const ans of x.answers) {
     if (!ans || typeof ans !== "object") return false;
@@ -105,24 +270,35 @@ export default {
 
     const admin = ctx.supabaseAdmin;
 
+    if (!(await verifyOrRegisterDevice(admin, device_id, payload?.device_secret, payload?.device_token))) {
+      return Response.json({ ok: false, error: "device_auth_failed" }, { status: 403 });
+    }
+    const deviceToken = await issueDeviceToken(device_id);
+
     // Same device -> identity resolution post-message.ts uses for forcing
     // author_name — a device with no linked identity has nothing to sync
     // to, so this is a hard requirement here (unlike posting a forum
     // message, which still allows free-text unclaimed names).
-    const { data: link, error: linkErr } = await admin
-      .from("identity_devices")
-      .select("identity_id")
-      .eq("device_id", device_id)
-      .maybeSingle();
-
-    if (linkErr) {
-      console.error("Identity link lookup error:", linkErr);
-      return Response.json({ ok: false, error: "Couldn't verify your identity, try again." }, { status: 500 });
+    let identityId: string | null = null;
+    const identityCheck = await verifyIdentityToken(device_id, payload?.identity_token);
+    if (identityCheck.ok) {
+      identityId = identityCheck.identityId;
+    } else {
+      const { data: link, error: linkErr } = await admin
+        .from("identity_devices")
+        .select("identity_id")
+        .eq("device_id", device_id)
+        .maybeSingle();
+      if (linkErr) {
+        console.error("Identity link lookup error:", linkErr);
+        return Response.json({ ok: false, error: "Couldn't verify your identity, try again." }, { status: 500 });
+      }
+      identityId = link ? link.identity_id : null;
     }
-    if (!link) {
+    if (!identityId) {
       return Response.json({ ok: false, error: "no_identity", message: "Claim a name before syncing." }, { status: 403 });
     }
-    const identityId = link.identity_id;
+    const identityToken = await issueIdentityToken(device_id, identityId);
 
     // Push: identity_id/device_id are set from the resolved link above,
     // never trusted from the request body — same "never trust the client
@@ -143,6 +319,7 @@ export default {
         max_score: a.max_score,
         answers: a.answers,
         attempted_at: a.attempted_at,
+        locked: a.locked === true,
       }));
       const { error: insertErr } = await admin
         .from("quiz_attempts")
@@ -153,13 +330,53 @@ export default {
       }
     }
 
+    const tokenFields = {
+      ...(deviceToken ? { device_token: deviceToken.token, device_token_expires_at: deviceToken.expiresAt } : {}),
+      ...(identityToken ? { identity_token: identityToken.token, identity_token_expires_at: identityToken.expiresAt } : {}),
+    };
+
+    // Unchanged check: the client sends `known_fingerprint`, a SHA-256 of
+    // the attempts (hash and score) it will hold once this push lands (its
+    // synced ones plus the ones just sent; see attemptsFingerprint() in
+    // js/attempts-sync.js, which must hash exactly the same way). The
+    // stored list is read back here, hash and score only, after the write above, so
+    // `confirmed` still means "read back from the database", never just "no
+    // error". If the two fingerprints match, the client already has every
+    // stored attempt and the reply carries no rows. Any difference (an
+    // attempt from another device, a delete, a pushed attempt that didn't
+    // land, local data lost) falls through to the full pull below. A client
+    // that sends no fingerprint (older versions) always gets the full pull.
+    const knownFingerprint = payload?.known_fingerprint;
+    if (typeof knownFingerprint === "string" && /^[0-9a-f]{64}$/.test(knownFingerprint)) {
+      const { data: hashRows, error: hashErr } = await admin
+        .from("quiz_attempts")
+        .select("attempt_hash, score")
+        .eq("identity_id", identityId);
+      if (hashErr) {
+        console.error("Quiz attempts hash fetch error:", hashErr);
+        return Response.json({ ok: false, error: "Saved, but couldn't refresh your list." }, { status: 500 });
+      }
+      const storedRows = (hashRows ?? []) as { attempt_hash: string; score: number }[];
+      const stored = storedRows.map((r) => r.attempt_hash);
+      if (await attemptsFingerprint(storedRows.map((r) => ({ hash: r.attempt_hash, score: r.score }))) === knownFingerprint) {
+        const storedSet = new Set(stored);
+        return Response.json({
+          ok: true,
+          unchanged: true,
+          confirmed: incoming.map((a) => a.attempt_hash).filter((h) => storedSet.has(h)),
+          identity_id: identityId,
+          ...tokenFields,
+        });
+      }
+    }
+
     // Pull: the full current list for this identity becomes the client's
     // new authoritative local copy, regardless of whether anything was
     // pushed this call — this is what makes "just call sync" also double
     // as "redownload everything" for corrupted-local-data recovery.
     const { data: rows, error: selectErr } = await admin
       .from("quiz_attempts")
-      .select("attempt_hash, quiz_num, mode, duration_seconds, score, max_score, answers, attempted_at")
+      .select("attempt_hash, quiz_num, mode, duration_seconds, score, max_score, answers, attempted_at, locked")
       .eq("identity_id", identityId)
       .order("attempted_at", { ascending: true });
 
@@ -168,6 +385,16 @@ export default {
       return Response.json({ ok: false, error: "Saved, but couldn't refresh your list." }, { status: 500 });
     }
 
-    return Response.json({ ok: true, attempts: rows ?? [] });
+    // identity_id is returned so the client can subscribe to that
+    // identity's Realtime Broadcast channel (see migration
+    // 003_attempts_realtime_broadcast.sql) and get woken up on future
+    // changes instead of polling — already resolved above, so this costs
+    // nothing extra to include.
+    return Response.json({
+      ok: true,
+      attempts: rows ?? [],
+      identity_id: identityId,
+      ...tokenFields,
+    });
   }),
 };

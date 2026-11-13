@@ -1,4 +1,9 @@
-  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600&family=Bangers&family=STIX+Two+Text:ital,wght@0,400;1,400&family=Space+Grotesk:wght@400;500;700&family=Space+Mono:wght@400;700&family=Quicksand:wght@400;500;700&display=swap');
+/* IBM Plex/Bangers/STIX/Space/Quicksand font imports moved to a
+   <link rel="stylesheet"> in index.html's <head> (next to the Google Sans
+   Flex link) — @import here was only discovered by the browser after this
+   101KB file finished downloading AND parsing, which serialized
+   HTML → style.css → font CSS → font files instead of letting the
+   preload scanner fetch the font CSS in parallel with everything else. */
 
   :root {
     --bg: #0d1117;
@@ -38,6 +43,17 @@
     --chrome-dark:  #0d1117;
     --shadow:       #000000;
     --radius-mult: 1;
+
+    /* ── Top bar backdrop height ──
+       Single source of truth for how tall the fixed top strip (logo +
+       settings/manual/palette/theme-toggle row) is reserved as. Used by
+       both .top-bar-backdrop's own height and body's top padding below,
+       so page content always starts exactly at the backdrop's bottom edge
+       — never underneath it (even unscrolled, at the very top of a page)
+       and never with an oversized gap either. Change this one value if the
+       icon row ever grows/shrinks; the two spots that use it stay in sync
+       automatically instead of drifting apart. */
+    --top-bar-h: 3rem;
     --accent2: var(--svg-red);
     --accent2-rgb: 255,138,152;
     --splash-stroke: var(--shadow);
@@ -46,7 +62,7 @@
   /* ── Light theme overrides ── */
   body.light {
     --bg: #ffffff;
-    --surface: #f6f8fa;
+    --surface: #f2f2f2;
     --border: #d0d7de;
     --accent: #0969da;
     --accent-dim: #dbeafe;
@@ -121,9 +137,13 @@
     --svg-blue:var(--accent); --svg-red:var(--accent2); --splash-color:#00F0FF;
     --chrome-light:#05060A; --chrome-dark:#05060A; --shadow:#00F0FF; --radius-mult:0.15;
     --splash-stroke:#000000;
+    /* Popup dimming (modal backdrops fall back to --shadow): the cyan glow
+       is fine on shadows but blinding when it tints the whole screen. */
+    --backdrop:#000000;
     --sans:'Space Grotesk', sans-serif; --mono:'Space Mono', monospace;
   }
   body[data-theme="cyber"].light {
+    --backdrop:#00F0FF;
     --bg:#F2F4FB; --surface:#E6E9F7; --border:#C7CDF0; --text:#0A0C14; --muted:#5B6480;
     --accent:#7A00E0; --accent-dim:#e6d6ff; --accent2:#D6009C; --accent2-rgb:214,0,156;
     --correct:#1E9E56; --partial:#B57E00; --wrong:#D6003C;
@@ -149,21 +169,58 @@
     --svg-blue:var(--accent); --svg-red:var(--accent2); --splash-color:#A9821E;
   }
 
-  /* ── Solar: warm desaturated, generous curves ── */
+  /* ── Solar: sunlight. Night is an eclipse (warm near-black, a gold
+     corona, a sky-blue second accent so figures keep two clearly different
+     colors); day is midday on cream paper with a burnt-orange accent dark
+     enough to read as text. Generous curves. ── */
   body[data-theme="solar"] {
-    --bg:#002B36; --surface:#073642; --border:#0F4A58; --text:#F0ECD7; --muted:#6F8A8C;
-    --accent:#2AA1D6; --accent-dim:#0f4152; --accent2:#D98032; --accent2-rgb:217,128,50;
-    --correct:#94C973; --partial:#D9A02A; --wrong:#D64545;
-    --accent-rgb:42,161,214; --correct-rgb:148,201,115; --partial-rgb:217,160,42; --wrong-rgb:214,69,69;
-    --svg-blue:var(--accent); --svg-red:var(--accent2); --splash-color:#D9A02A;
-    --chrome-light:#fdf6e3; --chrome-dark:#002B36; --shadow:#000000; --radius-mult:1.3;
+    --bg:#15110E; --surface:#211A15; --border:#35291F; --text:#F7EBDA; --muted:#A8917A;
+    --accent:#FFA63D; --accent-dim:#4a3216; --accent2:#6FB7FF; --accent2-rgb:111,183,255;
+    --correct:#8FD17A; --partial:#E9CF5B; --wrong:#FF6B5E;
+    --accent-rgb:255,166,61; --correct-rgb:143,209,122; --partial-rgb:233,207,91; --wrong-rgb:255,107,94;
+    --svg-blue:var(--accent); --svg-red:var(--accent2); --splash-color:#FFC86B;
+    --chrome-light:#FFF6E8; --chrome-dark:#15110E; --shadow:#000000; --radius-mult:1.3;
   }
   body[data-theme="solar"].light {
-    --bg:#FDF6E3; --surface:#EEE8D5; --border:#D9CFA8; --text:#43403A; --muted:#93866F;
-    --accent:#1B7BAB; --accent-dim:#dceaf1; --accent2:#B85C1E; --accent2-rgb:184,92,30;
-    --correct:#5E8F3D; --partial:#A87A1E; --wrong:#B8402E;
-    --accent-rgb:27,123,171; --correct-rgb:94,143,61; --partial-rgb:168,122,30; --wrong-rgb:184,64,46;
-    --svg-blue:var(--accent); --svg-red:var(--accent2); --splash-color:#A87A1E;
+    --bg:#FFF8EC; --surface:#FBEBD3; --border:#EFD5AC; --text:#3A2A17; --muted:#7D6548;
+    --accent:#A85A00; --accent-dim:#fbe2c0; --accent2:#1F6FB8; --accent2-rgb:31,111,184;
+    --correct:#3D8A3A; --partial:#9A7400; --wrong:#C23B2C;
+    --accent-rgb:168,90,0; --correct-rgb:61,138,58; --partial-rgb:154,116,0; --wrong-rgb:194,59,44;
+    --svg-blue:var(--accent); --svg-red:var(--accent2); --splash-color:#C8640A;
+  }
+
+  /* ── Dusk: violet twilight with a peach afterglow, softly rounded ── */
+  body[data-theme="dusk"] {
+    --bg:#17132A; --surface:#211B3A; --border:#332A57; --text:#EEE9FF; --muted:#9C93C4;
+    --accent:#B69CFF; --accent-dim:#3a2f66; --accent2:#FFB38A; --accent2-rgb:255,179,138;
+    --correct:#7EE0A8; --partial:#FFD37A; --wrong:#FF7A9A;
+    --accent-rgb:182,156,255; --correct-rgb:126,224,168; --partial-rgb:255,211,122; --wrong-rgb:255,122,154;
+    --svg-blue:var(--accent); --svg-red:var(--accent2); --splash-color:#D8C6FF;
+    --chrome-light:#F7F3FF; --chrome-dark:#17132A; --shadow:#000000; --radius-mult:1.2;
+  }
+  body[data-theme="dusk"].light {
+    --bg:#F7F4FF; --surface:#EEE8FF; --border:#DAD0F5; --text:#2A2245; --muted:#6E6494;
+    --accent:#6A4FC9; --accent-dim:#e4dcff; --accent2:#C25A2E; --accent2-rgb:194,90,46;
+    --correct:#2F8A57; --partial:#A07400; --wrong:#C8385E;
+    --accent-rgb:106,79,201; --correct-rgb:47,138,87; --partial-rgb:160,116,0; --wrong-rgb:200,56,94;
+    --svg-blue:var(--accent); --svg-red:var(--accent2); --splash-color:#7B5CE0;
+  }
+
+  /* ── Ocean: deep-sea navy, seafoam and coral ── */
+  body[data-theme="ocean"] {
+    --bg:#071A26; --surface:#0D2533; --border:#173649; --text:#E3F4F8; --muted:#7FA3B3;
+    --accent:#4FE0C0; --accent-dim:#10433f; --accent2:#FF8A6B; --accent2-rgb:255,138,107;
+    --correct:#7ED957; --partial:#FFD166; --wrong:#FF5C7A;
+    --accent-rgb:79,224,192; --correct-rgb:126,217,87; --partial-rgb:255,209,102; --wrong-rgb:255,92,122;
+    --svg-blue:var(--accent); --svg-red:var(--accent2); --splash-color:#7FF0D6;
+    --chrome-light:#E3F4F8; --chrome-dark:#071A26; --shadow:#000000; --radius-mult:1;
+  }
+  body[data-theme="ocean"].light {
+    --bg:#F2FAFB; --surface:#E2F1F4; --border:#C3DFE6; --text:#0E2A36; --muted:#557582;
+    --accent:#00806C; --accent-dim:#cdeee8; --accent2:#D4553A; --accent2-rgb:212,85,58;
+    --correct:#2E8B3E; --partial:#A07800; --wrong:#C42B4A;
+    --accent-rgb:0,128,108; --correct-rgb:46,139,62; --partial-rgb:160,120,0; --wrong-rgb:196,43,74;
+    --svg-blue:var(--accent); --svg-red:var(--accent2); --splash-color:#00806C;
   }
 
   /* Guide/hint panels are colored purely via color-mix() from --accent
@@ -187,8 +244,10 @@
     display: flex;
     justify-content: center;
   }
+  /* --user-fig-scale: Settings > Display > Figure size (js/settings.js). */
   .fig-svg-wrap svg {
-    width: 220px;
+    width: calc(220px * var(--user-fig-scale, 1));
+    max-width: 100%;
     height: auto;
     --svg-fill-white: var(--surface);
     color: var(--text);
@@ -199,10 +258,84 @@
     display: flex;
     justify-content: center;
   }
+  /* 350px matches the width="350px" every problem image carries; the CSS
+     width wins over that attribute, so the Figure size setting scales all
+     of them. max-width keeps a scaled-up figure inside the card on phones.
+     A tall, narrow image is capped at 500px high instead: --fig-ar is its
+     width/height, set once it loads (js/fig-attribution.js); until then
+     the fallback 100 leaves it at 350px. */
   .fig-img-wrap img {
+    width: min(calc(350px * var(--user-fig-scale, 1)),
+               calc(500px * var(--user-fig-scale, 1) * var(--fig-ar, 100)));
     max-width: 100%;
     height: auto;
   }
+  /* Redrawn figures (js/figure-style.js, Settings › Study): inline SVGs in
+     place of a problem image. Each is drawn at one user unit per pixel and
+     --fig-w is its viewBox width, so labels come out the size of the problem
+     text in every figure; Figure size scales them like the images. Colours
+     are theme variables: ink is currentColor, the two accents are
+     --svg-blue/--svg-red, --svg-dark stays dark in both modes (tyres) and
+     --svg-gold is the one extra colour (the brass rod). The manual's figure
+     demo (.manual-fig-demo) shows drawings the same way. */
+  .fig-img-wrap svg.fig-redrawn,
+  .manual-fig-demo svg.fig-redrawn {
+    width: calc(var(--fig-w, 350) * 1px * var(--user-fig-scale, 1));
+    max-width: 100%;
+    height: auto;
+    color: var(--text);
+    --svg-fill-white: var(--surface);
+    --svg-dark: var(--bg);
+    --svg-gold: var(--partial);
+  }
+  body.light .fig-img-wrap svg.fig-redrawn,
+  body.light .manual-fig-demo svg.fig-redrawn { --svg-dark: var(--text); }
+  .fig-img-wrap svg.fig-redrawn text,
+  .manual-fig-demo svg.fig-redrawn text { font-family: 'STIX Two Text', 'Times New Roman', serif; }
+
+  /* Animated figures (js/figure-anim.js): the drawing and, under its right
+     edge, a small speed chip and play/pause button — below the figure, so
+     they never cover a label. */
+  .fig-anim {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: flex-end;
+    max-width: 100%;
+    min-width: 0;
+    line-height: 0;
+  }
+  .fig-anim-ctl {
+    display: flex;
+    gap: 5px;
+    margin-top: 4px;
+    line-height: 1;
+  }
+  .fig-anim-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 22px;
+    min-width: 22px;
+    padding: 0 7px;
+    border-radius: 11px;
+    background: color-mix(in srgb, var(--text) 10%, var(--surface));
+    border: 1px solid var(--border);
+    color: var(--muted);
+    font-family: var(--mono, inherit);
+    font-size: 10px;
+    line-height: 1;
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+  }
+  .fig-anim-play { width: 22px; padding: 0; }
+  .fig-anim-btn:hover:not(:disabled),
+  .fig-anim-play.is-playing {
+    background: var(--accent);
+    color: var(--chrome-light, #fff);
+    border-color: var(--accent);
+  }
+  .fig-anim-play:disabled { cursor: default; }
 
   /* ── Figure source attribution (i) badge ──
      Sits pinned to the figure's corner, always visible; hover/focus/tap
@@ -279,27 +412,443 @@
     pointer-events: auto;
   }
 
+  /* ── Top bar backdrop ──────────────────────────────────────────────────
+     Full-width strip fixed behind the logo + icon row (like YouTube's or
+     Chrome's own top bar) so scrolled content disappears behind the whole
+     top edge, not just the small boxes the logo/icons themselves occupy.
+     z-index sits below both (1001) so they still render on top of it, and
+     above ordinary page content (which never sets z-index, so anything
+     positive already wins). Height covers the taller of the two rows
+     (.theme-toggle-wrap, top 1rem + ~20px toggle-track) plus a little
+     headroom, without needing to track either one's exact box — a fixed
+     generous height is simpler and never under-covers if either row's
+     content changes.
+
+     Background starts as plain --bg — flush with the page, invisible — since
+     with nothing scrolled under it yet, a visibly distinct bar just reads as
+     a stray line across empty background for no reason. body.is-scrolled
+     (js/top-bar-scroll.js, toggled once window.scrollY passes a small
+     threshold — content actually starting to pass behind the bar) is what
+     flips it to --surface + a small shadow, and the transition below is what
+     turns that class flip into a smooth fade instead of a hard cut. */
+  .top-bar-backdrop {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    width: 100%;
+    height: calc(var(--top-bar-h) + env(safe-area-inset-top, 0px));
+    background: var(--bg);
+    box-shadow: 0 2px 8px transparent;
+    transition: background-color 0.3s ease, box-shadow 0.3s ease;
+    z-index: 1000;
+    pointer-events: none;
+  }
+  body.is-scrolled .top-bar-backdrop {
+    background: var(--surface);
+    box-shadow: 0 2px 8px color-mix(in srgb, var(--shadow) 25%, transparent);
+  }
+  /* The backdrop can't reach under the page's scrollbar lane (fixed boxes
+     stop at the viewport's edge, and the lane is kept with
+     scrollbar-gutter: stable), which left a strip of page background at
+     the bar's right end. The lane's own track paints the bar's colour
+     there instead, under the thumb. Chrome/Safari only: Chrome styles the
+     page's scrollbar from <body> (see js/scrollbars.js); Firefox can only
+     colour a whole track, so the strip stays there. */
+  body.is-scrolled::-webkit-scrollbar-track {
+    background: linear-gradient(var(--surface) calc(var(--top-bar-h) + env(safe-area-inset-top, 0px)), transparent 0);
+  }
+
   /* ── Site logo ── */
+  /* top/left both reserve the device safe area (notch, status bar, Dynamic
+     Island, side bezel in landscape) on top of their normal offset, via
+     env(safe-area-inset-*) — see the viewport-fit=cover meta tag in
+     index.html, which is what makes these resolve to anything but 0 in the
+     first place. Without it, this and .theme-toggle-wrap/.theme-panel below
+     sat right at the raw viewport edge and could overlap page content or
+     get obscured by device chrome on notched phones. */
   .site-logo-link {
     position: fixed;
-    top: 0.85rem;
-    left: 1.2rem;
+    top: env(safe-area-inset-top, 0px);
+    left: calc(1.2rem + env(safe-area-inset-left, 0px));
+    /* Spans the bar's full height and centers its content within it —
+       previously this used a hand-picked `top` offset instead, which put
+       the logo close to centered but not exactly (and would need
+       re-tuning by hand any time --top-bar-h changed). Tying it to the
+       same var the backdrop's height uses keeps it centered automatically
+       no matter what that value is. */
+    height: var(--top-bar-h);
     z-index: 1001;
     display: flex;
+    align-items: center;
     cursor: pointer;
+    text-decoration: none;
     opacity: 0.92;
     transition: opacity 0.15s;
   }
   .site-logo-link:hover { opacity: 1; }
   .site-logo-img { width: 26px; height: auto; display: block; }
+  /* Course name beside the logo. Kanit stays on under every theme (it's
+     the site's name, not UI text); only its colour follows the theme. */
+  .site-logo-wordmark {
+    margin-left: 10px;
+    font-family: 'Kanit', var(--sans);
+    font-weight: 900;
+    font-style: italic;
+    font-size: 19px;
+    letter-spacing: 0.03em;
+    line-height: 1;
+    color: var(--text);
+    white-space: nowrap;
+  }
+  @media (max-width: 480px) {
+    .site-logo-wordmark { margin-left: 8px; font-size: 17px; }
+  }
+  /* Split per letter by js/logo-wordmark.js so each can fly into the cube. */
+  .site-logo-letter { display: inline-block; position: relative; will-change: transform, opacity; }
+  /* Face-coloured copy faded in over the letter as it flies (opacity runs
+     on the compositor; animating `color` did not). */
+  .site-logo-letter-tint { position: absolute; left: 0; top: 0; opacity: 0; will-change: opacity; }
+  /* The cube draws over the wordmark, so letters flying into it pass
+     behind it rather than across its face. */
+  .site-logo-img { will-change: transform; position: relative; z-index: 2; }
+  .site-logo-wordmark { position: relative; z-index: 1; }
 
-  /* (header-top-row removed — main menu moved to quiz-top-row beside the hint button) */
+  /* ── Site logo tumble (js/logo-tumble.js) ──
+     A 3D cube laid exactly over .site-logo-img, shown only while
+     .logo-tumbling is on the link. True isometric view with no perspective,
+     so at rest it matches favicon.svg: edge a = 26px / √2, which makes the
+     hexagon a·√2 = 26px wide and a·√(8/3) ≈ 30px tall, the <img>'s size.
+     Nesting: .logo-cube (jump + squash) > -tilt (isometric tilt) > -spin
+     (the turn) > 6 faces. The jump peaks at 19% of the logo's height
+     (~5.7px): the tumbling cube's corner reaches up to ~2px past the
+     resting hexagon, and with the 1.04 stretch on top of that, 27% (the
+     old value) poked the tip ~1px out of the bar's top edge. 19% leaves
+     ~1px clear, measured in Chrome. */
+  .logo-cube {
+    --a: calc(26px / 1.4142136);
+    position: absolute;
+    left: 0;
+    top: 50%;
+    width: 26px;
+    height: calc(var(--a) * 1.6329932);
+    margin-top: calc(var(--a) * -.8164966);
+    display: grid;
+    place-items: center;
+    transform-origin: 50% 100%;
+    visibility: hidden;
+    pointer-events: none;
+  }
+  .logo-cube-tilt, .logo-cube-spin {
+    display: block;
+    width: var(--a);
+    height: var(--a);
+    position: relative;
+    transform-style: preserve-3d;
+  }
+  .logo-cube-tilt { transform: rotateX(-35.264deg); }
+  .logo-cube-spin { transform: rotateY(45deg); }
+  .logo-cube-face {
+    position: absolute;
+    inset: 0;
+    /* Faces turned away stay hidden, so they can't fringe the edges of
+       the ones in front. */
+    backface-visibility: hidden;
+    /* favicon.svg's black hairline (0.6 of 118 units, ~0.13px at 26px).
+       It shows faintly, most on the day theme where the white face meets
+       a white bar, so without it the cube visibly changed when the
+       animation handed back to the <img>. A real border can't go this
+       thin (it showed as dark seams); a faint sub-pixel inset shadow
+       matches the <img> at 1x and 2x. */
+    box-shadow: inset 0 0 0 0.25px rgba(0, 0, 0, 0.45);
+  }
+  .logo-cube-front  { transform: translateZ(calc(var(--a) / 2)); background: #58a6ff; }
+  .logo-cube-back   { transform: rotateY(180deg) translateZ(calc(var(--a) / 2)); background: #58a6ff; }
+  .logo-cube-right  { transform: rotateY(90deg) translateZ(calc(var(--a) / 2)); background: #fff; }
+  .logo-cube-left   { transform: rotateY(-90deg) translateZ(calc(var(--a) / 2)); background: #fff; }
+  .logo-cube-top    { transform: rotateX(90deg) translateZ(calc(var(--a) / 2)); background: #d7263d; }
+  .logo-cube-bottom { transform: rotateX(-90deg) translateZ(calc(var(--a) / 2)); background: #d7263d; }
+
+  /* ── Logo while the database is off (js/logo-offline.js) ──
+     The <img> gets the same three reds as a picture, so a tumble ending hands
+     back to a matching cube. The transition is the change seen mid-tumble. */
+  .logo-cube-face { transition: background-color 0.7s ease; }
+  html.db-offline .logo-cube-front,
+  html.db-offline .logo-cube-back   { background: #8a1226; }
+  html.db-offline .logo-cube-right,
+  html.db-offline .logo-cube-left   { background: #c4203a; }
+  html.db-offline .logo-cube-top,
+  html.db-offline .logo-cube-bottom { background: #ef4757; }
+  /* Kept in the bar: its 3rem is the name's line plus room for this one.
+     Same lettering as the name, at a size that fits. `left` is set from the
+     name's L, and the letters stay in layout so they can be measured. */
+  .site-logo-limited {
+    position: absolute;
+    top: calc(50% + 9px);
+    z-index: 1;
+    visibility: hidden;
+    font-family: 'Kanit', var(--sans);
+    font-weight: 900;
+    font-style: italic;
+    font-size: 9.5px;
+    letter-spacing: 0.06em;
+    line-height: 1.3;   /* the brackets reach below 1 and got cut off */
+    color: var(--text);
+    white-space: nowrap;
+  }
+  .site-logo-limited.shown { visibility: visible; }
+
+  .site-logo-link.logo-tumbling .site-logo-img { visibility: hidden; }
+  .site-logo-link.logo-tumbling .logo-cube {
+    visibility: visible;
+    animation: logo-cube-hop 1.2s cubic-bezier(.3, .7, .3, 1) both;
+  }
+  .site-logo-link.logo-tumbling .logo-cube-spin {
+    animation: logo-cube-tumble 1.2s cubic-bezier(.45, .05, .25, 1) both;
+  }
+  /* Crouch, jump, squash on landing, small rebound */
+  @keyframes logo-cube-hop {
+    0%   { transform: translateY(0) scale(1, 1); }
+    12%  { transform: translateY(4%) scale(1.08, .88); }
+    45%  { transform: translateY(-19%) scale(.97, 1.04); }
+    72%  { transform: translateY(0) scale(1.08, .9); }
+    84%  { transform: translateY(-7%) scale(.99, 1.02); }
+    100% { transform: translateY(0) scale(1, 1); }
+  }
+  /* A full turn around the vertical axis and a full forward roll at once,
+     ending back in the logo's own pose */
+  @keyframes logo-cube-tumble {
+    from { transform: rotateY(45deg) rotateX(0); }
+    to   { transform: rotateY(405deg) rotateX(-360deg); }
+  }
+
+  /* ── Top bar tips ──────────────────────────────────────────────────────
+     Centered in the bar, width matched to the app's standard content
+     column (same 760px used by main/cards/stats/problem body
+     below) so its left/right edges line up with everything under it,
+     capped so it never creeps under the logo or the icon row on narrow
+     desktop windows. Only ever shown by js/top-bar-tips.js while
+     body.is-scrolled is set — i.e. the same moment .top-bar-backdrop
+     itself is opaque (--surface) rather than flush with the page — so a
+     tip never appears floating over bare background. Hidden outright on
+     narrow/mobile viewports (no safe gap to put it in there); see the
+     media query below. */
+  .top-bar-tip {
+    position: fixed;
+    top: env(safe-area-inset-top, 0px);
+    /* left/width below are both placeholders before JS gets a chance to
+       run. js/top-bar-tips.js sets both inline per active screen: `width`
+       to that screen's own content column (stats/review/forum/quiz/landing
+       each use their own), and `left` to the midpoint of the actual open
+       gap between the logo and the icon row — NOT the viewport's exact
+       midpoint, since the logo and icon row are different widths, so the
+       gap's true center sits slightly off viewport-center. Centering on
+       the gap instead lets the tip use the gap's full width rather than
+       twice its shorter half. */
+    left: 50%;
+    transform: translateX(-50%);
+    height: var(--top-bar-h);
+    width: 480px;
+    max-width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    overflow: hidden;
+    z-index: 1001;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.4s ease, width 0.2s ease, left 0.2s ease;
+  }
+  .top-bar-tip.visible { opacity: 1; }
+  .top-bar-tip-text {
+    display: inline-block;
+    white-space: nowrap;
+    font-family: 'STIX Two Text', var(--sans);
+    font-weight: 400;
+    font-size: 0.85rem;
+    color: var(--muted);
+    letter-spacing: 0.01em;
+    will-change: transform;
+  }
+  @media (max-width: 480px) {
+    .top-bar-tip { display: none; }
+  }
+
+  /* ── Top bar quiz status (clock + battery) ──────────────────────────────
+     Sits in the same logo↔icons gap as .top-bar-tip above, centered the
+     same way (js/top-bar-quiz-status.js sets `left` inline to that gap's
+     actual midpoint, mirroring top-bar-tips.js's getSafeBounds() — the two
+     files don't share code, but the calculation is identical since it's
+     the same gap). Unlike the tip, showing this isn't tied to
+     body.is-scrolled: it's meant to stay visible for as long as it's
+     eligible, not just once the bar has visually distinguished itself.
+     Its own JS is what decides *whether* to show it (Random N active
+     AND actually in fullscreen right now — not Solve Them All,
+     not windowed — plus not mobile, plus room to fit) — this rule just
+     handles the opacity transition once that decision is `.visible`,
+     plus the *temporary* fade-out while a tip is up (`.tip-showing`),
+     same idea as .top-bar-tip.visible but inverted: the two never show
+     at once. */
+  .top-bar-quiz-status {
+    position: fixed;
+    top: env(safe-area-inset-top, 0px);
+    left: 50%;
+    transform: translateX(-50%);
+    height: var(--top-bar-h);
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    white-space: nowrap;
+    z-index: 1001;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.4s ease;
+  }
+  .top-bar-quiz-status.visible:not(.tip-showing) { opacity: 1; }
+
+  /* With battery data available, the separator is the immutable center
+     anchor. The clock is pinned to its left and battery/charging state to
+     its right, so changing battery text can never move the `|` or clock.
+     Clock-only mode keeps the original centered flex layout. */
+  .top-bar-quiz-status.has-battery {
+    width: 0;
+    transform: none;
+    gap: 0;
+  }
+
+  .tbqs-time {
+    font-family: var(--mono);
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--muted);
+    letter-spacing: 0.02em;
+  }
+  .top-bar-quiz-status.has-battery .tbqs-time {
+    position: absolute;
+    top: 50%;
+    right: 0.55rem;
+    transform: translateY(-50%);
+  }
+  /* Blinks off/on once a second (toggled from JS, not a CSS animation, so
+     it stays perfectly in step with the minute actually changing) — a
+     quick opacity fade rather than a hard cut. */
+  .tbqs-colon {
+    display: inline-block;
+    transition: opacity 0.15s ease;
+  }
+  .tbqs-colon.dim { opacity: 0.15; }
+
+  .tbqs-battery {
+    display: none; /* only js/top-bar-quiz-status.js's own .has-battery class turns this on — most laptops/desktops have no Battery Status API at all */
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .top-bar-quiz-status.has-battery .tbqs-battery {
+    display: flex;
+    position: absolute;
+    top: 50%;
+    left: 0.55rem;
+    transform: translateY(-50%);
+  }
+
+  .tbqs-sep {
+    display: none;
+    color: var(--muted);
+    opacity: 0.4;
+    font-size: 0.8rem;
+  }
+  .top-bar-quiz-status.has-battery .tbqs-sep {
+    display: block;
+    position: absolute;
+    top: 50%;
+    left: 0;
+    transform: translate(-50%, -50%);
+  }
+
+  /* Plain CSS battery outline (no image asset) — a rounded rect plus a
+     small terminal nub, same visual language as a phone status bar. The
+     fill bar inside (.tbqs-batt-fill) is the only piece JS actually
+     resizes/recolors; the outline itself never changes. */
+  .tbqs-batt-icon {
+    position: relative;
+    display: inline-block;
+    width: 22px;
+    height: 11px;
+    border: 1.4px solid var(--muted);
+    border-radius: 2px;
+    box-sizing: border-box;
+  }
+  .tbqs-batt-icon::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    right: -3px;
+    transform: translateY(-50%);
+    width: 2px;
+    height: 4px;
+    background: var(--muted);
+    border-radius: 0 1px 1px 0;
+  }
+  .tbqs-batt-fill {
+    position: absolute;
+    top: 1.5px;
+    bottom: 1.5px;
+    left: 1.5px;
+    border-radius: 1px;
+    background: var(--muted);
+    transition: width 0.3s ease, background-color 0.3s ease;
+  }
+  /* Charge-level colors — same three-tier language as the score breakdown
+     chips elsewhere (--correct/--partial/--wrong), so "battery critical"
+     reads the same as "answer wrong" instead of introducing a fourth
+     color meaning. Only applies while discharging; a charging battery
+     stays --correct regardless of level (it's on its way up, not down). */
+  .tbqs-batt-fill.batt-low     { background: var(--partial); }
+  .tbqs-batt-fill.batt-critical{ background: var(--wrong); }
+  .tbqs-batt-fill.batt-charging{ background: var(--correct); }
+
+
+  /* ⚡ after the percentage while charging: the emoji (Modern icons) or
+     the drawn bolt (Classic, js/icons.js), the latter in the same green
+     as the charging fill. */
+  .tbqs-batt-charging {
+    display: none;
+    font-size: 0.78rem;
+    line-height: 1;
+    color: var(--correct);
+  }
+
+  .tbqs-batt-charging.visible { display: inline; }
+
+  .tbqs-batt-pct {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    color: var(--muted);
+  }
+
+  @media (max-width: 480px) {
+    .top-bar-quiz-status { display: none; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .top-bar-quiz-status,
+    .tbqs-colon,
+    .tbqs-batt-fill {
+      transition: none;
+    }
+  }
 
   /* ── Theme toggle switch ── */
+  /* Same safe-area reasoning as .site-logo-link just above, mirrored onto
+     the right/top edge instead of left/top. */
   .theme-toggle-wrap {
     position: fixed;
-    top: 1rem;
-    right: 1.2rem;
+    top: env(safe-area-inset-top, 0px);
+    right: calc(1.2rem + env(safe-area-inset-right, 0px));
+    /* Same full-bar-height + centered-content approach as .site-logo-link
+       above, replacing what used to be its own separately hand-picked
+       `top` offset. */
+    height: var(--top-bar-h);
     z-index: 1001;
     display: flex;
     align-items: center;
@@ -311,7 +860,15 @@
     user-select: none;
   }
 
-  .theme-icon { font-size: 0.85rem; line-height: 1; }
+  /* Buttons (setThemeMode in js/quiz-engine.js) dressed as the plain
+     icons they were, with the same hover as .palette-icon-btn. */
+  .theme-icon {
+    font-size: 0.85rem; line-height: 1;
+    background: none; border: none; padding: 0; cursor: pointer;
+    font-family: inherit; color: inherit;
+    transition: opacity 0.15s, transform 0.15s;
+  }
+  .theme-icon:hover { transform: scale(1.1); }
 
   .toggle-track {
     position: relative;
@@ -344,7 +901,7 @@
   #update-banner {
     display: none;
     position: fixed;
-    bottom: 1.2rem;
+    bottom: calc(1.2rem + env(safe-area-inset-bottom, 0px));
     left: 50%;
     transform: translateX(-50%);
     z-index: 9999;
@@ -372,7 +929,7 @@
   #update-banner .banner-text strong { color: var(--text); }
   #update-banner .banner-reload {
     background: var(--accent);
-    color: var(--chrome-dark);
+    color: var(--on-accent, var(--chrome-dark));
     border: none;
     border-radius: calc(4px * var(--radius-mult));
     padding: 0.32rem 0.85rem;
@@ -396,11 +953,142 @@
   }
   #update-banner .banner-dismiss:hover { color: var(--text); }
 
+  /* ── Overdue update warning (countdown to a forced reload) ──
+     Same frame as #update-banner, but wraps onto two lines (headline, then
+     the countdown) and is tinted by why it's forced: --partial for an update
+     left waiting 48 h, --wrong for one below "min_version" (.critical).
+     #update-done-banner, the 5 s "updated while you were away" notice after
+     such a reload, shares the frame; its outline recedes like the
+     full-screen reminder's. */
+  #update-forced-banner,
+  #update-done-banner {
+    --forced-tint: var(--partial, var(--accent));
+    display: none;
+    position: fixed;
+    bottom: calc(1.2rem + env(safe-area-inset-bottom, 0px));
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 9999;
+    width: max-content;
+    max-width: min(34rem, calc(100vw - 2rem));
+    background: var(--surface);
+    border: 1px solid var(--forced-tint);
+    border-radius: calc(8px * var(--radius-mult));
+    padding: 0.65rem 1.1rem;
+    box-shadow: 0 4px 24px color-mix(in srgb, var(--shadow) calc(0.45 * 100%), transparent);
+    font-family: var(--mono);
+    font-size: 0.76rem;
+    color: var(--text);
+    align-items: center;
+    gap: 0.9rem;
+    animation: banner-slide-in 0.35s cubic-bezier(.4,0,.2,1);
+  }
+  #update-forced-banner.critical,
+  #update-done-banner.critical { --forced-tint: var(--wrong, var(--accent)); }
+  #update-forced-banner.visible,
+  #update-done-banner.visible { display: flex; }
+  #update-forced-banner .forced-icon,
+  #update-done-banner .forced-icon {
+    flex-shrink: 0;
+    width: 1.15rem;
+    height: 1.15rem;
+    fill: none;
+    stroke: var(--forced-tint);
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    animation: forced-icon-blink 2.4s ease-in-out infinite;
+  }
+  #update-forced-banner .forced-icon-dot { fill: var(--forced-tint); stroke: none; }
+  #update-done-banner .forced-icon { animation: none; stroke-linejoin: round; }
+  @keyframes forced-icon-blink {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.25; }
+  }
+  #update-done-banner .banner-text { color: var(--muted); line-height: 1.4; }
+  #update-done-banner .banner-text strong { color: var(--text); font-weight: 600; }
+  #update-done-banner {
+    border-color: transparent;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #update-done-banner.hiding {
+    animation: banner-slide-out 0.3s cubic-bezier(.4,0,.2,1) forwards;
+    pointer-events: none;
+  }
+  #update-done-banner .banner-ring {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    overflow: visible;
+  }
+  /* pathLength="100" in the markup: the dash runs 100 → 0 whatever the
+     banner's size, so only the corner radius needs measuring (JS). */
+  #update-done-banner .banner-ring rect {
+    fill: none;
+    stroke: var(--forced-tint);
+    stroke-width: 1.5;
+    vector-effect: non-scaling-stroke;
+    stroke-dasharray: 100 100;
+    stroke-dashoffset: 0;
+  }
+  #update-done-banner.running .banner-ring rect {
+    animation: update-done-ring var(--done-ms, 10000ms) linear forwards;
+  }
+  #update-done-banner.paused .banner-ring rect { animation-play-state: paused; }
+  @keyframes update-done-ring { to { stroke-dashoffset: 100; } }
+  #update-forced-banner .banner-text {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    color: var(--muted);
+    line-height: 1.4;
+  }
+  #update-forced-banner .banner-text strong { color: var(--text); font-weight: 600; }
+  #update-forced-banner .forced-time { color: var(--text); font-variant-numeric: tabular-nums; }
+  #update-forced-banner .banner-reload {
+    flex-shrink: 0;
+    /* Tinted rather than filled: light themes' --wrong is too dark for
+       dark text and --partial too light for white, in some palettes. */
+    background: color-mix(in srgb, var(--forced-tint) 18%, transparent);
+    color: var(--text);
+    border: 1px solid var(--forced-tint);
+    border-radius: calc(4px * var(--radius-mult));
+    padding: 0.32rem 0.85rem;
+    font-family: var(--mono);
+    font-size: 0.74rem;
+    font-weight: 600;
+    cursor: pointer;
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+    transition: opacity 0.15s;
+  }
+  #update-forced-banner .banner-reload:hover { opacity: 0.85; }
+  /* Waiting for a timed quiz to end: ✕ instead of Reload now, since a
+     reload would throw the attempt away. */
+  #update-forced-banner .banner-dismiss {
+    display: none;
+    flex-shrink: 0;
+    background: none; border: none; color: var(--muted); cursor: pointer;
+    font-size: 1rem; line-height: 1; padding: 0 0.1rem; transition: color 0.15s;
+  }
+  #update-forced-banner .banner-dismiss:hover { color: var(--text); }
+  #update-forced-banner.waiting .banner-reload { display: none; }
+  #update-forced-banner.waiting .banner-dismiss { display: block; }
+  #update-forced-banner.hiding {
+    animation: banner-slide-out 0.3s cubic-bezier(.4,0,.2,1) forwards;
+    pointer-events: none;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    #update-forced-banner .forced-icon { animation: none; }
+  }
+
   /* ── Bug report nudge banner ── */
   #bug-report-banner {
     display: none;
     position: fixed;
-    bottom: 1.2rem;
+    bottom: calc(1.2rem + env(safe-area-inset-bottom, 0px));
     left: 50%;
     transform: translateX(-50%);
     z-index: 9998;
@@ -444,11 +1132,64 @@
   }
   #bug-report-banner .banner-dismiss:hover { color: var(--text); }
 
+  /* ── Random N full-screen reminder ── */
+  #fullscreen-hint-banner {
+    display: none;
+    position: fixed;
+    bottom: calc(1.2rem + env(safe-area-inset-bottom, 0px));
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 9998;
+    appearance: none;
+    -webkit-appearance: none;
+    background: var(--surface);
+    border: 1px solid transparent;
+    border-radius: calc(8px * var(--radius-mult));
+    padding: 0.65rem 1.1rem;
+    box-shadow: 0 4px 24px color-mix(in srgb, var(--shadow) calc(0.45 * 100%), transparent);
+    font-family: var(--mono);
+    font-size: 0.76rem;
+    color: var(--text);
+    text-align: left;
+    align-items: center;
+    gap: 0.9rem;
+    white-space: nowrap;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+    animation: banner-slide-in 0.35s cubic-bezier(.4,0,.2,1);
+  }
+  #fullscreen-hint-banner.visible { display: flex; }
+  #fullscreen-hint-banner.hiding {
+    animation: banner-slide-out 0.3s cubic-bezier(.4,0,.2,1) forwards;
+    pointer-events: none;
+  }
+  #fullscreen-hint-banner:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  #fullscreen-hint-banner .banner-icon { font-size: 1rem; color: var(--accent); }
+  #fullscreen-hint-banner .banner-text { color: var(--muted); }
+  #fullscreen-hint-banner .banner-text strong { color: var(--text); }
+  .fullscreen-hint-ring {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    overflow: visible;
+  }
+  .fullscreen-hint-ring rect {
+    fill: none;
+    stroke: var(--accent);
+    stroke-width: 1.5;
+    vector-effect: non-scaling-stroke;
+  }
+
   /* ── Theme nudge banner ── */
   #theme-nudge-banner {
     display: none;
     position: fixed;
-    bottom: 1.2rem;
+    bottom: calc(1.2rem + env(safe-area-inset-bottom, 0px));
     left: 50%;
     transform: translateX(-50%);
     z-index: 9997;
@@ -483,6 +1224,7 @@
     overflow-x: auto;
     overflow-y: hidden;
     max-width: 100%;
+    min-width: initial !important;   /* see the \tag note in css/figure.css */
     padding: 0.15rem 0;
     margin: 0.15rem -0.15rem;
   }
@@ -498,7 +1240,10 @@
       to   { opacity: 0; transform: translateY(12px); }
     }
     #update-banner,
+    #update-forced-banner,
+    #update-done-banner,
     #bug-report-banner,
+    #fullscreen-hint-banner,
     #theme-nudge-banner {
       left: 0.6rem;
       right: 0.6rem;
@@ -510,11 +1255,17 @@
       align-items: center;
       animation-name: banner-slide-in-mobile;
     }
-    #bug-report-banner.hiding {
+    #bug-report-banner.hiding,
+    #update-forced-banner.hiding,
+    #update-done-banner.hiding,
+    #fullscreen-hint-banner.hiding {
       animation: banner-slide-out-mobile 0.3s cubic-bezier(.4,0,.2,1) forwards;
     }
     #update-banner .banner-text,
+    #update-forced-banner .banner-text,
+    #update-done-banner .banner-text,
     #bug-report-banner .banner-text,
+    #fullscreen-hint-banner .banner-text,
     #theme-nudge-banner .banner-text {
       flex: 1 1 auto;
       min-width: 0;
@@ -536,8 +1287,14 @@
   .theme-panel {
     display: none;
     position: fixed;
-    top: 2.4rem;
-    right: 1.2rem;
+    /* .theme-toggle-wrap now spans the bar's full height (--top-bar-h) and
+       centers its icons within it, rather than sitting at its own
+       hand-picked top offset — so anchoring this at the bar's bottom edge
+       (same variable, no safe-area double-counting since that's already
+       baked into --top-bar-h's consumers) keeps it flush under the toggle
+       row regardless of exactly where the icons land inside that band. */
+    top: calc(var(--top-bar-h) + env(safe-area-inset-top, 0px));
+    right: calc(1.2rem + env(safe-area-inset-right, 0px));
     z-index: 1002;
     background: var(--surface);
     border: 1px solid var(--border);
@@ -574,7 +1331,7 @@
   /* ── Custom theme modal ── */
   .theme-modal-overlay {
     display: none; position: fixed; inset: 0; z-index: 1003;
-    background: color-mix(in srgb, var(--shadow) 55%, transparent);
+    background: color-mix(in srgb, var(--backdrop, var(--shadow)) 55%, transparent);
     align-items: center; justify-content: center;
   }
   .theme-modal-overlay.open { display: flex; }
@@ -643,219 +1400,112 @@
   * { box-sizing: border-box; margin: 0; padding: 0; }
 
   /* Smooth theme switches: low-specificity so any element's own
-     transition (buttons, toggles) still wins via specificity. */
-  body, body * {
+     transition (buttons, toggles) still wins via specificity.
+     Not inside equations or SVG drawings: those are thousands of tiny
+     nodes (Solve-All alone has ~6,500) that take their colour from the
+     element around them anyway, so they still fade along with it.
+     Starting five transitions on every one of them made a single day/night
+     flip take 5-7 seconds there; :where() keeps this rule at the same
+     specificity as the old `body *`. */
+  body, body :where(*:not(mjx-container *, svg *)) {
     transition: background-color .35s ease, border-color .35s ease,
       color .35s ease, box-shadow .35s ease, border-radius .35s ease;
   }
+  /* While js/themes.js's runThemeChange() crossfades the whole page in
+     one go, no element runs its own fade (that is what made a switch
+     take seconds on Solve-All), and the crossfade lasts as long as the
+     per-element fade it replaces. */
+  html.theme-vt body,
+  html.theme-vt body * { transition: none !important; }
+  ::view-transition-old(root),
+  ::view-transition-new(root) { animation-duration: .35s; animation-timing-function: ease; }
+
   /* Brief crossfade while swapping, to mask the instant font-family
      jump (font-family itself can't be transitioned). */
   body.theme-swap { opacity: 0.55; transition: opacity .15s ease; }
+
+  /* Reserves the vertical scrollbar's gutter permanently, so swapping
+     between screens of different heights (landing vs. a long quiz page,
+     etc.) never toggles the scrollbar on/off and shifts all fixed-width
+     content sideways when it does. Falls back to nothing special in
+     browsers that don't support it (Safari < 18.2) — harmless no-op, just
+     back to the old jump there. */
+  html {
+    scrollbar-gutter: stable;
+    /* Kills the browser's default "scroll anchoring": when content above
+       the current scroll position resizes after the initial layout, the
+       browser otherwise auto-adjusts scrollTop to keep whatever's
+       currently in view visually stationary. On the landing screen this
+       fires because of #splashText (js/splash.js) — it starts empty and
+       gets its real text injected async (after fetching
+       course/splashes.json), which is a no-op height-wise on wide
+       viewports where .mc-splash is position:absolute/out of flow (see
+       .mc-splash-wrap), but on <=900px viewports (media query above)
+       .mc-splash becomes a normal in-flow block stacked above the title,
+       so that late text injection actually grows the page above the
+       fold. If the landing page is tall enough to scroll at all at that
+       width, the browser "helpfully" scrolls down to compensate right
+       after, landing every fresh visit (a manual refresh, the update
+       banner's Reload button, anything that reloads/re-renders this
+       page) partway down instead of at the top. Full-width windows never
+       show it (nothing reflows above the fold there); anything <=900px
+       — a shrunk desktop window or an actual phone — does. Disabling
+       anchoring site-wide is the reliable fix, rather than chasing every
+       element that might resize post-load. */
+    overflow-anchor: none;
+  }
+
+  /* Scrollbars, site-wide and in the editor (which loads this file): thin,
+     keeping their room (nothing shifts), but invisible until used.
+     js/scrollbars.js fades --sb-a on an element from 0 to 1 while it
+     scrolls or the pointer is over its bar, and back after; for the page
+     itself that element is <html>. The scrollbar pseudo-elements inherit
+     it from their element (`*` never matches those, so each element still
+     starts from its own 0). Chrome/Safari draw the ::-webkit-scrollbar
+     parts; Chrome ignores those once scrollbar-color is set (the changelog
+     list keeps its own that way), so that one (Firefox's) only applies
+     where they don't exist. */
+  * { --sb-a: 0; }
+
+  ::-webkit-scrollbar { width: 8px; height: 8px; background: transparent; }
+  ::-webkit-scrollbar-track,
+  ::-webkit-scrollbar-corner { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    background: color-mix(in srgb, var(--muted) calc(var(--sb-a) * 100%), transparent);
+    border-radius: 4px;
+  }
+  ::-webkit-scrollbar-button { display: none; }
+
+  @supports not selector(::-webkit-scrollbar) {
+    * {
+      scrollbar-width: thin;
+      scrollbar-color: color-mix(in srgb, var(--muted) calc(var(--sb-a) * 100%), transparent) transparent;
+    }
+  }
 
   body {
     background: var(--bg);
     color: var(--text);
     font-family: var(--sans);
     min-height: 100vh;
-    padding: 1.5rem 1rem 4rem;
-  }
-
-  /* ── Guide panel ── */
-  .guide {
-    max-width: 760px;
-    margin: 0 auto 1.2rem;
-    background: color-mix(in srgb, var(--accent) 6%, var(--bg));
-    border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--bg));
-    border-radius: calc(10px * var(--radius-mult));
-    padding: 1.1rem 1.3rem 1rem;
-    opacity: 1;
-    max-height: 2000px;
-    overflow: hidden;
-    transition: opacity 0.25s ease, max-height 0.3s ease, margin 0.3s ease,
-      padding 0.3s ease, border-width 0.3s ease;
-  }
-
-  .guide.is-collapsed {
-    opacity: 0;
-    max-height: 0;
-    margin: 0 auto;
-    padding: 0 1.3rem;
-    border-width: 0;
-    pointer-events: none;
-  }
-
-  .guide-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.7rem;
-    margin-bottom: 0.9rem;
-    padding-bottom: 0.7rem;
-    border-bottom: 1px solid color-mix(in srgb, var(--accent) 28%, var(--bg));
-  }
-
-  .guide-header-title {
-    display: flex;
-    align-items: center;
-    gap: 0.55rem;
-    font-family: var(--mono);
-    font-size: 0.74rem;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    color: var(--accent);
-  }
-
-  .guide-header-title .icon { font-size: 0.95rem; }
-
-  .guide-close {
-    background: none;
-    border: none;
-    cursor: pointer;
-    color: var(--muted);
-    font-size: 0.95rem;
-    line-height: 1;
-    padding: 0.25rem 0.4rem;
-    border-radius: calc(5px * var(--radius-mult));
-    transition: color 0.15s, background 0.15s;
-    flex-shrink: 0;
-  }
-  .guide-close:hover { color: var(--text); background: rgba(var(--accent-rgb), 0.1); }
-
-  .guide-section { margin-bottom: 1.05rem; }
-  .guide-section:last-child { margin-bottom: 0; }
-
-  .guide-section-title {
-    font-family: var(--mono);
-    font-size: 0.68rem;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    color: var(--accent);
-    margin: 0 0 0.55rem;
-  }
-
-  /* Valid-example chips */
-  .guide-chip-row {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.45rem;
-    margin-bottom: 0.5rem;
-  }
-
-  .guide-chip {
-    display: flex;
-    align-items: baseline;
-    gap: 0.5rem;
-    background: rgba(var(--accent-rgb), 0.05);
-    border: 1px solid color-mix(in srgb, var(--accent) 16%, var(--bg));
-    border-radius: calc(6px * var(--radius-mult));
-    padding: 0.32rem 0.6rem;
-  }
-
-  .guide-chip code {
-    font-family: var(--mono);
-    font-size: 0.78rem;
-    color: color-mix(in srgb, var(--accent) 78%, var(--text));
-    white-space: nowrap;
-  }
-
-  .guide-chip .desc {
-    font-size: 0.7rem;
-    color: var(--muted);
-    white-space: nowrap;
-  }
-
-  /* Invalid examples — compact, left-accented rows */
-  .guide-invalid-row { display: flex; flex-direction: column; gap: 0.28rem; }
-
-  .guide-invalid-item {
-    display: flex;
-    align-items: baseline;
-    gap: 0.5rem;
-    font-size: 0.72rem;
-    padding: 0.3rem 0.55rem;
-    background: rgba(var(--wrong-rgb), 0.05);
-    border-left: 2px solid var(--wrong);
-    border-radius: 0 calc(5px * var(--radius-mult)) calc(5px * var(--radius-mult)) 0;
-  }
-
-  .guide-invalid-item .x { color: var(--wrong); flex-shrink: 0; }
-
-  .guide-invalid-item code {
-    font-family: var(--mono);
-    color: var(--wrong);
-    background: rgba(var(--wrong-rgb), 0.1);
-    padding: 0 0.3rem;
-    border-radius: calc(3px * var(--radius-mult));
-    white-space: nowrap;
-  }
-
-  .guide-invalid-item .why { color: var(--muted); }
-
-  .guide-note-inline {
-    font-size: 0.7rem;
-    color: var(--muted);
-    font-family: var(--mono);
-  }
-  .guide-note-inline code {
-    color: color-mix(in srgb, var(--accent) 78%, var(--text));
-    background: rgba(var(--accent-rgb), 0.08);
-    padding: 0 0.3rem;
-    border-radius: calc(3px * var(--radius-mult));
-  }
-
-  .guide-footer {
-    margin-top: 0.9rem;
-    padding-top: 0.7rem;
-    border-top: 1px solid color-mix(in srgb, var(--accent) 28%, var(--bg));
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.3rem 1.3rem;
-    font-size: 0.68rem;
-    font-family: var(--mono);
-    color: var(--muted);
-  }
-  .guide-footer b { color: var(--partial); }
-
-  /* ── Recall hint button ── */
-  .hint-recall-wrap {
-    max-width: 760px;
-    margin: 0 auto 1.2rem;
-    display: none;
-  }
-  .hint-recall-wrap.visible { display: flex; }
-
-  .btn-recall-hint {
-    font-family: var(--mono);
-    font-size: 0.72rem;
-    letter-spacing: 0.07em;
-    border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--bg));
-    border-radius: calc(6px * var(--radius-mult));
-    padding: 0.5rem 1.05rem;
-    cursor: pointer;
-    background: color-mix(in srgb, var(--accent) 8%, var(--bg));
-    color: var(--accent);
-    transition: background 0.15s, border-color 0.15s;
-    display: flex;
-    align-items: center;
-    gap: 0.45rem;
-  }
-  .btn-recall-hint:hover { background: rgba(var(--accent-rgb), 0.1); border-color: var(--accent); }
-
-  /* ── Quiz top row: hint recall (left) + main menu (right) ── */
-  .quiz-top-row {
-    max-width: 760px;
-    margin: 0 auto 1.2rem;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.75rem;
-  }
-  .quiz-top-row .hint-recall-wrap {
-    margin: 0;
-  }
-  /* Hide the main-menu button while the hint guide is open */
-  #guideMain:not(.is-collapsed) ~ .quiz-top-row .quiz-top-row-menu {
-    display: none;
+    /* env(safe-area-inset-*) resolves to 0px on ordinary screens (and
+       everywhere before the viewport-fit=cover meta tag was added), so this
+       is a no-op there — it only adds real space on notched/rounded-corner
+       phones, keeping page content clear of the same edges the fixed
+       top/bottom elements below now reserve too. Top padding is pinned to
+       --top-bar-h (see :root above) rather than a plain rem value: it used
+       to be a plain 1.5rem, smaller than the fixed logo/icon row's own
+       height, so content quietly started *underneath* that row rather than
+       below it — barely visible as an overlap while the row was just small
+       transparent icons, but fully hidden once .top-bar-backdrop gave that
+       row a solid background. Matching this to the same variable the
+       backdrop's height uses means content now always starts right at the
+       backdrop's bottom edge, with no gap and no overlap, in every state —
+       scrolled or not. */
+    padding: calc(var(--top-bar-h) + env(safe-area-inset-top, 0px))
+             calc(1rem + env(safe-area-inset-right, 0px))
+             calc(4rem + env(safe-area-inset-bottom, 0px))
+             calc(1rem + env(safe-area-inset-left, 0px));
   }
 
   /* ── Header ── */
@@ -884,6 +1534,23 @@
 
   h1 { font-size: 1.4rem; font-weight: 600; letter-spacing: -0.01em; }
   h1 span { color: var(--accent); }
+
+  /* Random quiz and Entire Set headers: the text on the left, the ✕ back
+     to the main menu on the right, centred on the title. A grid
+     rather than a wrapper div, so #quizHeader h1 / #solveAllHeader h1
+     (renamed per course by js/quiz-engine.js) keep their markup. */
+  .quiz-title-header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    column-gap: 0.75rem;
+  }
+  .quiz-title-header > * { grid-column: 1; }
+  .quiz-title-header > .quiz-close-btn {
+    grid-column: 2;
+    grid-row: 1;
+    align-self: center;
+  }
+  .quiz-title-header > .solve-all-tag { justify-self: start; }
 
   /* ── Cards ── */
   main {
@@ -942,33 +1609,6 @@
     white-space: nowrap;
   }
 
-  .answer-input, .unit-input {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: calc(4px * var(--radius-mult));
-    color: var(--text);
-    font-family: var(--mono);
-    font-size: 0.86rem;
-    padding: 0.4rem 0.65rem;
-    outline: none;
-    transition: border-color 0.18s;
-  }
-
-  .answer-input { width: 180px; }
-  .unit-input   { width: 140px; }
-
-  .answer-input:focus, .unit-input:focus { border-color: var(--accent); }
-
-  .answer-input.correct-input { border-color: var(--correct); color: var(--correct); }
-  .answer-input.partial-input { border-color: var(--partial); color: var(--partial); }
-  .answer-input.wrong-input   { border-color: var(--wrong);   color: var(--wrong);   }
-
-  .unit-input.correct-unit { border-color: var(--correct); color: var(--correct); }
-  .unit-input.partial-unit { border-color: var(--partial); color: var(--partial); }
-  .unit-input.wrong-unit   { border-color: var(--wrong);   color: var(--wrong);   }
-
-  .sep { color: var(--muted); font-family: var(--mono); font-size: 0.8rem; padding: 0 0.1rem; }
-
   /* ── Feedback ── */
   .feedback {
     padding: 0 1.1rem 0.8rem;
@@ -1017,13 +1657,19 @@
   }
   .btn:hover  { opacity: 0.85; }
   .btn:active { opacity: 0.7; }
-  .btn-primary   { background: var(--accent); color: var(--chrome-dark); font-weight: 600; }
+  .btn-primary   { background: var(--accent); color: var(--on-accent, var(--chrome-dark)); font-weight: 600; }
   .btn-secondary { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
 
   /* ── Topic Selector ── */
-  .topic-selector {
+  /* Positioning context for .filter-reset-btn now lives on the wrapper
+     (not #topicSelector itself), since #topicSelector's innerHTML gets
+     wiped and rebuilt by initTopics() — see index.html comment. */
+  .topic-selector-wrap {
+    position: relative;
     max-width: 760px;
     margin: 1.5rem auto 0;
+  }
+  .topic-selector {
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: calc(6px * var(--radius-mult));
@@ -1048,6 +1694,7 @@
   .topic-selector-header:first-child {
     margin-top: 0;
     padding-top: 0;
+    padding-right: 5.5rem; /* keep clear of the reset button pinned top-right */
     border-top: none;
   }
 
@@ -1079,17 +1726,112 @@
     display: none;
   }
 
-  /* ── Filter reset button ── */
-  .filter-reset-row {
-    max-width: 760px;
-    margin: 1.5rem auto 0;
-    display: flex;
-    justify-content: flex-end;
+  /* ── Filter reset button ── now pinned inside the top-right corner of the
+     .topic-selector box itself (previously a separate row above it) ── */
+  .filter-reset-btn {
+    position: relative;
+    top: 0.85rem;
+    right: 1.1rem;
+    z-index: 2;
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.02em;
+    background: var(--bg);
+    color: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: calc(4px * var(--radius-mult));
+    padding: 0.32rem 0.7rem;
+    cursor: pointer;
+    transition: all 0.15s;
   }
-  .filter-reset-btn { font-size: 0.75rem; padding: 0.4rem 0.8rem; }
+  /* .topic-selector-header:first-child's padding-right assumed the button
+     was position:absolute (out of flow); it's now position:relative (so the
+     .reset-confirm-ring below can anchor to it) but still pinned into the
+     same top-right spot via the wrapping .topic-selector-wrap. */
+  .topic-selector-wrap { position: relative; }
+  .topic-selector-wrap > .filter-reset-btn { position: absolute; top: 0.85rem; right: 1.1rem; }
+  .filter-reset-btn:hover {
+    color: var(--wrong);
+    border-color: var(--wrong);
+  }
+  /* ── Tap-to-confirm ring ── armed by handleResetClick()/_armResetConfirm()
+     (js/quiz-engine.js): a single dash the length of the button's whole
+     perimeter, drawn fully visible, then its offset animates over
+     RESET_CONFIRM_MS so the outline recedes back to nothing — a 3-second
+     "you have until this closes" countdown traced right on the button's own
+     border instead of a separate progress bar. Only visible while
+     .confirming is set (opacity below) — not gated on the rect's own
+     stroke-dashoffset — so there's no leftover "fully drawn" state that
+     could get stuck showing after the ring's first use. */
+  .reset-confirm-ring {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    overflow: visible;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+  }
+  .filter-reset-btn.confirming .reset-confirm-ring { opacity: 1; }
+  .reset-confirm-ring rect {
+    fill: none;
+    stroke: var(--wrong);
+    stroke-width: 1.5;
+    vector-effect: non-scaling-stroke;
+  }
+  /* The button's own real border goes transparent (not red) while
+     confirming — same width, so nothing shifts — so the only edge visible
+     is the ring's line itself, drawn at the same size and corner radius
+     (see _armResetConfirm) rather than a second, mismatched outline
+     sitting alongside it. */
+  .filter-reset-btn.confirming {
+    color: var(--wrong);
+    border-color: transparent;
+  }
 
-  /* ── Per-quiz filter mode (Topic / Number) ── */
-  .filter-mode-row, .incexc-row {
+  /* ── Per-quiz filter type: No filter / Topic / Number / Type ──
+     Four-way segmented control (filter-type-tabs/-tab) replacing the old
+     Topic⇄Number two-way toggle — only one config block (topic chips,
+     number-range input, or Type/attempt-status chips) shows at a time,
+     inside .filter-config-area, whose height animates between them (see
+     _animateHeightChange, js/quiz-engine.js) instead of jumping. */
+  .filter-type-tabs {
+    width: 100%;
+    display: flex;
+    gap: 0.4rem;
+    margin: 0.3rem 0 0.9rem;
+  }
+  .filter-type-tab {
+    flex: 1;
+    text-align: center;
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    padding: 0.45rem 0.3rem;
+    border-radius: calc(4px * var(--radius-mult));
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--muted);
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .filter-type-tab:hover { border-color: var(--muted); }
+  .filter-type-tab.active {
+    background: rgba(var(--accent-rgb),0.1);
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  @media (max-width: 480px) {
+    .filter-type-tab { font-size: 0.62rem; padding: 0.4rem 0.15rem; }
+  }
+
+  .filter-config-area {
+    width: 100%;
+  }
+
+  .incexc-row {
     width: 100%;
     display: flex;
     align-items: center;
@@ -1111,14 +1853,54 @@
     display: flex;
     flex-wrap: wrap;
     gap: 0.6rem;
-    transition: opacity 0.2s;
   }
   .num-filter-block { flex-direction: column; align-items: center; }
 
-  .filter-dimmed {
-    opacity: 0.35;
-    pointer-events: none;
-    filter: grayscale(0.6);
+  /* ── "Type" filter rows: checkbox / label / sample score-box ──
+     One grid for all four rows (not four separate ones) is what keeps
+     column 3 aligned no matter how long a given row's label text is —
+     every row's three cells slot into the same three grid columns. */
+  .type-filter-grid {
+    width: 100%;
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    row-gap: 0.55rem;
+    column-gap: 0.7rem;
+  }
+  /* display:contents takes the <label> itself out of the box model so its
+     three children (checkbox/label/swatch) become direct grid items of
+     .type-filter-grid — the label still toggles its checkbox on click
+     anywhere in the row, since that behavior comes from the DOM
+     relationship, not from how the label is laid out. */
+  .type-filter-row {
+    display: contents;
+    cursor: pointer;
+  }
+  .type-filter-checkbox {
+    width: 1.05rem;
+    height: 1.05rem;
+    accent-color: var(--accent);
+    cursor: pointer;
+    justify-self: center;
+  }
+  .type-filter-label {
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    color: var(--muted);
+    transition: color 0.2s;
+  }
+  .type-filter-row:hover .type-filter-label { color: var(--text); }
+  .type-filter-row:has(.type-filter-checkbox:checked) .type-filter-label {
+    color: var(--accent);
+    font-weight: 600;
+  }
+  /* Same fixed-width score-box the quiz view and Stats "Problems overview"
+     grid use, just right-aligned into column 3 and holding a stand-in
+     "P0" id — its color is the actual point: matching a row's checkbox to
+     the same-colored boxes it will include/exclude elsewhere. */
+  .type-filter-swatch {
+    justify-self: end;
   }
 
   .num-filter-input {
@@ -1149,10 +1931,42 @@
 
   .result-big {
     font-family: var(--mono);
-    font-size: 2.8rem;
-    font-weight: 600;
+    font-size: 3.4rem;
+    font-weight: 700;
     color: var(--accent);
     line-height: 1;
+    display: flex;
+    flex-wrap: wrap; /* narrow screens: duration drops to its own line instead of overflowing/squeezing the score */
+    row-gap: 0.3rem;
+    align-items: baseline;
+    gap: 0.15rem;
+  }
+  .result-big .result-score-den {
+    font-size: 1.6rem;
+    font-weight: 600;
+    color: var(--muted);
+  }
+  /* Attempt duration ("21 min 41 s") — pushed to the far right of the
+     row via margin-left:auto (works because .result-big is display:flex
+     and, being a block-level flex container, already stretches to the
+     panel's full width). One size step down from the main score/its
+     denominator: big enough to read as a real stat, not so big it
+     competes with the score for attention. */
+  .result-duration {
+    margin-left: auto;
+    display: flex;
+    align-items: baseline;
+    gap: 0.3rem;
+  }
+  .result-duration-num {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: var(--accent);
+  }
+  .result-duration-unit {
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--muted);
   }
   .result-label {
     font-family: var(--mono);
@@ -1164,13 +1978,270 @@
     margin-bottom: 1.1rem;
   }
   .result-breakdown {
-    font-size: 0.86rem;
-    color: var(--muted);
-    line-height: 2;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
   }
-  .result-breakdown .c { color: var(--correct); font-family: var(--mono); }
-  .result-breakdown .p { color: var(--partial); font-family: var(--mono); }
-  .result-breakdown .w { color: var(--wrong);   font-family: var(--mono); }
+
+  /* ── Score boxes: filled color = correctness, problem id shown inside ──
+     Shared component, reused (smaller, via .score-box-sm) for the recent-
+     attempts history below. */
+  .score-box {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    /* Fixed (not min-) width, sized off the font's monospace `ch` unit for
+       the longest problem id the pool actually has ("P" + up to 3 digits =
+       4 characters, e.g. "P127") plus the horizontal padding — so every
+       box is exactly the same width whether it holds "P8" or "P127",
+       instead of 3-digit ids being visibly wider than 1-2 digit ones. */
+    width: calc(4ch + 1rem);
+    height: 2.2rem;
+    padding: 0 0.5rem;
+    font-family: var(--mono);
+    font-size: 0.74rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    border-radius: calc(4px * var(--radius-mult));
+    line-height: 1;
+    /* Lets a class swap (score-box-wrong → -correct, etc.) animate smoothly
+       instead of popping — only visible when the element itself is patched
+       in place rather than rebuilt; see _recolorProblemsOverview (js/stats.js). */
+    transition: background-color 0.3s ease, color 0.3s ease;
+  }
+  .score-box-correct { background: var(--correct); color: var(--on-correct, #fff); }
+  .score-box-partial  { background: var(--partial); color: var(--on-partial, #fff); }
+  .score-box-wrong    { background: var(--wrong);   color: var(--on-wrong, #fff); }
+
+  .score-box-sm {
+    width: calc(4ch + 0.8rem);
+    height: 1.7rem;
+    padding: 0 0.4rem;
+    font-size: 0.64rem;
+  }
+
+  /* ── P⇄Q toggle (cumulative-mode rows only) ──
+     A row that mixes problems from more than one quiz (see the
+     showToggle checks in quiz-engine.js — rows with only one quiz never
+     get this markup at all) renders every chip with BOTH labels
+     stacked on top of each other via position:absolute, and a single
+     .pq-toggle-btn per row that flips which one shows. Crossfading two
+     always-present labels by opacity, rather than swapping textContent
+     via JS, is what gives the "double fade" its smoothness for free —
+     the outgoing label fades down while the incoming one fades up in
+     the same transition, with no frame where the chip is briefly empty. */
+  .score-box {
+    position: relative; /* anchors the two absolutely-positioned .pq-label spans */
+  }
+  .pq-label {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    transition: opacity 0.14s ease;
+    pointer-events: none; /* clicks/taps still land on the .score-box itself */
+  }
+  .pq-label-p { opacity: 1; } /* default: problem id showing, quiz label hidden */
+
+  /* Pinned state — toggled by clicking .pq-toggle-btn (togglePQRow in
+     quiz-engine.js), which just flips this class on the row. */
+  .pq-row.show-q .pq-label-p { opacity: 0; }
+  .pq-row.show-q .pq-label-q { opacity: 1; }
+
+  /* Hover preview — hovering the button (not clicking it) previews the
+     P→Q flip while pinned to P, without touching the pinned class, so it
+     reverts the instant the hover ends. Deliberately one-directional:
+     once pinned to Q the button is already "on" (see .pq-toggle-btn.is-on
+     below), so hovering it again previews nothing — there's no unclear
+     state left to explain, and reverting to P on hover would read as the
+     button turning itself off just by looking at it. :has() lets the row
+     react to its own button's :hover; browsers without :has() support
+     just skip the preview and keep the plain click-toggle behavior. */
+  .pq-row:has(.pq-toggle-btn:hover):not(.show-q) .pq-label-p { opacity: 0; }
+  .pq-row:has(.pq-toggle-btn:hover):not(.show-q) .pq-label-q { opacity: 1; }
+
+  .pq-toggle-btn {
+    height: 1.7rem;
+    margin-left: auto; /* pushes to the right end of the row's flex-wrap */
+    padding: 0 0.55rem;
+    border: 1px solid var(--border);
+    border-radius: calc(4px * var(--radius-mult));
+    background: transparent;
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    cursor: pointer;
+    transition: color 0.15s ease, border-color 0.15s ease, background-color 0.15s ease;
+  }
+  .pq-toggle-btn:hover,
+  .pq-toggle-btn:focus-visible {
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+  /* Single-quiz rows still get the button (see pqToggleButton in
+     quiz-engine.js) so the row's layout doesn't shift depending on
+     whether toggling is possible — it's just disabled and faded instead
+     of hidden. pointer-events:none also stops the :has(.pq-toggle-btn:hover)
+     preview rule above from ever matching, on top of blocking the click. */
+  .pq-toggle-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+    pointer-events: none;
+  }
+  /* "On" state — pinned to Q. Filled instead of just outlined so it
+     reads as an active toggle at a glance, not just another hover-tint. */
+  .pq-row.show-q .pq-toggle-btn {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--on-accent, #fff);
+  }
+
+  /* ── Recent attempts (last 5) ── */
+  .recent-attempts-panel {
+    max-width: 760px;
+    margin: 1.2rem auto 0;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: calc(6px * var(--radius-mult));
+    padding: 1.2rem 1.5rem;
+    display: none;
+  }
+  .recent-attempts-panel.show { display: block; }
+
+  .recent-attempts-header {
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 0.9rem;
+  }
+  /* Grid (not flex) so the "boxes" column lines up at the same x on every
+     row. With a flex row per attempt, the boxes column started right after
+     the meta text — so a wider meta string on one row (e.g. a fractional
+     score "0.9/7", which is wider than "0/7" or "1/7") pushed that row's
+     boxes further right than the others. A grid auto-sizes each column to
+     its widest cell across ALL rows, so every row's meta column ends up the
+     same width and the boxes column always starts flush. Each
+     .recent-attempt-row is `display: contents` so its two children drop
+     straight into the grid's column tracks instead of being nested boxes
+     the grid can't see into. */
+  .recent-attempts-list {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    align-items: center;
+    row-gap: 0.8rem;
+    column-gap: 0.9rem;
+    margin-bottom: 1.1rem;
+  }
+  .recent-attempts-empty {
+    grid-column: 1 / -1;
+    font-size: 0.82rem;
+    color: var(--muted);
+    margin-bottom: 1.1rem;
+  }
+  .recent-attempt-row {
+    display: contents;
+  }
+  .recent-attempt-meta {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  .recent-attempt-meta .score {
+    color: var(--text);
+    font-weight: 600;
+    /* Right-aligned in a fixed-width slot so "0.9/7" and "0/7" occupy the
+       same width and don't shift the rest of the row's text (and in turn
+       the grid's own meta-column width, which is sized off this text). */
+    display: inline-block;
+    min-width: 2.8rem;
+    text-align: right;
+  }
+  .recent-attempt-boxes {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+  }
+  /* On narrow screens the "max-content 1fr" split leaves almost no width
+     for the boxes column once the meta text (e.g. "0/7 · Q1 · Kinematics
+     & Dynamics · 06 Sept") claims most of the row. With next to nothing
+     left for column 2, flex-wrap has no room to fit even one box per
+     line, so every box wraps onto its own line — a single-box-wide
+     column that spills downward past its own row and over the rows
+     below it, instead of the intended left-to-right wrap. Below 600px,
+     stack meta above boxes in one full-width column instead, so the
+     boxes get the whole row's width to wrap normally across multiple
+     boxes per line. */
+  @media (max-width: 600px) {
+    .recent-attempts-list {
+      grid-template-columns: 1fr;
+      row-gap: 0.5rem;
+    }
+    .recent-attempt-row {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 0.35rem;
+      padding-bottom: 0.6rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .recent-attempt-row:last-child {
+      padding-bottom: 0;
+      border-bottom: none;
+    }
+    .recent-attempt-boxes {
+      width: 100%;
+    }
+  }
+  /* The panel already provides the surrounding border, so a second boxed
+     button felt visually heavy. Treat this as a quiet footer action instead. */
+  .see-full-stats-btn {
+    width: 100%;
+    margin-top: 0.15rem;
+    padding: 0.85rem 0.15rem 0.05rem;
+    border: 0;
+    border-top: 1px solid var(--border);
+    border-radius: 0;
+    background: transparent;
+    color: var(--accent);
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    text-align: right;
+    opacity: 0.9;
+    transition: color 0.15s, opacity 0.15s, transform 0.15s;
+  }
+  .see-full-stats-btn:hover {
+    color: var(--text);
+    opacity: 1;
+    transform: translateX(2px);
+  }
+  .see-full-stats-btn:active {
+    opacity: 0.7;
+  }
+
+  /* Problem pills in the recent-attempts preview behave like the clickable
+     problem pills in the full Stats view: open that problem's forum thread. */
+  .recent-attempt-problem {
+    cursor: pointer;
+    user-select: none;
+    transition: transform 0.12s, filter 0.12s;
+  }
+  .recent-attempt-problem:hover {
+    filter: brightness(1.12);
+    transform: translateY(-1px);
+  }
+  .recent-attempt-problem:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
 
   /* ── Solve-all button ── */
   .solve-all-wrap {
@@ -1196,15 +2267,30 @@
   .btn-solve-all:hover { background: rgba(var(--accent-rgb),0.14); border-color: var(--accent); }
 
   /* ── Modal ── */
+  /* Fades in and out rather than popping: kept in the layout and hidden
+     with opacity + visibility (visibility flips only after the fade-out,
+     so the box stays visible while it fades and can't be clicked once it's
+     gone). Reduce motion makes the fade instant (css/settings.css). */
   .modal-backdrop {
-    display: none;
+    display: flex;
     position: fixed; inset: 0;
-    background: color-mix(in srgb, var(--shadow) calc(0.72 * 100%), transparent);
+    background: color-mix(in srgb, var(--backdrop, var(--shadow)) calc(0.72 * 100%), transparent);
     z-index: 900;
     align-items: center;
     justify-content: center;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transition: opacity .2s ease, visibility 0s linear .2s;
   }
-  .modal-backdrop.open { display: flex; }
+  .modal-backdrop.open {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+    transition: opacity .2s ease;
+  }
+  .modal-backdrop .modal-box { transform: scale(.97); transition: transform .2s ease; }
+  .modal-backdrop.open .modal-box { transform: none; }
 
   .modal-box {
     background: var(--surface);
@@ -1251,7 +2337,13 @@
     transition: all 0.18s;
     text-align: center;
   }
+  /* "(1, 2, 3...)" / "(32, 6, 102...)" under the Choose-the-order buttons.
+     Each shuffling number gets a fixed, right-aligned slot as wide as the
+     largest problem number, so the line never shifts as they change. */
+  .order-choice-sub { font-size: 0.68rem; color: var(--muted); white-space: nowrap; }
+  .order-choice-num { display: inline-block; text-align: right; }
   .modal-choice-btn:hover { border-color: var(--accent); color: var(--accent); background: rgba(var(--accent-rgb),0.07); }
+  .modal-choice-btn-danger:hover { border-color: var(--wrong); color: var(--wrong); background: rgba(var(--wrong-rgb),0.07); }
 
   .modal-close {
     position: absolute; top: 0.9rem; right: 1rem;
@@ -1267,23 +2359,6 @@
   }
   #solveAllMode.active {
     display: block;
-  }
-
-  /* ── Solve-all top row: hint recall (left) + main menu (right) ── */
-  .solve-top-row {
-    max-width: 760px;
-    margin: 0 auto 1.2rem;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.75rem;
-  }
-  .solve-top-row .hint-recall-wrap {
-    margin: 0;
-  }
-  /* Hide the main-menu button while the hint guide is open */
-  #guideSolve:not(.is-collapsed) ~ .solve-top-row .solve-top-row-menu {
-    display: none;
   }
 
   /* ── Solve-all title block: same look as the quiz-page header, plus a small "All Problems" tag ── */
@@ -1307,33 +2382,32 @@
     padding: 0.2rem 0.6rem;
   }
 
-  /* ── Solve-all actions row: reset / rerender — flush to the same edges as the problem boxes ── */
+  /* ── Solve-all actions row: the list button fills the row, reset keeps its
+     size at the right; flush to the same edges as the problem boxes ── */
   .solve-all-actions-row {
     max-width: 760px;
     margin: 0 auto 1.5rem;
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    flex-wrap: wrap;
-    row-gap: 0.6rem;
-    column-gap: 1rem;
+    gap: 1rem;
   }
 
-  .btn-rerender-eqs {
+  .btn-solution-list {
+    flex: 1;
+    min-width: 0;
     font-family: var(--mono);
     font-size: 0.74rem;
     letter-spacing: 0.06em;
-    border: 1px solid var(--accent);
+    border: 1px solid var(--border);
     border-radius: calc(4px * var(--radius-mult));
     padding: 0.35rem 0.85rem;
     cursor: pointer;
-    background: transparent;
-    color: var(--accent);
+    background: var(--surface);
+    color: var(--text);
     transition: all 0.15s;
     white-space: nowrap;
   }
-  .btn-rerender-eqs:hover { background: rgba(var(--accent-rgb),0.1); }
-  .btn-rerender-eqs:disabled { opacity: 0.5; cursor: default; }
+  .btn-solution-list:hover { border-color: var(--accent); color: var(--accent); }
 
   .btn-reset-progress {
     font-family: var(--mono);
@@ -1624,8 +2698,8 @@
   #stickyScore {
     display: none;
     position: fixed;
-    bottom: 1.5rem;
-    right: 1.5rem;
+    bottom: calc(1.5rem + env(safe-area-inset-bottom, 0px));
+    right: calc(1.5rem + env(safe-area-inset-right, 0px));
     z-index: 800;
     background: var(--surface);
     border: 1px solid var(--accent);
@@ -1637,6 +2711,18 @@
     text-align: center;
   }
   #stickyScore.visible { display: block; }
+  /* #stickyScore and #saNavRail (js/solve-all-nav.js) are position:fixed on
+     <body>, outside #appPage, so they stayed on screen when another screen
+     replaced #appPage: the Manual opened from Solve-All showed both on top of
+     it. They belong to #appPage, so they hide whenever it isn't the visible
+     screen or is fading out. One rule for every screen that opens over it
+     (Manual, Forum, Settings, Solution, ...); the per-screen rules in
+     css/settings.css, css/solutions.css and css/solve-all-nav.css predate it. */
+  body:has(#appPage:not(.visible)) #saNavRail,
+  body:has(#appPage:not(.visible)) #stickyScore.visible,
+  body:has(#appPage.fading-out) #stickyScore.visible {
+    display: none !important;
+  }
   .sticky-score-val {
     font-size: 1.4rem;
     font-weight: 600;
@@ -1679,6 +2765,54 @@
   .sticky-stat-num.s-partial { color: var(--partial); }
   .sticky-stat-num.s-wrong   { color: var(--wrong); }
 
+  /* ── Live quiz timer (floating "00:00" clock) ──
+     Same fixed bottom-right slot as #stickyScore — safe to reuse since the
+     two are never shown together (this one's Random 6/cumulative, that
+     one's Solve-All). Minutes get the accent color; seconds and the colon
+     are deliberately dimmed (opacity, not just a muted color) so the
+     ticking digit doesn't keep pulling the eye while working. Both digit
+     spans use a fixed `width: 2ch` (not min-width) in the monospace font
+     already used everywhere else — every digit has the same advance width,
+     so the colon between them never shifts as the numbers change. */
+  #liveQuizTimer {
+    display: none;
+    position: fixed;
+    bottom: calc(1.5rem + env(safe-area-inset-bottom, 0px));
+    right: calc(1.5rem + env(safe-area-inset-right, 0px));
+    z-index: 800;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: calc(6px * var(--radius-mult));
+    padding: 0.55rem 0.9rem;
+    font-family: var(--mono);
+    box-shadow: 0 4px 24px color-mix(in srgb, var(--shadow) calc(0.5 * 100%), transparent);
+  }
+  #liveQuizTimer.visible { display: block; }
+  .live-timer-min,
+  .live-timer-sec {
+    display: inline-block;
+    width: 2ch;
+    text-align: center;
+    font-size: 1.3rem;
+    font-weight: 700;
+    line-height: 1;
+  }
+  .live-timer-min {
+    color: var(--accent);
+  }
+  .live-timer-sec {
+    color: var(--muted);
+    opacity: 0.55; /* deliberately low-key — see block comment above */
+  }
+  .live-timer-colon {
+    display: inline-block;
+    color: var(--muted);
+    opacity: 0.55;
+    font-size: 1.3rem;
+    font-weight: 700;
+    line-height: 1;
+  }
+
   /* ── Solve-all retry / see-answer ── */
   .btn-retry {
     font-family: var(--mono);
@@ -1708,58 +2842,6 @@
   }
   .btn-see-answer:hover { border-color: var(--muted); color: var(--text); }
 
-  /* ── Mistakes quiz button in sticky score ── */
-  .sticky-retry-btn {
-    margin-top: 0.5rem;
-    width: 100%;
-    font-family: var(--mono);
-    font-size: 0.6rem;
-    letter-spacing: 0.06em;
-    border: 1px solid var(--wrong);
-    border-radius: calc(3px * var(--radius-mult));
-    padding: 0.28rem 0.5rem;
-    cursor: pointer;
-    background: rgba(var(--wrong-rgb),0.08);
-    color: var(--wrong);
-    transition: background 0.15s;
-    display: none;
-  }
-  .sticky-retry-btn:hover { background: rgba(var(--wrong-rgb),0.18); }
-  .sticky-retry-btn.visible { display: block; }
-
-  /* ── Mistakes quiz overlay ── */
-  #mistakesMode {
-    display: none;
-  }
-  #mistakesMode.active {
-    display: block;
-  }
-
-  .mistakes-header {
-    max-width: 760px;
-    margin: 0 auto 1.5rem;
-    display: flex;
-    align-items: center;
-    gap: 1rem;
-    flex-wrap: wrap;
-  }
-
-  .mistakes-title {
-    font-family: var(--mono);
-    font-size: 0.7rem;
-    letter-spacing: 0.16em;
-    text-transform: uppercase;
-    color: var(--wrong);
-    flex: 1;
-  }
-
-  #mistakesContainer {
-    max-width: 760px;
-    margin: 0 auto;
-    display: flex;
-    flex-direction: column;
-    gap: 1.4rem;
-  }
   /* ── Landing screen ── */
   #landingScreen {
     display: flex;
@@ -1783,12 +2865,33 @@
   }
 
   #choicePage {
+    /* position:fixed — not just a centered flex block in normal flow —
+       because appPage (up to 150 problems in solve-all mode) can still be
+       present in the DOM when this shows. Two call sites that reopen this
+       (resetSolveAll(), handleRemoteSolveAllReset()) already take care to
+       hide appPage first; startSelected()'s solve-all branch does too
+       (see its comment), as defense in depth. But relying on every future
+       caller to remember that is exactly the kind of thing that quietly
+       breaks again — with two normal-flow siblings both visible, this
+       page would just render as a block AFTER the entire appPage content,
+       so instead of appearing on screen it'd land wherever appPage's
+       bottom happened to be, several thousand pixels down a 150-problem
+       list. Fixed positioning makes that impossible: this always covers
+       the current viewport and stays centered regardless of scroll
+       position or what else is technically still in the DOM.
+       See #landingScreen just above, which shares the same
+       centered-flex-over-min-height-100vh pattern — it's never shown
+       "over" anything with real height behind it, so it hasn't needed
+       this, but the reasoning would carry over if that ever changes. */
+    position: fixed;
+    inset: 0;
     display: flex;
     align-items: center;
     justify-content: center;
-    min-height: 100vh;
     padding: 1.5rem;
     opacity: 1;
+    background: var(--bg);
+    z-index: 950;
     transition: opacity 0.35s ease;
   }
   #choicePage.hidden {
@@ -1893,6 +2996,9 @@
   .mc-splash:hover { filter: brightness(1.12); }
   .mc-splash:active { filter: brightness(0.94); }
   .mc-splash:empty { display: none; }
+  @media (prefers-reduced-motion: reduce) {
+    .mc-splash { animation: none !important; } /* also beats the phone-width mcSplashBounceFlat below */
+  }
   @keyframes mcSplashBounce {
     from { transform: translateX(-50%) rotate(9deg) scale(1);    }
     to   { transform: translateX(-50%) rotate(9deg) scale(1.14); }
@@ -2045,7 +3151,6 @@
     gap: 0.7rem;
     margin-bottom: 1.6rem;
   }
-
   .quiz-select-btn {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -2163,9 +3268,10 @@
   .landing-start-btn {
     width: 100%;
     font-family: var(--mono);
-    font-size: 0.92rem;
-    font-weight: 600;
-    letter-spacing: 0.08em;
+    font-size: 0.98rem;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
     border: none;
     border-radius: calc(6px * var(--radius-mult));
     padding: 0.85rem 1.5rem;
@@ -2207,6 +3313,21 @@
     border-radius: 50%;
     transition: transform 0.18s cubic-bezier(.4,0,.2,1);
     outline: none;
+    /* Field lines from js/changelog.js render on a full-screen overlay
+       canvas at z-index 9990 (appended to <body>, so it stacks at the
+       root, and deliberately below #update-banner/#bug-report-banner/
+       #theme-nudge-banner's 9997-9999 — the overlay used to sit at 9998,
+       level with #bug-report-banner, and on ties the later-appended
+       element wins, so the overlay could paint over a banner instead of
+       under it). Without a stacking context of its own, this button's +
+       sign (drawn on #chargeCanvas below) sits in normal flow underneath
+       that overlay — invisible whenever a field line's trajectory happens
+       to pass over the button, which for the dipole (opposite-sign) case
+       is often, since those lines are traced backward, physically flowing
+       INTO the button's +. Lifting the button above the overlay keeps the
+       sign visible no matter how the lines converge on it. */
+    position: relative;
+    z-index: 9991;
   }
   .changelog-btn:hover  { transform: scale(1.12); }
   .changelog-btn:active { transform: scale(0.95); }
@@ -2222,6 +3343,10 @@
     user-select: none;
   }
   .changelog-trigger-wrap:hover .changelog-btn-label { color: var(--accent); }
+  /* License name after "changelog" (see README's License section). */
+  .changelog-license-link { color: inherit; text-decoration: none; }
+  .changelog-license-link:hover,
+  .changelog-license-link:focus-visible { text-decoration: underline; }
 
   /* ── Changelog panel ── */
   .changelog-panel {
@@ -2333,14 +3458,64 @@
     opacity: 0.5;
   }
 
-  /* ── Gap where the other course's entries were filtered out ── */
+  /* ── Gap button where the other course's entries were filtered out —
+     deliberately styled as a pill/button (dashed border, centered,
+     rounded), NOT like a real .changelog-row, so it never reads as an
+     actual entry. Two overlapping spans swap on hover: the default
+     "N updates for another course" is replaced entirely by "tap to
+     reveal anyway" rather than appended to it, so hovering doesn't just
+     add noise to an already-read line. ── */
   .changelog-gap {
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+    position: relative;
     text-align: center;
     font-size: 0.68rem;
     font-style: italic;
     color: var(--muted);
-    opacity: 0.6;
-    margin: 0.45rem 0;
+    background: transparent;
+    border: 1px dashed var(--border);
+    border-radius: 999px;
+    padding: 0.3rem 0.7rem;
+    margin: 0.5rem 0;
+    cursor: pointer;
+    font-family: inherit;
+    line-height: inherit;
+    appearance: none;
+    -webkit-appearance: none;
+    transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+  }
+  .changelog-gap:hover,
+  .changelog-gap:focus-visible {
+    color: var(--accent);
+    border-color: var(--accent);
+    border-style: solid;
+    background: rgba(var(--accent-rgb), 0.08);
+    font-style: normal;
+  }
+  .changelog-gap-label {
+    display: block;
+  }
+  .changelog-gap-label-rest {
+    opacity: 1;
+  }
+  .changelog-gap-label-hover {
+    opacity: 0;
+    position: absolute;
+    inset: 0;
+    padding: inherit;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .changelog-gap:hover .changelog-gap-label-rest,
+  .changelog-gap:focus-visible .changelog-gap-label-rest {
+    opacity: 0;
+  }
+  .changelog-gap:hover .changelog-gap-label-hover,
+  .changelog-gap:focus-visible .changelog-gap-label-hover {
+    opacity: 1;
   }
 
   /* ── Individual changelog rows ── */
@@ -2402,6 +3577,9 @@
     font-size: 0.76rem;
     color: var(--muted);
     line-height: 1.4;
+    /* The landing screen around the panel centers its text; a note that
+       wraps should still read left-aligned under its first line. */
+    text-align: left;
   }
   .changelog-row.level-0 .changelog-note { color: var(--text); }
   .changelog-row.level-1 .changelog-note { color: var(--muted); }
@@ -2410,3 +3588,24 @@
   /* Light theme adjustments */
   body.light .changelog-btn-label { color: var(--muted); }
   body.light .changelog-dot.level-0 { box-shadow: 0 0 4px rgba(var(--accent-rgb),0.4); }
+
+
+/* ── Database offline (js/db-status.js) ──
+   Hidden until html.db-offline says the database is off, so a page can keep
+   an empty one wherever it matters. */
+.db-offline-box {
+  display: none;
+  margin: 0 0 1rem;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 0.86rem;
+  line-height: 1.5;
+  text-align: left;
+}
+.db-offline-box a { color: var(--accent); }
+html.db-offline .db-offline-box { display: block; }
