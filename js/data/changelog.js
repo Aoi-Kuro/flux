@@ -27,10 +27,13 @@
 // everyone who already used the site before it, never to first-time
 // visitors (js/splash.js, takeDeployMessage). '' = nothing special. Set or
 // clear it on every deploy; changing only the text shows it again too.
-const DEPLOY_MESSAGE = '';
+const DEPLOY_MESSAGE = 'You can now export customizable PDFs of problem sets!';
 
 // WARNING! The version has to be bumped in three places: here, in site-version.json ("version") and in quiz-engine.js
 const CHANGELOG = [
+  { version: "14.3.0", note: "Export PDF: customizable PDFs of any set (problems, order, space, answers, light or dark pages), with a link that checks whether your PDF is still up to date.", scope: 0 },
+  { version: "14.2.1", note: "Pixel avatars for visitors without an account; a more compact changelog.", scope: 0 },
+  { version: "14.2.1", note: "Set 4: all temperature answers recalculated in kelvins with high precision (273.15).", scope: 1 },
   { version: "14.2.0", note: "Footer, solutions while the database is offline, five solutions without an account, Stats tweaks.", scope: 0 },
   { version: "14.2.0", note: "First worked solution: Set 1, P17.", scope: 2 },
   { version: "14.1.0", note: "Sign up while the database is offline.", scope: 0 },
