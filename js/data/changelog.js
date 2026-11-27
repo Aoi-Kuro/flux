@@ -33,6 +33,7 @@ const DEPLOY_MESSAGE = '';
 // One entry per version as this course sees it: two entries with the same
 // version only for a major release (X.0.0, a headline plus its details).
 const CHANGELOG = [
+  { version: "15.0.0", note: "A collapsible filter bar with Apply filter, smoother animations, and a tidier Stats screen: the chart and its filters in one card, Problems and Topics with a set switch.", scope: 0 },
   { version: "14.5.2", note: "A right number with a unit the site can't read now earns 0.9; a warning for Cyrillic letters.", scope: 0 },
   { version: "14.5.1", note: "Updated auto-moderation; UX fixes.", scope: 0 },
   { version: "14.5.0", note: "Accounts can now be deleted by their owners.", scope: 0 },
